@@ -13,6 +13,201 @@ This project is a real-time transcription application that uses the OpenAI Whisp
 to convert speech input into text output. It can be used to transcribe both live audio
 input from microphone and pre-recorded audio files.
 
+## 中文快速导航（新增）
+
+本节是中文重排版，目标是让你按顺序完成：安装 -> 启动服务 -> 连接客户端。
+你要求的「现有内容不删除」已经遵守：本文件后半部分保留了原始英文章节与全部命令。
+
+- [安装教程（放最前）](#安装教程放最前)
+- [拉服务使用教程（按平台）](#拉服务使用教程按平台)
+- [其他内容](#其他内容)
+- [原始英文内容（完整保留）](#原始英文内容完整保留)
+
+## 安装教程（放最前）
+
+### 1. 通用前置依赖
+
+```bash
+bash scripts/setup.sh
+```
+
+```bash
+pip install whisper-live
+```
+
+### 2. macOS 安装
+
+`scripts/setup.sh` 在 macOS 上会使用 Homebrew 安装 `portaudio` 和 `wget`。
+
+```bash
+bash scripts/setup.sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install whisper-live
+```
+
+### 3. Windows 安装
+
+Windows 建议手动安装 Python 3.10+ 与 PortAudio 依赖后再安装包。
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install whisper-live
+```
+
+如果你在 Windows 上使用原生命令行遇到音频依赖问题，建议优先使用 WSL2 或 Docker 方式运行服务。
+
+### 4. Linux 安装
+
+Debian/Ubuntu、Fedora 均可。`scripts/setup.sh` 会自动识别并安装系统依赖。
+
+```bash
+bash scripts/setup.sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install whisper-live
+```
+
+Fedora 的 Python 3.12 虚拟环境（原文命令，保留）：
+
+```bash
+sudo dnf install -y python3.12 python3.12-pip
+python3.12 -m venv whisper_env
+source whisper_env/bin/activate
+```
+
+## 拉服务使用教程（按平台）
+
+### macOS
+
+服务端（faster_whisper）：
+
+```bash
+python3 run_server.py --port 9090 \
+                      --backend faster_whisper \
+                      --max_clients 4 \
+                      --max_connection_time 600
+```
+
+客户端（转写音频文件）：
+
+```bash
+python3 run_client.py --files <audio-file-name>
+```
+
+OpenAI REST 接口（服务端 + 客户端）：
+
+```bash
+python3 run_server.py --port 9090 --backend faster_whisper --max_clients 4 --max_connection_time 600 --enable_rest --cors-origins="http://localhost:8080,http://127.0.0.1:8080"
+python3 client_openai.py $AUDIO_FILE
+```
+
+### Windows
+
+服务端（faster_whisper）：
+
+```bash
+python run_server.py --port 9090 --backend faster_whisper --max_clients 4 --max_connection_time 600
+```
+
+客户端：
+
+```bash
+python run_client.py --files <audio-file-name> --server localhost --port 9090
+```
+
+说明：Windows 下路径建议使用绝对路径，音频驱动或编译依赖异常时建议改用 Docker 或 WSL2。
+
+### Linux
+
+服务端（faster_whisper）：
+
+```bash
+python3 run_server.py --port 9090 \
+                      --backend faster_whisper \
+                      --max_clients 4 \
+                      --max_connection_time 600
+```
+
+控制 OpenMP 线程（原文命令，保留）：
+
+```bash
+python3 run_server.py --port 9090 \
+                      --backend faster_whisper \
+                      --omp_num_threads 4
+```
+
+### Docker（推荐用于跨平台部署）
+
+GPU + Faster-Whisper：
+
+```bash
+docker run -it --gpus all -p 9090:9090 ghcr.io/collabora/whisperlive-gpu:latest
+```
+
+CPU + Faster-Whisper：
+
+```bash
+docker run -it -p 9090:9090 ghcr.io/collabora/whisperlive-cpu:latest
+```
+
+OpenVINO：
+
+```bash
+docker run -it --device=/dev/dri -p 9090:9090 ghcr.io/collabora/whisperlive-openvino
+```
+
+TensorRT（原文命令，保留）：
+
+```bash
+docker build . -f docker/Dockerfile.tensorrt -t whisperlive-tensorrt
+docker run -p 9090:9090 --runtime=nvidia --entrypoint /bin/bash -it whisperlive-tensorrt
+
+# Build small.en engine
+bash build_whisper_tensorrt.sh /app/TensorRT-LLM-examples small.en
+bash build_whisper_tensorrt.sh /app/TensorRT-LLM-examples small.en int8
+bash build_whisper_tensorrt.sh /app/TensorRT-LLM-examples small.en int4
+```
+
+## 其他内容
+
+### 支持的服务后端
+
+- `faster_whisper`
+- `tensorrt`
+- `openvino`
+
+### 自定义模型与缓存目录
+
+自定义 faster_whisper 模型与 cache 目录（原文命令，保留）：
+
+```bash
+python3 run_server.py --port 9090 \
+                      --backend faster_whisper \
+                      --max_clients 4 \
+                      --max_connection_time 600 \
+                      -fw "/path/to/custom/faster/whisper/model" \
+                      -c ~/.cache/whisper-live/
+```
+
+### Single model mode（原说明保留）
+
+当不显式指定模型时，服务默认可能会按连接实例化模型；使用 `-trt` 或 `-fw` 自定义模型时通常会复用单模型实例。若不希望如此，可设置 `--no_single_model`。
+
+### 浏览器扩展与 iOS 客户端
+
+- Chrome / Firefox 扩展：见原文 Browser Extensions 部分
+- iOS 客户端：见 `Audio-Transcription-iOS/README.md`
+
+### TensorRT 配置说明
+
+请参考 `TensorRT_whisper.md`。
+
+## 原始英文内容（完整保留）
+
+以下为仓库原始 README 内容，保持完整，便于与上面的中文重排版对照使用。
+
 - [Installation](#installation)
 - [Getting Started](#getting-started)
 - [Running the Server](#running-the-server)

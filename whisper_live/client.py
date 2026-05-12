@@ -151,7 +151,7 @@ class Client:
                 text.append(seg["text"].strip())
                 if i == len(segments) - 1 and not seg.get("completed", False):
                     self.last_segment = seg
-                elif self.server_backend == "faster_whisper" and seg.get("completed", False):
+                elif self.server_backend in ["faster_whisper", "mlx_whisper"] and seg.get("completed", False):
                     if translated:
                         if (not self.translated_transcript or float(seg['start']) >= float(self.translated_transcript[-1]['end'])):
                             self.translated_transcript.append(seg)

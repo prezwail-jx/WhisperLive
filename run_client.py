@@ -54,8 +54,17 @@ if __name__ == '__main__':
                           type=int,
                           default=4,
                           help='Number of transcript segments to display in terminal (default: 4).')
+    parser.add_argument('--same_output_threshold',
+                          type=int,
+                          default=None,
+                          help='Number of repeated partial outputs before committing a segment. '
+                               'Defaults to 2 for microphone input and 7 for file input.')
 
     args = parser.parse_args()
+
+    same_output_threshold = args.same_output_threshold
+    if same_output_threshold is None:
+        same_output_threshold = 7 if args.files else 2
 
     client = TranscriptionClient(
         args.server,
@@ -71,6 +80,7 @@ if __name__ == '__main__':
         target_language=args.target_language,              # Target language for translation, e.g., "fr
         enable_timestamps=args.enable_timestamps,
         display_segments=args.n_display_segments,
+        same_output_threshold=same_output_threshold,
     )
 
     if args.files is None:

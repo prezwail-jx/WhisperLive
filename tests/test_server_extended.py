@@ -172,6 +172,7 @@ class TestBackendType(unittest.TestCase):
         self.assertIn("faster_whisper", valid)
         self.assertIn("tensorrt", valid)
         self.assertIn("openvino", valid)
+        self.assertIn("mlx_whisper", valid)
 
     def test_is_valid(self):
         self.assertTrue(BackendType.is_valid("faster_whisper"))
@@ -182,6 +183,7 @@ class TestBackendType(unittest.TestCase):
         self.assertFalse(BackendType.FASTER_WHISPER.is_tensorrt())
         self.assertTrue(BackendType.TENSORRT.is_tensorrt())
         self.assertTrue(BackendType.OPENVINO.is_openvino())
+        self.assertTrue(BackendType.MLX_WHISPER.is_mlx_whisper())
 
     def test_enum_from_string(self):
         bt = BackendType("faster_whisper")

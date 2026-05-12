@@ -33,7 +33,7 @@ mic_test_resampled.wav
 
 # Local model and cache directories
 models/
-model/
+/model/
 .cache/
 
 # Logs and temporary files
