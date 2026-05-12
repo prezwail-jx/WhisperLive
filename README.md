@@ -81,25 +81,29 @@ source whisper_env/bin/activate
 
 ### macOS
 
-服务端（faster_whisper）：
+服务端（MLX，本地模型路径或 HF 仓库都可以）：
 
 ```bash
 python3 run_server.py --port 9090 \
-                      --backend faster_whisper \
+                      --backend mlx_whisper \
                       --max_clients 4 \
                       --max_connection_time 600
 ```
 
-客户端（转写音频文件）：
+客户端（转写音频文件，不外放声音；这里传你本地的 MLX 模型目录）：
 
 ```bash
-python3 run_client.py --files <audio-file-name>
+python3 run_client.py --server localhost --port 9090 \
+                      --files <audio-file-name> \
+                      --model /Users/xuan/Documents/program/Translate/model/whisper-medium-mlx \
+                      --lang en \
+                      --mute_audio_playback
 ```
 
-OpenAI REST 接口（服务端 + 客户端）：
+OpenAI REST 接口（如果你要保留 REST 模式，也建议先用 MLX 后端）：
 
 ```bash
-python3 run_server.py --port 9090 --backend faster_whisper --max_clients 4 --max_connection_time 600 --enable_rest --cors-origins="http://localhost:8080,http://127.0.0.1:8080"
+python3 run_server.py --port 9090 --backend mlx_whisper --max_clients 4 --max_connection_time 600 --enable_rest --cors-origins="http://localhost:8080,http://127.0.0.1:8080"
 python3 client_openai.py $AUDIO_FILE
 ```
 
@@ -177,6 +181,7 @@ bash build_whisper_tensorrt.sh /app/TensorRT-LLM-examples small.en int4
 - `faster_whisper`
 - `tensorrt`
 - `openvino`
+- `mlx_whisper`
 
 ### 自定义模型与缓存目录
 
