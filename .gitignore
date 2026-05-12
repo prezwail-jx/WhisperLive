@@ -1,0 +1,49 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+venv-*/
+env/
+ENV/
+
+# Packaging and build output
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Local runtime output
+chunks/
+output.srt
+output_translated.srt
+transcript*.srt
+*_resampled.wav
+output_recording.wav
+mic_test.wav
+mic_test_resampled.wav
+
+# Local model and cache directories
+models/
+model/
+.cache/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+.DS_Store
+
+# IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
