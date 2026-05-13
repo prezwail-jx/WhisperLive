@@ -357,6 +357,7 @@ python scripts/meeting_log_to_docx.py meeting-log.json --output meeting.docx
 - “清空”按钮只清空页面显示。
 - “清空日志”会清空完整会议记录。
 - 刷新页面会丢失浏览器内存中的会议日志，导出前不要刷新。
+- 需要把文件json路径改到项目目录并改名为meeting-log.json。
 
 ### 自动下载模型
 

@@ -41,6 +41,9 @@ models/
 *.tmp
 *.temp
 .DS_Store
+*.docx
+*.json
+
 
 # IDE/editor files
 .idea/
