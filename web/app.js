@@ -143,11 +143,12 @@ function downsampleTo16k(input, inputSampleRate) {
 function sendConfig() {
   uid = createUid();
   const selectedLanguage = elements.language.value || null;
+  const selectedModel = elements.model.value;
   const payload = {
     uid,
     language: selectedLanguage,
     task: "transcribe",
-    model: elements.model.value,
+    model: selectedModel.startsWith("model/") ? selectedModel : `model/asr/${selectedModel}`,
     use_vad: true,
     send_last_n_segments: Number(elements.segments.value || 8),
     no_speech_thresh: 0.45,

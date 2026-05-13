@@ -221,10 +221,10 @@ http://localhost:8080
 ws://localhost:9090
 ```
 
-同一局域网内，假设后端机器 IP 是 `192.168.31.8`：
+同一局域网内，假设后端机器 IP 是 `192.xxx.xx.x`：
 
 ```text
-ws://192.168.31.8:9090
+ws://192.xxx.xx.x
 ```
 
 然后点击“开始”，允许浏览器麦克风权限。
@@ -234,13 +234,13 @@ ws://192.168.31.8:9090
 如果服务端在家里主机，客户端在手边电脑，且已经有公网 SSH 入口，例如：
 
 ```text
-paul@ub.tuitujk.com -p 2233
+xxxx@ub.xxxxxx.com -p 2233
 ```
 
 推荐在客户端机器上开 SSH 隧道：
 
 ```bash
-ssh -p 2233 -L 9090:localhost:9090 paul@ub.tuitujk.com
+ssh -p 2233 -L 9090:localhost:9090 xxxx@ub.xxxxxx.com
 ```
 
 然后客户端本地启动 Web 页面：
@@ -262,13 +262,13 @@ http://localhost:8080
 ws://localhost:9090
 ```
 
-如果 Web 页面也跑在家里主机，可以同时转发 `8080`：
+如果 Web 页面也跑在服务器主机，可以同时转发 `8080`：
 
 ```bash
 ssh -p 2233 \
   -L 9090:localhost:9090 \
   -L 8080:localhost:8080 \
-  paul@ub.tuitujk.com
+  xxxx@ub.xxxxxx.com
 ```
 
 然后浏览器打开 `http://localhost:8080`。
@@ -315,6 +315,75 @@ model/opus-mt-en-zh
 
 当前实现按本次会话识别出的主语言选择翻译方向。如果同一场会议里频繁中英文混说，后续可以增加 segment 级语言检测来逐句切换翻译方向。
 
+### 自动下载模型
+
+项目提供统一下载脚本：
+
+```bash
+pip install -r requirements/model_download.txt
+```
+
+默认下载翻译模型到当前代码使用的目录：
+
+```bash
+python scripts/download_models.py --translation
+```
+
+下载 ASR 模型：
+
+```bash
+python scripts/download_models.py --model large-v3-turbo
+```
+
+下载全部内置模型：
+
+```bash
+python scripts/download_models.py --all
+```
+
+默认目录结构：
+
+```text
+model/asr/tiny
+model/asr/tiny.en
+model/asr/base
+model/asr/base.en
+model/asr/small
+model/asr/small.en
+model/asr/medium
+model/asr/medium.en
+model/asr/large-v3-turbo
+model/asr/large-v3
+model/opus-mt-zh-en
+model/opus-mt-en-zh
+```
+
+脚本默认使用 `--source auto`：先尝试魔搭 ModelScope，如果没有配置对应魔搭模型 ID 或下载失败，再使用 Hugging Face 兜底。只使用 Hugging Face：
+
+```bash
+python scripts/download_models.py --all --source huggingface
+```
+
+只使用魔搭：
+
+```bash
+python scripts/download_models.py --all --source modelscope
+```
+
+使用：
+
+```bash
+python scripts/download_models.py --all --manifest modelscope_models.json
+```
+
+Web 前端会把模型选项自动映射到本地 ASR 目录，例如：
+
+```text
+large-v3-turbo -> model/asr/large-v3-turbo
+```
+
+因此预下载后，启动服务时不需要再临时下载 ASR 模型。
+
 TensorRT（原文命令，保留）：
 
 ```bash
@@ -335,6 +404,51 @@ bash build_whisper_tensorrt.sh /app/TensorRT-LLM-examples small.en int4
 - `tensorrt`
 - `openvino`
 - `mlx_whisper`
+
+### 预下载模型
+
+如果你想在启动服务前预先下载模型（避免首次启动时自动下载），可以使用 `scripts/download_models.py` 脚本：
+
+**下载所有 ASR 模型和翻译模型：**
+```bash
+python scripts/download_models.py --all
+```
+
+**只下载 ASR 模型：**
+```bash
+python scripts/download_models.py --asr
+```
+
+**只下载翻译模型：**
+```bash
+python scripts/download_models.py --translation
+```
+
+**下载指定模型（可多次使用 --model）：**
+```bash
+python scripts/download_models.py --model tiny --model base --model small
+```
+
+**使用自定义模型目录：**
+```bash
+python scripts/download_models.py --all --model-dir /path/to/models
+```
+
+**从指定源下载（auto 会先尝试 ModelScope，再尝试 Hugging Face）：**
+```bash
+python scripts/download_models.py --asr --source huggingface
+```
+
+**支持的模型列表（ASR）：**
+- `tiny`, `tiny.en`
+- `base`, `base.en`
+- `small`, `small.en`
+- `medium`, `medium.en`
+- `large-v3`, `large-v3-turbo`
+
+**支持的翻译模型：**
+- `opus-mt-zh-en` (中文 → 英文)
+- `opus-mt-en-zh` (英文 → 中文)
 
 ### 自定义模型与缓存目录
 
