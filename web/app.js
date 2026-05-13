@@ -8,6 +8,8 @@ const elements = {
   segments: document.getElementById("segmentsInput"),
   start: document.getElementById("startButton"),
   stop: document.getElementById("stopButton"),
+  exportLog: document.getElementById("exportLogButton"),
+  clearLog: document.getElementById("clearLogButton"),
   status: document.getElementById("connectionStatus"),
   languageStatus: document.getElementById("languageStatus"),
   sampleRateStatus: document.getElementById("sampleRateStatus"),
@@ -27,6 +29,11 @@ let uid = null;
 let isServerReady = false;
 let sourceSegments = [];
 let translatedSegments = [];
+let fullSourceLog = [];
+let fullTranslationLog = [];
+let meetingId = createUid();
+let meetingStartedAt = new Date().toISOString();
+let currentConfig = null;
 
 function getDisplayLimit() {
   const limit = Number(elements.segments.value || 8);
@@ -43,6 +50,67 @@ function createUid() {
 function setStatus(text, state = "idle") {
   elements.status.textContent = text;
   elements.status.className = `status ${state}`;
+}
+
+function segmentKey(segment) {
+  return `${segment.start || ""}|${segment.end || ""}`;
+}
+
+function upsertCompletedSegment(log, segment) {
+  if (!segment.completed || !segment.text || !segment.text.trim()) {
+    return;
+  }
+  const key = segmentKey(segment);
+  const normalized = { ...segment, text: segment.text.trim() };
+  const index = log.findIndex((item) => segmentKey(item) === key);
+  if (index >= 0) {
+    log[index] = normalized;
+  } else {
+    log.push(normalized);
+  }
+  log.sort((a, b) => Number(a.start) - Number(b.start));
+}
+
+function updateMeetingLog(segments, log) {
+  segments.forEach((segment) => upsertCompletedSegment(log, segment));
+}
+
+function buildMeetingLog() {
+  return {
+    meeting_id: meetingId,
+    created_at: meetingStartedAt,
+    exported_at: new Date().toISOString(),
+    server: elements.server.value.trim(),
+    model: currentConfig ? currentConfig.model : elements.model.value,
+    source_language: elements.language.value || null,
+    translation_mode: "auto",
+    source_segments: fullSourceLog,
+    translation_segments: fullTranslationLog,
+  };
+}
+
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportMeetingLog() {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  downloadJson(`meeting-log-${timestamp}.json`, buildMeetingLog());
+}
+
+function clearMeetingLog() {
+  fullSourceLog = [];
+  fullTranslationLog = [];
+  meetingId = createUid();
+  meetingStartedAt = new Date().toISOString();
 }
 
 function renderSegments(target, segments, emptyText) {
@@ -106,11 +174,13 @@ function handleMessage(event) {
 
   if (message.segments) {
     sourceSegments = message.segments.slice();
+    updateMeetingLog(message.segments, fullSourceLog);
     renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
   }
 
   if (message.translated_segments) {
     translatedSegments = message.translated_segments.slice();
+    updateMeetingLog(message.translated_segments, fullTranslationLog);
     updateDirection(translatedSegments[translatedSegments.length - 1]);
     renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
   }
@@ -160,6 +230,7 @@ function sendConfig() {
     zh_en_model_path: "model/opus-mt-zh-en",
     en_zh_model_path: "model/opus-mt-en-zh",
   };
+  currentConfig = payload;
   socket.send(JSON.stringify(payload));
 }
 
@@ -260,6 +331,10 @@ elements.stop.addEventListener("click", () => {
   setStatus("停止中", "busy");
   stopCapture(true);
 });
+
+elements.exportLog.addEventListener("click", exportMeetingLog);
+
+elements.clearLog.addEventListener("click", clearMeetingLog);
 
 elements.clearSource.addEventListener("click", () => {
   sourceSegments = [];

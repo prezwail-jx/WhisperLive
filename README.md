@@ -190,6 +190,27 @@ python run_server.py \
   --max_connection_time 600
 ```
 
+多 Web client 并发测试时建议开启批处理推理，并指定一个本地 ASR 模型作为共享模型：
+
+```bash
+python run_server.py \
+  --port 9090 \
+  --backend faster_whisper \
+  --max_clients 4 \
+  --max_connection_time 600 \
+  --batch_inference \
+  --batch_max_size 4 \
+  --batch_window_ms 100 \
+  -fw model/asr/base
+```
+
+说明：
+
+- `--batch_inference` 用于多 client 并发时把请求合并成批处理，提升 GPU 利用率。
+- `-fw model/asr/base` 会强制所有 client 使用同一个本地模型，批处理模式下更稳定。
+- 如果要测更大模型，把 `model/asr/base` 改成 `model/asr/small` 或 `model/asr/large-v3-turbo`。
+- `--max_clients` 控制允许连接的 Web client 数量；第 `max_clients + 1` 个 client 会进入等待。
+
 服务端对外提供的核心端口是：
 
 ```text
@@ -314,6 +335,28 @@ model/opus-mt-en-zh
 ```
 
 当前实现按本次会话识别出的主语言选择翻译方向。如果同一场会议里频繁中英文混说，后续可以增加 segment 级语言检测来逐句切换翻译方向。
+
+### 会议日志导出与 Word 转换
+
+Web 前端会保留完整会议日志，页面仍然只显示最近 N 段字幕。会议结束后点击页面上的“导出日志”，会下载一个 JSON 文件，里面包含原文和翻译：
+
+```text
+source_segments
+translation_segments
+```
+
+如果要把 JSON 转成 Word：
+
+```bash
+pip install -r requirements/docx.txt
+python scripts/meeting_log_to_docx.py meeting-log.json --output meeting.docx
+```
+
+说明：
+
+- “清空”按钮只清空页面显示。
+- “清空日志”会清空完整会议记录。
+- 刷新页面会丢失浏览器内存中的会议日志，导出前不要刷新。
 
 ### 自动下载模型
 
@@ -607,7 +650,7 @@ This will connect to the localhost server running on port 9090 by default. Use f
 Here are the details of client instance implemented in `run_client.py` script:
   - `lang`: Language of the input audio, applicable only if using a multilingual model.
   - `translate`: If set to `True` then translate from any language to `en`.
-  - `model`: Whisper model size.
+  - `model`: Whisper model path or size. This fork defaults to local `model/asr/small` when available.
   - `use_vad`: Whether to use `Voice Activity Detection` on the server.
   - `save_output_recording`: Set to True to save the microphone input as a `.wav` file during live transcription. This option is helpful for recording sessions for later playback or analysis. Defaults to `False`. 
   - `output_recording_filename`: Specifies the `.wav` file path where the microphone input will be saved if `save_output_recording` is set to `True`.
@@ -622,7 +665,7 @@ client = TranscriptionClient(
   9090,
   lang="en",
   translate=False,
-  model="small",                                      # also support hf_model => `Systran/faster-whisper-small`
+  model="model/asr/small",                            # also supports hf_model => `Systran/faster-whisper-small`
   use_vad=False,
   save_output_recording=True,                         # Only used for microphone input, False by Default
   output_recording_filename="./output_recording.wav", # Only used for microphone input

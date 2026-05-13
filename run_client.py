@@ -25,7 +25,7 @@ if __name__ == '__main__':
                           help='output recording filename, only used for microphone input.')
     parser.add_argument('--model', '-m',
                           type=str,
-                          default='small',
+                          default='model/asr/small',
                           help='Model to use for transcription, e.g., "tiny, small.en, large-v3".')
     parser.add_argument('--lang', '-l',
                           type=str,

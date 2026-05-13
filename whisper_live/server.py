@@ -170,6 +170,11 @@ class BackendType(Enum):
 
 class TranscriptionServer:
     RATE = 16000
+    LOCAL_ASR_MODEL_ROOT = "model/asr"
+    LOCAL_ASR_MODEL_NAMES = {
+        "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+        "medium", "medium.en", "large-v3-turbo", "large-v3",
+    }
 
     def __init__(self):
         self.client_manager = None
@@ -178,6 +183,13 @@ class TranscriptionServer:
         self.single_model = False
         self.batch_config = None
         self.raw_pcm_input = False
+
+    def resolve_asr_model_path(self, model):
+        if model in self.LOCAL_ASR_MODEL_NAMES:
+            local_model = os.path.join(self.LOCAL_ASR_MODEL_ROOT, model)
+            if os.path.isdir(local_model):
+                return local_model
+        return model
 
     def initialize_client(
         self, websocket, options, faster_whisper_custom_model_path,
@@ -308,6 +320,8 @@ class TranscriptionServer:
                 if faster_whisper_custom_model_path is not None:
                     logging.info(f"Using custom model {faster_whisper_custom_model_path}")
                     options["model"] = faster_whisper_custom_model_path
+                else:
+                    options["model"] = self.resolve_asr_model_path(options["model"])
                 client = ServeClientFasterWhisper(
                     websocket,
                     language=options["language"],
@@ -581,7 +595,7 @@ class TranscriptionServer:
 
                 if model != "whisper-1":
                     logging.warning(f"Model '{model}' requested; using 'small' as fallback.")
-                model_name = faster_whisper_custom_model_path or "small"
+                model_name = faster_whisper_custom_model_path or self.resolve_asr_model_path("small")
 
                 try:
                     suffix = os.path.splitext(file.filename)[1] or ".wav"

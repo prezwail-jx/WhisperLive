@@ -154,6 +154,7 @@ button:disabled {
 }
 
 #stopButton,
+#clearLogButton,
 .pane button {
   background: transparent;
   color: var(--ink);
