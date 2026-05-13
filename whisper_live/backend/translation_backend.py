@@ -1,15 +1,91 @@
 import json
 import logging
-import threading
-import time
 import queue
-from typing import Dict, Any, Optional
+from typing import Optional
 import torch
-import threading
-from transformers import M2M100ForConditionalGeneration
-from whisper_live.backend.tokenization_small100 import SMALL100Tokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 from whisper_live.backend.base import ServeClientBase
+
+
+class HelsinkiZhEnTranslator:
+    """Local zh<->en translator backed by two Marian/Helsinki models."""
+
+    SUPPORTED_TARGETS = {"auto", "zh", "en"}
+
+    def __init__(
+        self,
+        zh_en_model_path="model/opus-mt-zh-en",
+        en_zh_model_path="model/opus-mt-en-zh",
+    ):
+        self.zh_en_model_path = zh_en_model_path
+        self.en_zh_model_path = en_zh_model_path
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.models = {}
+        self.tokenizers = {}
+
+    def load(self):
+        logging.info(f"Loading Helsinki zh-en translation models on device: {self.device}")
+        self.tokenizers["zh-en"] = AutoTokenizer.from_pretrained(self.zh_en_model_path)
+        self.models["zh-en"] = AutoModelForSeq2SeqLM.from_pretrained(
+            self.zh_en_model_path
+        ).to(self.device)
+        self.tokenizers["en-zh"] = AutoTokenizer.from_pretrained(self.en_zh_model_path)
+        self.models["en-zh"] = AutoModelForSeq2SeqLM.from_pretrained(
+            self.en_zh_model_path
+        ).to(self.device)
+        logging.info("Helsinki zh-en translation models loaded successfully")
+
+    @staticmethod
+    def normalize_language(language: Optional[str]) -> Optional[str]:
+        if not language:
+            return None
+        language = language.lower().replace("_", "-")
+        if language == "zh" or language.startswith("zh-"):
+            return "zh"
+        if language == "en" or language.startswith("en-"):
+            return "en"
+        return language
+
+    def resolve_direction(self, source_language: Optional[str], target_language: str):
+        source_language = self.normalize_language(source_language)
+        target_language = self.normalize_language(target_language) or "auto"
+
+        if target_language not in self.SUPPORTED_TARGETS:
+            logging.warning(f"Unsupported target language for Helsinki zh-en translator: {target_language}")
+            return None
+        if source_language == "zh" and target_language in ("auto", "en"):
+            return "zh-en", "en"
+        if source_language == "en" and target_language in ("auto", "zh"):
+            return "en-zh", "zh"
+        if source_language in ("zh", "en") and target_language == source_language:
+            return None
+
+        logging.warning(f"Unsupported source language for Helsinki zh-en translator: {source_language}")
+        return None
+
+    def translate(self, text: str, source_language: Optional[str], target_language: str):
+        direction = self.resolve_direction(source_language, target_language)
+        if direction is None:
+            return text, self.normalize_language(source_language), self.normalize_language(target_language)
+
+        model_key, resolved_target_language = direction
+        tokenizer = self.tokenizers[model_key]
+        model = self.models[model_key]
+
+        encoded_input = tokenizer(text, return_tensors="pt", truncation=True).to(self.device)
+        with torch.no_grad():
+            generated_tokens = model.generate(**encoded_input)
+        output = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+        return (
+            output[0] if output else text,
+            self.normalize_language(source_language),
+            resolved_target_language,
+        )
+
+    def cleanup(self):
+        self.models.clear()
+        self.tokenizers.clear()
 
 
 class ServeClientTranslation(ServeClientBase):
@@ -24,9 +100,11 @@ class ServeClientTranslation(ServeClientBase):
         client_uid,
         websocket,
         translation_queue,
-        target_language="fr", 
+        target_language="auto",
         send_last_n_segments=10,
-        model_name="alirezamsh/small100"
+        model_name="helsinki_zh_en",
+        zh_en_model_path="model/opus-mt-zh-en",
+        en_zh_model_path="model/opus-mt-en-zh",
     ):
         """
         Initialize the translation client.
@@ -35,7 +113,7 @@ class ServeClientTranslation(ServeClientBase):
             client_uid (str): Unique identifier for the client
             websocket: WebSocket connection to the client
             translation_queue (queue.Queue): Queue containing completed segments to translate
-            target_language (str): Target language code (default: "fr" for French)
+            target_language (str): Target language code or "auto" for zh<->en
             send_last_n_segments (int): Number of recent translated segments to send
             model_name (str): Translation model name to use
         """
@@ -43,34 +121,31 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_queue = translation_queue
         self.target_language = target_language
         self.model_name = model_name
+        self.zh_en_model_path = zh_en_model_path
+        self.en_zh_model_path = en_zh_model_path
         self.translated_segments = []
-        self.translation_model = None
-        self.tokenizer = None
-        self.device = None
+        self.translator = None
         self.model_loaded = False
         self.load_translation_model()
         
     def load_translation_model(self):
         """Load the translation model and tokenizer."""
         try:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            logging.info(f"Loading translation model on device: {self.device}")
-            
-            self.translation_model = M2M100ForConditionalGeneration.from_pretrained(
-                self.model_name
-            ).to(self.device)
-            self.tokenizer = SMALL100Tokenizer.from_pretrained(self.model_name)
-            self.tokenizer.tgt_lang = self.target_language
-            
+            if self.model_name != "helsinki_zh_en":
+                raise ValueError(f"Unsupported translation model provider: {self.model_name}")
+            self.translator = HelsinkiZhEnTranslator(
+                zh_en_model_path=self.zh_en_model_path,
+                en_zh_model_path=self.en_zh_model_path,
+            )
+            self.translator.load()
             self.model_loaded = True
             logging.info(f"Translation model loaded successfully. Target language: {self.target_language}")
         except Exception as e:
             logging.error(f"Failed to load translation model: {e}")
-            self.translation_model = None
-            self.tokenizer = None
+            self.translator = None
             self.model_loaded = False
     
-    def translate_text(self, text: str) -> str:
+    def translate_text(self, text: str, source_language: Optional[str]):
         """
         Translate a single text segment.
         
@@ -80,24 +155,14 @@ class ServeClientTranslation(ServeClientBase):
         Returns:
             str: Translated text or original text if translation fails
         """
-        if not self.model_loaded or not text.strip():
-            return text
+        if not self.model_loaded or not self.translator or not text.strip():
+            return text, source_language, self.target_language
             
         try:
-            # Encode input and move to device
-            encoded_input = self.tokenizer(text, return_tensors="pt").to(self.device)
-            
-            # Generate translation
-            with torch.no_grad():
-                generated_tokens = self.translation_model.generate(**encoded_input)
-            
-            # Decode output
-            output = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-            return output[0] if output else text
-            
+            return self.translator.translate(text, source_language, self.target_language)
         except Exception as e:
             logging.error(f"Translation failed for text '{text}': {e}")
-            return text
+            return text, source_language, self.target_language
     
     def process_translation_queue(self):
         """
@@ -123,7 +188,11 @@ class ServeClientTranslation(ServeClientBase):
                     
                 # Translate the segment
                 original_text = segment.get("text", "")
-                translated_text = self.translate_text(original_text)
+                source_language = segment.get("language")
+                translated_text, source_language, target_language = self.translate_text(
+                    original_text,
+                    source_language,
+                )
                 
                 # Create translated segment
                 translated_segment = {
@@ -131,7 +200,9 @@ class ServeClientTranslation(ServeClientBase):
                     "end": segment["end"],
                     "text": translated_text,
                     "completed": segment.get("completed", False),
-                    "target_language": self.target_language
+                    "source_language": source_language,
+                    "target_language": target_language,
+                    "translation_model": self.model_name,
                 }
                 
                 self.translated_segments.append(translated_segment)
@@ -191,9 +262,7 @@ class ServeClientTranslation(ServeClientBase):
             language (str): New target language code
         """
         self.target_language = language
-        if self.tokenizer:
-            self.tokenizer.tgt_lang = language
-            logging.info(f"Target language changed to: {language}")
+        logging.info(f"Target language changed to: {language}")
     
     def cleanup(self):
         """Clean up translation resources."""
@@ -207,12 +276,9 @@ class ServeClientTranslation(ServeClientBase):
         
         self.translated_segments.clear()
         
-        if self.translation_model:
-            del self.translation_model
-            self.translation_model = None
-        if self.tokenizer:
-            del self.tokenizer
-            self.tokenizer = None
-        
-        if self.device and self.device.type == 'cuda':
+        if self.translator:
+            self.translator.cleanup()
+            self.translator = None
+
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()

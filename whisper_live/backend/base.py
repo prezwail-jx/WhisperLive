@@ -128,7 +128,8 @@ class ServeClientBase(object):
             'start': "{:.3f}".format(start),
             'end': "{:.3f}".format(end),
             'text': text,
-            'completed': completed
+            'completed': completed,
+            'language': getattr(self, "language", None)
         }
 
     def add_frames(self, frame_np):

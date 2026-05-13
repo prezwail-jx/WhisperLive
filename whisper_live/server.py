@@ -194,7 +194,7 @@ class TranscriptionServer:
         translation_thread = None
         
         if enable_translation:
-            target_language = options.get("target_language", "fr")
+            target_language = options.get("target_language", "auto")
             translation_queue = queue.Queue(maxsize=ServeClientBase.MAX_TRANSLATION_QUEUE_SIZE)
             from whisper_live.backend.translation_backend import ServeClientTranslation
             translation_client = ServeClientTranslation(
@@ -202,7 +202,10 @@ class TranscriptionServer:
                 websocket=websocket,
                 translation_queue=translation_queue,
                 target_language=target_language,
-                send_last_n_segments=options.get("send_last_n_segments", 10)
+                send_last_n_segments=options.get("send_last_n_segments", 10),
+                model_name=options.get("translation_provider", "helsinki_zh_en"),
+                zh_en_model_path=options.get("zh_en_model_path", "model/opus-mt-zh-en"),
+                en_zh_model_path=options.get("en_zh_model_path", "model/opus-mt-en-zh"),
             )
             
             # Start translation thread

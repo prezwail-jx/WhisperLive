@@ -38,7 +38,10 @@ class Client:
         same_output_threshold=10,
         transcription_callback=None,
         enable_translation=False,
-        target_language="fr",
+        target_language="auto",
+        translation_provider="helsinki_zh_en",
+        zh_en_model_path="model/opus-mt-zh-en",
+        en_zh_model_path="model/opus-mt-en-zh",
         translation_callback=None,
         translation_srt_file_path="output_translated.srt",
         enable_timestamps=False,
@@ -66,7 +69,7 @@ class Client:
             same_output_threshold (int, optional): Number of repeated outputs before considering it as a valid segment. Defaults to 10.
             transcription_callback (callable, optional): A callback function to handle transcription results. Default is None.
             enable_translation (float, optional): Whether to enable translation from any to any language. Defaults to False.
-            target_language (str, optional): Target language for translation. Defaults to 'fr'.
+            target_language (str, optional): Target language for translation. Defaults to 'auto'.
             translation_callback (callable, optional): A callback function to handle translation results. Default is None.
             translation_srt_file_path (str, optional): The file path to save the translated output SRT file. Default is "output_translated.srt".
         """
@@ -94,6 +97,9 @@ class Client:
         # Translation-specific attributes
         self.enable_translation = enable_translation
         self.target_language = target_language
+        self.translation_provider = translation_provider
+        self.zh_en_model_path = zh_en_model_path
+        self.en_zh_model_path = en_zh_model_path
         self.translation_callback = translation_callback
         self.translation_srt_file_path = translation_srt_file_path
         self.last_translated_segment = None
@@ -142,6 +148,11 @@ class Client:
             self.server_error = True
         elif status == "WARNING":
             print(f"Message from Server: {message_data['message']}")
+
+    def get_translation_display_language(self):
+        if self.target_language != "auto" or not self.translated_transcript:
+            return self.target_language
+        return self.translated_transcript[-1].get("target_language", self.target_language)
 
     def process_segments(self, segments, translated=False):
         """Processes transcript segments."""
@@ -197,7 +208,7 @@ class Client:
                 utils.print_transcript(original_text_with_timestamps, timestamps=True)
 
                 if self.enable_translation:
-                    print(f"\n\nTRANSLATION to {self.target_language}:")
+                    print(f"\n\nTRANSLATION to {self.get_translation_display_language()}:")
                     utils.print_transcript([
                         {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
                         for seg in self.translated_transcript[-self.display_segments:]
@@ -211,7 +222,7 @@ class Client:
                 utils.print_transcript(original_text)
 
                 if self.enable_translation:
-                    print(f"\n\nTRANSLATION to {self.target_language}:")
+                    print(f"\n\nTRANSLATION to {self.get_translation_display_language()}:")
                     utils.print_transcript([seg["text"] for seg in self.translated_transcript[-self.display_segments:]], translated=True)
 
 
@@ -299,6 +310,9 @@ class Client:
                     "same_output_threshold": self.same_output_threshold,
                     "enable_translation": self.enable_translation,
                     "target_language": self.target_language,
+                    "translation_provider": self.translation_provider,
+                    "zh_en_model_path": self.zh_en_model_path,
+                    "en_zh_model_path": self.en_zh_model_path,
                 }
             )
         )
@@ -815,7 +829,10 @@ class TranscriptionClient(TranscriptionTeeClient):
         same_output_threshold=10,
         transcription_callback=None,
         enable_translation=False,
-        target_language="fr",
+        target_language="auto",
+        translation_provider="helsinki_zh_en",
+        zh_en_model_path="model/opus-mt-zh-en",
+        en_zh_model_path="model/opus-mt-en-zh",
         translation_callback=None,
         translation_srt_file_path="./output_translated.srt",
         enable_timestamps=False,
@@ -838,6 +855,9 @@ class TranscriptionClient(TranscriptionTeeClient):
             transcription_callback=transcription_callback,
             enable_translation=enable_translation,
             target_language=target_language,
+            translation_provider=translation_provider,
+            zh_en_model_path=zh_en_model_path,
+            en_zh_model_path=en_zh_model_path,
             translation_callback=translation_callback,
             translation_srt_file_path=translation_srt_file_path,
             enable_timestamps=enable_timestamps,

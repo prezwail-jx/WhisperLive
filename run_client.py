@@ -29,7 +29,7 @@ if __name__ == '__main__':
                           help='Model to use for transcription, e.g., "tiny, small.en, large-v3".')
     parser.add_argument('--lang', '-l',
                           type=str,
-                          default='en',
+                          default=None,
                           help='Language code for transcription, e.g., "en" for English.')
     parser.add_argument('--translate', '-t',
                           action='store_true',
@@ -45,8 +45,20 @@ if __name__ == '__main__':
                           help='Enable translation of the transcription output.')
     parser.add_argument('--target_language', '-tl',
                           type=str,
-                          default='fr',
-                          help='Target language for translation, e.g., "fr" for French.')
+                          default='auto',
+                          help='Target language for translation. Use "auto" for zh<->en.')
+    parser.add_argument('--translation_provider',
+                          type=str,
+                          default='helsinki_zh_en',
+                          help='Translation provider to use. Default: helsinki_zh_en.')
+    parser.add_argument('--zh_en_model_path',
+                          type=str,
+                          default='model/opus-mt-zh-en',
+                          help='Local model path for Chinese to English translation.')
+    parser.add_argument('--en_zh_model_path',
+                          type=str,
+                          default='model/opus-mt-en-zh',
+                          help='Local model path for English to Chinese translation.')
     parser.add_argument('--enable_timestamps',
                           action='store_true',
                           help='Show transcription with timestamps')
@@ -78,6 +90,9 @@ if __name__ == '__main__':
         mute_audio_playback=args.mute_audio_playback,      # Only used for file input, False by Default
         enable_translation=args.enable_translation,        # Enable translation of the transcription output
         target_language=args.target_language,              # Target language for translation, e.g., "fr
+        translation_provider=args.translation_provider,
+        zh_en_model_path=args.zh_en_model_path,
+        en_zh_model_path=args.en_zh_model_path,
         enable_timestamps=args.enable_timestamps,
         display_segments=args.n_display_segments,
         same_output_threshold=same_output_threshold,
