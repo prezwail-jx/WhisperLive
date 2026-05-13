@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WhisperLive 中英同传</title>
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="control-panel" aria-label="连接控制">
+        <div class="brand">
+          <div>
+            <p class="eyebrow">WhisperLive</p>
+            <h1>中英同传面板</h1>
+          </div>
+          <span id="connectionStatus" class="status idle">未连接</span>
+        </div>
+
+        <form id="settingsForm" class="settings">
+          <label>
+            Server
+            <input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off">
+          </label>
+          <label>
+            模型
+            <select id="modelInput">
+              <option value="small">small</option>
+              <option value="large-v3-turbo" selected>large-v3-turbo</option>
+              <option value="large-v3">large-v3</option>
+            </select>
+          </label>
+          <label>
+            源语言
+            <select id="languageInput">
+              <option value="" selected>自动识别</option>
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <label>
+            最近段数
+            <input id="segmentsInput" type="number" min="1" max="20" value="8">
+          </label>
+        </form>
+
+        <div class="actions">
+          <button id="startButton" type="button">开始</button>
+          <button id="stopButton" type="button" disabled>停止</button>
+        </div>
+
+        <div class="meta-grid">
+          <div>
+            <span>识别语言</span>
+            <strong id="languageStatus">等待中</strong>
+          </div>
+          <div>
+            <span>音频采样</span>
+            <strong id="sampleRateStatus">16 kHz</strong>
+          </div>
+          <div>
+            <span>翻译方向</span>
+            <strong id="directionStatus">自动</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="transcript-grid" aria-label="同传内容">
+        <article class="pane source-pane">
+          <header>
+            <span>原文</span>
+            <button id="clearSourceButton" type="button">清空</button>
+          </header>
+          <div id="sourceText" class="text-stream muted">等待语音输入...</div>
+        </article>
+
+        <article class="pane translation-pane">
+          <header>
+            <span>翻译</span>
+            <button id="clearTranslationButton" type="button">清空</button>
+          </header>
+          <div id="translationText" class="text-stream muted">等待翻译结果...</div>
+        </article>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
