@@ -20,6 +20,7 @@ input from microphone and pre-recorded audio files.
 
 - [安装教程（放最前）](#安装教程放最前)
 - [拉服务使用教程（按平台）](#拉服务使用教程按平台)
+- [会议同传 Web 前端](#会议同传-web-前端)
 - [其他内容](#其他内容)
 - [原始英文内容（完整保留）](#原始英文内容完整保留)
 
@@ -161,6 +162,158 @@ OpenVINO：
 ```bash
 docker run -it --device=/dev/dri -p 9090:9090 ghcr.io/collabora/whisperlive-openvino
 ```
+
+## 会议同传 Web 前端
+
+当前项目新增了一个轻量 Web 前端，目录是 `web/`。它用于会议同传场景：
+
+```text
+浏览器采集当前电脑麦克风
+-> WebSocket 发送到 WhisperLive server
+-> server 做语音识别和中英自动互译
+-> 网页刷新原文和翻译
+```
+
+这时不需要运行 `run_client.py`。`run_client.py` 是命令行客户端，会使用它所在机器的麦克风；Web 前端会使用打开网页那台电脑的麦克风。
+
+### 服务端：跑模型的机器
+
+在 WhisperLive 项目根目录启动后端：
+
+```bash
+source venv/bin/activate
+
+python run_server.py \
+  --port 9090 \
+  --backend faster_whisper \
+  --max_clients 4 \
+  --max_connection_time 600
+```
+
+服务端对外提供的核心端口是：
+
+```text
+9090/TCP
+```
+
+这是 WebSocket 后端端口，前端页面的 `Server` 输入框会连接它。
+
+### 客户端：打开网页的机器
+
+如果客户端机器有 `web/` 目录，在客户端机器上启动静态页面：
+
+```bash
+cd web
+python3 -m http.server 8080
+```
+
+浏览器打开：
+
+```text
+http://localhost:8080
+```
+
+页面里的 `Server` 填后端地址。
+
+同一台机器测试：
+
+```text
+ws://localhost:9090
+```
+
+同一局域网内，假设后端机器 IP 是 `192.168.31.8`：
+
+```text
+ws://192.168.31.8:9090
+```
+
+然后点击“开始”，允许浏览器麦克风权限。
+
+### 异地访问：SSH 隧道推荐
+
+如果服务端在家里主机，客户端在手边电脑，且已经有公网 SSH 入口，例如：
+
+```text
+paul@ub.tuitujk.com -p 2233
+```
+
+推荐在客户端机器上开 SSH 隧道：
+
+```bash
+ssh -p 2233 -L 9090:localhost:9090 paul@ub.tuitujk.com
+```
+
+然后客户端本地启动 Web 页面：
+
+```bash
+cd web
+python3 -m http.server 8080
+```
+
+浏览器打开：
+
+```text
+http://localhost:8080
+```
+
+页面里的 `Server` 填：
+
+```text
+ws://localhost:9090
+```
+
+如果 Web 页面也跑在家里主机，可以同时转发 `8080`：
+
+```bash
+ssh -p 2233 \
+  -L 9090:localhost:9090 \
+  -L 8080:localhost:8080 \
+  paul@ub.tuitujk.com
+```
+
+然后浏览器打开 `http://localhost:8080`。
+
+### 路由器端口映射
+
+临时公网测试时需要映射：
+
+```text
+外部 9090/TCP -> 后端机器内网IP:9090
+```
+
+如果 Web 页面也在服务端机器上对外提供，再映射：
+
+```text
+外部 8080/TCP -> 后端机器内网IP:8080
+```
+
+注意：当前 WebSocket 服务没有鉴权，不建议长期直接暴露 `9090` 到公网。生产使用建议用 Tailscale、VPN，或 HTTPS/WSS 反向代理加认证。
+
+### 中英自动互译模型
+
+当前 Web 前端默认开启：
+
+```text
+enable_translation = true
+target_language = auto
+translation_provider = helsinki_zh_en
+```
+
+默认本地翻译模型路径：
+
+```text
+model/opus-mt-zh-en
+model/opus-mt-en-zh
+```
+
+后端会根据识别语言自动选择方向：
+
+```text
+中文 -> 英文
+英文 -> 中文
+```
+
+当前实现按本次会话识别出的主语言选择翻译方向。如果同一场会议里频繁中英文混说，后续可以增加 segment 级语言检测来逐句切换翻译方向。
 
 TensorRT（原文命令，保留）：
 
