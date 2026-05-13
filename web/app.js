@@ -28,6 +28,11 @@ let isServerReady = false;
 let sourceSegments = [];
 let translatedSegments = [];
 
+function getDisplayLimit() {
+  const limit = Number(elements.segments.value || 8);
+  return Number.isFinite(limit) ? Math.max(1, Math.min(limit, 20)) : 8;
+}
+
 function createUid() {
   if (crypto.randomUUID) {
     return crypto.randomUUID();
@@ -40,18 +45,10 @@ function setStatus(text, state = "idle") {
   elements.status.className = `status ${state}`;
 }
 
-function appendOrReplaceSegment(list, segment) {
-  const index = list.findIndex((item) => item.start === segment.start && item.end === segment.end);
-  if (index >= 0) {
-    list[index] = segment;
-    return;
-  }
-  list.push(segment);
-  list.sort((a, b) => Number(a.start) - Number(b.start));
-}
-
 function renderSegments(target, segments, emptyText) {
-  if (!segments.length) {
+  const displaySegments = segments.slice(-getDisplayLimit());
+
+  if (!displaySegments.length) {
     target.textContent = emptyText;
     target.classList.add("muted");
     return;
@@ -60,7 +57,7 @@ function renderSegments(target, segments, emptyText) {
   target.classList.remove("muted");
   target.innerHTML = "";
   const fragment = document.createDocumentFragment();
-  segments.forEach((segment) => {
+  displaySegments.forEach((segment) => {
     const paragraph = document.createElement("p");
     paragraph.className = `segment${segment.completed ? "" : " incomplete"}`;
     paragraph.textContent = segment.text.trim();
@@ -108,12 +105,12 @@ function handleMessage(event) {
   }
 
   if (message.segments) {
-    message.segments.forEach((segment) => appendOrReplaceSegment(sourceSegments, segment));
+    sourceSegments = message.segments.slice();
     renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
   }
 
   if (message.translated_segments) {
-    message.translated_segments.forEach((segment) => appendOrReplaceSegment(translatedSegments, segment));
+    translatedSegments = message.translated_segments.slice();
     updateDirection(translatedSegments[translatedSegments.length - 1]);
     renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
   }
