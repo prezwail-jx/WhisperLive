@@ -213,7 +213,7 @@ function downsampleTo16k(input, inputSampleRate) {
 function sendConfig() {
   uid = createUid();
   const selectedLanguage = elements.language.value || null;
-  const selectedModel = elements.model.value;
+  const vadThreshold = selectedLanguage === "zh" ? 0.4 : 0.5;
   const payload = {
     uid,
     language: selectedLanguage,

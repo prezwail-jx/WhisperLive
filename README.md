@@ -211,6 +211,64 @@ python run_server.py \
 - 如果要测更大模型，把 `model/asr/base` 改成 `model/asr/small` 或 `model/asr/large-v3-turbo`。
 - `--max_clients` 控制允许连接的 Web client 数量；第 `max_clients + 1` 个 client 会进入等待。
 
+生产环境如果只是想快速拉起固定的多 GPU 服务，可以使用快捷启动脚本：
+
+```bash
+scripts/start_prod_gpu.sh start
+```
+等价于：
+
+```bash
+
+  CUDA_VISIBLE_DEVICES=0 python3 run_server.py \
+    --port 9090 \
+    --backend faster_whisper \
+    --max_clients 12 \
+    --max_connection_time 600 \
+    --batch_inference \
+    --batch_max_size 8 \
+    --batch_window_ms 50 \
+    -fw model/asr/small
+
+
+  CUDA_VISIBLE_DEVICES=1 python3 run_server.py \
+    --port 9091 \
+    --backend faster_whisper \
+    --max_clients 12 \
+    --max_connection_time 600 \
+    --batch_inference \
+    --batch_max_size 8 \
+    --batch_window_ms 50 \
+    -fw model/asr/small
+```
+
+常用管理命令：
+
+```bash
+scripts/start_prod_gpu.sh status
+scripts/start_prod_gpu.sh stop
+scripts/start_prod_gpu.sh restart
+```
+
+`scripts/start_prod_gpu.sh` 只是对 `run_server.py` 的快捷封装，不是新的服务入口。默认会启动两路服务：
+
+- `CUDA_VISIBLE_DEVICES=0` -> `9090`
+- `CUDA_VISIBLE_DEVICES=1` -> `9091`
+
+两路默认都使用 `--backend faster_whisper`、`-fw model/asr/small`、`--max_clients 12` 和 `--batch_inference`。客户端需要自行连接 `ws://host:9090` 或 `ws://host:9091` 做分流。
+
+如果要修改 GPU、端口、模型、并发数或 batch 参数，直接编辑 `scripts/start_prod_gpu.sh` 顶部变量：
+
+```bash
+GPUS=(0 1)
+PORTS=(9090 9091)
+MODEL_PATH="model/asr/small"
+MAX_CLIENTS=12
+MAX_CONNECTION_TIME=600
+BATCH_MAX_SIZE=8
+BATCH_WINDOW_MS=50
+```
+
 服务端对外提供的核心端口是：
 
 ```text
