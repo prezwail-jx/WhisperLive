@@ -1,6 +1,7 @@
 import json
 import logging
 import queue
+import threading
 from typing import Optional
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
@@ -94,6 +95,9 @@ class ServeClientTranslation(ServeClientBase):
     Reads from a queue populated by the transcription backend and sends translated
     segments back to the client via WebSocket.
     """
+    _TRANSLATOR_CACHE = {}
+    _TRANSLATOR_INFERENCE_LOCKS = {}
+    _TRANSLATOR_CACHE_LOCK = threading.Lock()
     
     def __init__(
         self,
@@ -125,24 +129,44 @@ class ServeClientTranslation(ServeClientBase):
         self.en_zh_model_path = en_zh_model_path
         self.translated_segments = []
         self.translator = None
+        self.translator_lock = None
         self.model_loaded = False
         self.load_translation_model()
+
+    def get_translation_cache_key(self):
+        """Build the process-local cache key for the configured translation model."""
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return (
+            self.model_name,
+            self.zh_en_model_path,
+            self.en_zh_model_path,
+            str(device),
+        )
         
     def load_translation_model(self):
         """Load the translation model and tokenizer."""
         try:
             if self.model_name != "helsinki_zh_en":
                 raise ValueError(f"Unsupported translation model provider: {self.model_name}")
-            self.translator = HelsinkiZhEnTranslator(
-                zh_en_model_path=self.zh_en_model_path,
-                en_zh_model_path=self.en_zh_model_path,
-            )
-            self.translator.load()
+            cache_key = self.get_translation_cache_key()
+            with self._TRANSLATOR_CACHE_LOCK:
+                if cache_key not in self._TRANSLATOR_CACHE:
+                    translator = HelsinkiZhEnTranslator(
+                        zh_en_model_path=self.zh_en_model_path,
+                        en_zh_model_path=self.en_zh_model_path,
+                    )
+                    translator.load()
+                    self._TRANSLATOR_CACHE[cache_key] = translator
+                    self._TRANSLATOR_INFERENCE_LOCKS[cache_key] = threading.Lock()
+
+                self.translator = self._TRANSLATOR_CACHE[cache_key]
+                self.translator_lock = self._TRANSLATOR_INFERENCE_LOCKS[cache_key]
             self.model_loaded = True
             logging.info(f"Translation model loaded successfully. Target language: {self.target_language}")
         except Exception as e:
             logging.error(f"Failed to load translation model: {e}")
             self.translator = None
+            self.translator_lock = None
             self.model_loaded = False
     
     def translate_text(self, text: str, source_language: Optional[str]):
@@ -159,7 +183,8 @@ class ServeClientTranslation(ServeClientBase):
             return text, source_language, self.target_language
             
         try:
-            return self.translator.translate(text, source_language, self.target_language)
+            with self.translator_lock:
+                return self.translator.translate(text, source_language, self.target_language)
         except Exception as e:
             logging.error(f"Translation failed for text '{text}': {e}")
             return text, source_language, self.target_language
@@ -275,10 +300,5 @@ class ServeClientTranslation(ServeClientBase):
             pass
         
         self.translated_segments.clear()
-        
-        if self.translator:
-            self.translator.cleanup()
-            self.translator = None
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        self.translator = None
+        self.translator_lock = None

@@ -225,7 +225,6 @@ scripts/start_prod_gpu.sh start
     --backend faster_whisper \
     --max_clients 12 \
     --max_connection_time 600 \
-    --batch_inference \
     --batch_max_size 8 \
     --batch_window_ms 50 \
     -fw model/asr/small
@@ -236,7 +235,6 @@ scripts/start_prod_gpu.sh start
     --backend faster_whisper \
     --max_clients 12 \
     --max_connection_time 600 \
-    --batch_inference \
     --batch_max_size 8 \
     --batch_window_ms 50 \
     -fw model/asr/small
@@ -255,7 +253,7 @@ scripts/start_prod_gpu.sh restart
 - `CUDA_VISIBLE_DEVICES=0` -> `9090`
 - `CUDA_VISIBLE_DEVICES=1` -> `9091`
 
-两路默认都使用 `--backend faster_whisper`、`-fw model/asr/small`、`--max_clients 12` 和 `--batch_inference`。客户端需要自行连接 `ws://host:9090` 或 `ws://host:9091` 做分流。
+两路默认都使用 `--backend faster_whisper`、`-fw model/asr/small` 和 `--max_clients 12`，默认不启用 ASR batch inference，优先降低实时延迟。客户端需要自行连接 `ws://host:9090` 或 `ws://host:9091` 做分流。
 
 如果要修改 GPU、端口、模型、并发数或 batch 参数，直接编辑 `scripts/start_prod_gpu.sh` 顶部变量：
 

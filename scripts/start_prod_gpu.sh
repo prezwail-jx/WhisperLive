@@ -108,7 +108,6 @@ start_instance() {
     --backend faster_whisper \
     --max_clients "${MAX_CLIENTS}" \
     --max_connection_time "${MAX_CONNECTION_TIME}" \
-    --batch_inference \
     --batch_max_size "${BATCH_MAX_SIZE}" \
     --batch_window_ms "${BATCH_WINDOW_MS}" \
     -fw "${MODEL_PATH}" \
