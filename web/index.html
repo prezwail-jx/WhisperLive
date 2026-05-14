@@ -23,6 +23,14 @@
             <input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off">
           </label>
           <label>
+            后端
+            <select id="backendInput">
+              <option value="faster_whisper" selected>faster_whisper</option>
+              <option value="mlx_whisper">mlx_whisper</option>
+            </select>
+            <span class="field-hint">mlx_whisper 适合 Apple Silicon Mac</span>
+          </label>
+          <label>
             模型
             <select id="modelInput">
               <option value="tiny">tiny</option>
@@ -36,6 +44,10 @@
               <option value="large-v3-turbo">large-v3-turbo</option>
               <option value="large-v3">large-v3</option>
             </select>
+          </label>
+          <label>
+            自定义模型路径/ID
+            <input id="customModelInput" type="text" placeholder="可选，如 model/whisper-medium-mlx" autocomplete="off">
           </label>
           <label>
             源语言

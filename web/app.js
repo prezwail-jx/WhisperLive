@@ -3,7 +3,9 @@ const TARGET_SAMPLE_RATE = 16000;
 const elements = {
   form: document.getElementById("settingsForm"),
   server: document.getElementById("serverInput"),
+  backend: document.getElementById("backendInput"),
   model: document.getElementById("modelInput"),
+  customModel: document.getElementById("customModelInput"),
   language: document.getElementById("languageInput"),
   segments: document.getElementById("segmentsInput"),
   start: document.getElementById("startButton"),
@@ -34,6 +36,24 @@ let fullTranslationLog = [];
 let meetingId = createUid();
 let meetingStartedAt = new Date().toISOString();
 let currentConfig = null;
+
+const MODEL_OPTIONS = {
+  faster_whisper: [
+    "tiny",
+    "tiny.en",
+    "base",
+    "base.en",
+    "small",
+    "small.en",
+    "medium",
+    "medium.en",
+    "large-v3-turbo",
+    "large-v3",
+  ],
+  mlx_whisper: [
+    "model/whisper-medium-mlx",
+  ],
+};
 
 function getDisplayLimit() {
   const limit = Number(elements.segments.value || 8);
@@ -81,6 +101,7 @@ function buildMeetingLog() {
     created_at: meetingStartedAt,
     exported_at: new Date().toISOString(),
     server: elements.server.value.trim(),
+    backend: currentConfig ? currentConfig.backend : elements.backend.value,
     model: currentConfig ? currentConfig.model : elements.model.value,
     source_language: elements.language.value || null,
     translation_mode: "auto",
@@ -143,6 +164,43 @@ function updateDirection(segment) {
   const source = segment.source_language || segment.language || "?";
   const target = segment.target_language || "?";
   elements.directionStatus.textContent = `${source} -> ${target}`;
+}
+
+function renderModelOptions() {
+  const backend = elements.backend.value;
+  const selectedModel = elements.model.value;
+  const models = MODEL_OPTIONS[backend] || MODEL_OPTIONS.faster_whisper;
+
+  elements.model.innerHTML = "";
+  models.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model;
+    option.textContent = model;
+    elements.model.appendChild(option);
+  });
+
+  elements.model.value = models.includes(selectedModel) ? selectedModel : models[0];
+}
+
+function resolveSelectedModel() {
+  const backend = elements.backend.value;
+  const customModel = elements.customModel.value.trim();
+  const selectedModel = customModel || elements.model.value;
+
+  if (backend === "mlx_whisper") {
+    return selectedModel;
+  }
+
+  if (
+    selectedModel.startsWith("model/") ||
+    selectedModel.startsWith("/") ||
+    selectedModel.startsWith("~") ||
+    selectedModel.includes("/")
+  ) {
+    return selectedModel;
+  }
+
+  return `model/asr/${selectedModel}`;
 }
 
 function handleMessage(event) {
@@ -213,12 +271,12 @@ function downsampleTo16k(input, inputSampleRate) {
 function sendConfig() {
   uid = createUid();
   const selectedLanguage = elements.language.value || null;
-  const selectedModel = elements.model.value;
   const payload = {
     uid,
+    backend: elements.backend.value,
     language: selectedLanguage,
     task: "transcribe",
-    model: selectedModel.startsWith("model/") ? selectedModel : `model/asr/${selectedModel}`,
+    model: resolveSelectedModel(),
     use_vad: true,
     send_last_n_segments: Number(elements.segments.value || 8),
     no_speech_thresh: 0.45,
@@ -336,6 +394,8 @@ elements.exportLog.addEventListener("click", exportMeetingLog);
 
 elements.clearLog.addEventListener("click", clearMeetingLog);
 
+elements.backend.addEventListener("change", renderModelOptions);
+
 elements.clearSource.addEventListener("click", () => {
   sourceSegments = [];
   renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
@@ -346,3 +406,5 @@ elements.clearTranslation.addEventListener("click", () => {
   renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
   updateDirection(null);
 });
+
+renderModelOptions();

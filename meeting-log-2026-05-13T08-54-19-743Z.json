@@ -1,0 +1,735 @@
+{
+  "meeting_id": "75ea423a-3e8b-4f92-bf10-6550255bd112",
+  "created_at": "2026-05-13T08:52:10.497Z",
+  "exported_at": "2026-05-13T08:54:19.743Z",
+  "server": "ws://localhost:9090",
+  "model": "model/asr/small",
+  "source_language": null,
+  "translation_mode": "auto",
+  "source_segments": [
+    {
+      "start": "0.000",
+      "end": "2.000",
+      "text": "So you look at this here.",
+      "completed": true,
+      "language": "en"
+    },
+    {
+      "start": "0.000",
+      "end": "3.080",
+      "text": "从一个人们充满期待的一个",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "3.080",
+      "end": "5.900",
+      "text": "青花雪子到一個",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "5.900",
+      "end": "8.010",
+      "text": "工作崗位成為一個",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "8.010",
+      "end": "11.790",
+      "text": "最开始的或者说是最底层的人开始做起",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "11.790",
+      "end": "13.735",
+      "text": "那時候會",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "13.735",
+      "end": "15.135",
+      "text": "有很多苦闷",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "15.135",
+      "end": "18.135",
+      "text": "但这个苦闷基本被我那些",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "18.135",
+      "end": "19.935",
+      "text": "长期在学校的那样出来",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "23.935",
+      "end": "25.935",
+      "text": "学校里面喜欢弹琴",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "25.935",
+      "end": "27.935",
+      "text": "喜欢断了身体",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "27.935",
+      "end": "29.935",
+      "text": "其实这些看似无关紧要的事情",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "29.935",
+      "end": "32.935",
+      "text": "真正消解过我们的生活",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "32.935",
+      "end": "34.935",
+      "text": "包括后来当歌手",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "34.935",
+      "end": "38.935",
+      "text": "一段所谓的沉默的时期",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "38.935",
+      "end": "40.935",
+      "text": "这个时期",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "40.935",
+      "end": "41.935",
+      "text": "其实支撑我的",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "41.935",
+      "end": "44.935",
+      "text": "还是这些生活的小乐趣",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "45.983",
+      "end": "48.583",
+      "text": "我可能來自一些工作的壓力",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "48.583",
+      "end": "50.173",
+      "text": "瞬间就被一些",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "51.188",
+      "end": "54.648",
+      "text": "都去带过小小的快乐这首小节",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "54.648",
+      "end": "58.118",
+      "text": "這是對我來講是非常重要",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "58.118",
+      "end": "59.878",
+      "text": "我先去收拾",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "60.218",
+      "end": "61.618",
+      "text": "身處困境",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "62.628",
+      "end": "63.828",
+      "text": "没有意识的判断",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "63.828",
+      "end": "66.598",
+      "text": "这是也非常幸运",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "66.598",
+      "end": "68.778",
+      "text": "也是一件非常",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "69.238",
+      "end": "71.238",
+      "text": "需要智慧的事情",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "71.238",
+      "end": "75.468",
+      "text": "当时我在那段所谓的沉默期",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "75.468",
+      "end": "77.068",
+      "text": "六七年七八年長中",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "77.068",
+      "end": "79.528",
+      "text": "很多人以為感覺都被我",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "79.528",
+      "end": "81.528",
+      "text": "带有来自",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "81.528",
+      "end": "85.008",
+      "text": "家里的还是朋友包括清华学长",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "85.008",
+      "end": "86.378",
+      "text": "但是我",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "86.378",
+      "end": "89.878",
+      "text": "恰恰拥有了一个自我爱慰的方法",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "89.878",
+      "end": "92.198",
+      "text": "擁有了一些長期的樂趣",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "92.278",
+      "end": "94.278",
+      "text": "完全削减了我",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "94.278",
+      "end": "97.738",
+      "text": "所謂那些巨大壓力依然過得很好",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "97.738",
+      "end": "99.738",
+      "text": "如果沒有那些",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "99.738",
+      "end": "101.008",
+      "text": "消解我",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "101.008",
+      "end": "102.408",
+      "text": "压力的一些乐趣",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "102.408",
+      "end": "106.488",
+      "text": "你可能很难沉下心来写一首歌",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "107.494",
+      "end": "110.234",
+      "text": "这个影响可能会对于歌后来讲是致命",
+      "completed": true,
+      "language": "zh"
+    },
+    {
+      "start": "110.234",
+      "end": "112.234",
+      "text": "到你无法了",
+      "completed": true,
+      "language": "zh"
+    }
+  ],
+  "translation_segments": [
+    {
+      "start": "0.000",
+      "end": "2.000",
+      "text": "所以,你看这里。",
+      "completed": true,
+      "source_language": "en",
+      "target_language": "zh",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "0.000",
+      "end": "3.080",
+      "text": "From the one that people look forward to.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "3.080",
+      "end": "5.900",
+      "text": "♪ A flower of snow to one ♪",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "5.900",
+      "end": "8.010",
+      "text": "The job will be one.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "8.010",
+      "end": "11.790",
+      "text": "The first or the bottom of the line begins.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "11.790",
+      "end": "13.735",
+      "text": "At that time.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "13.735",
+      "end": "15.135",
+      "text": "It's a lot of pain.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "15.135",
+      "end": "18.135",
+      "text": "But it's basically what I've been through.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "18.135",
+      "end": "19.935",
+      "text": "I've been out like that for a long time at school.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "19.935",
+      "end": "21.935",
+      "text": "Dissolved.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "21.935",
+      "end": "23.935",
+      "text": "Like what you like in school.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "23.935",
+      "end": "25.935",
+      "text": "The school likes to play the piano.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "25.935",
+      "end": "27.935",
+      "text": "He likes to break his body.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "27.935",
+      "end": "29.935",
+      "text": "Actually, it doesn't seem to matter.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "29.935",
+      "end": "32.935",
+      "text": "To really undo our lives.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "32.935",
+      "end": "34.935",
+      "text": "Including later on as a singer.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "34.935",
+      "end": "38.935",
+      "text": "A period of so-called silence.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "38.935",
+      "end": "40.935",
+      "text": "This is the time.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "40.935",
+      "end": "41.935",
+      "text": "Actually, it's holding me back.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "41.935",
+      "end": "44.935",
+      "text": "It's the little fun of life.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "45.983",
+      "end": "48.583",
+      "text": "I'm probably from some work pressure.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "48.583",
+      "end": "50.173",
+      "text": "It's just a matter of time before it's too late.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "51.188",
+      "end": "54.648",
+      "text": "I've been to the little happy festival.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "54.648",
+      "end": "58.118",
+      "text": "It's very important to me.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "58.118",
+      "end": "59.878",
+      "text": "I'll go clean up first.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "60.218",
+      "end": "61.618",
+      "text": "I'm in trouble.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "62.628",
+      "end": "63.828",
+      "text": "Unconscious judgment.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "63.828",
+      "end": "66.598",
+      "text": "It's very lucky, too.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "66.598",
+      "end": "68.778",
+      "text": "And a very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very, very.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "69.238",
+      "end": "71.238",
+      "text": "Something that requires wisdom.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "71.238",
+      "end": "75.468",
+      "text": "I was in that so-called silence period.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "75.468",
+      "end": "77.068",
+      "text": "Six, seven, seven, eight years old.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "77.068",
+      "end": "79.528",
+      "text": "A lot of people think it feels like I'm in it.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "79.528",
+      "end": "81.528",
+      "text": "♪ Bringing from ♪",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "81.528",
+      "end": "85.008",
+      "text": "He's still a friend of ours, including Qinghua.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "85.008",
+      "end": "86.378",
+      "text": "But I...",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "86.378",
+      "end": "89.878",
+      "text": "It's a way to make myself feel better.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "89.878",
+      "end": "92.198",
+      "text": "I've had some long-term fun.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "92.278",
+      "end": "94.278",
+      "text": "I'm completely cut off.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "94.278",
+      "end": "97.738",
+      "text": "The so-called pressures are still very good.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "97.738",
+      "end": "99.738",
+      "text": "If that's not the case,",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "99.738",
+      "end": "101.008",
+      "text": "Dismantling me.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "101.008",
+      "end": "102.408",
+      "text": "Some fun of stress.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "102.408",
+      "end": "106.488",
+      "text": "It might be hard for you to write a song.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "107.494",
+      "end": "110.234",
+      "text": "This influence could be fatal to the song itself.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    },
+    {
+      "start": "110.234",
+      "end": "112.234",
+      "text": "It's too late for you.",
+      "completed": true,
+      "source_language": "zh",
+      "target_language": "en",
+      "translation_model": "helsinki_zh_en"
+    }
+  ]
+}

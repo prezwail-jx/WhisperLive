@@ -30,6 +30,8 @@ transcript*.srt
 output_recording.wav
 mic_test.wav
 mic_test_resampled.wav
+*.mp4
+*.wav
 
 # Local model and cache directories
 models/
