@@ -2,6 +2,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from typing import Optional
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
@@ -109,6 +110,10 @@ class ServeClientTranslation(ServeClientBase):
         model_name="helsinki_zh_en",
         zh_en_model_path="model/opus-mt-zh-en",
         en_zh_model_path="model/opus-mt-en-zh",
+        translation_min_chars=8,
+        translation_max_chars=60,
+        translation_max_wait_seconds=1.0,
+        translation_sentence_endings="。！？.!?",
     ):
         """
         Initialize the translation client.
@@ -127,6 +132,12 @@ class ServeClientTranslation(ServeClientBase):
         self.model_name = model_name
         self.zh_en_model_path = zh_en_model_path
         self.en_zh_model_path = en_zh_model_path
+        self.translation_min_chars = translation_min_chars
+        self.translation_max_chars = translation_max_chars
+        self.translation_max_wait_seconds = translation_max_wait_seconds
+        self.translation_sentence_endings = translation_sentence_endings
+        self.translation_buffer = []
+        self.translation_buffer_started_at = None
         self.translated_segments = []
         self.translator = None
         self.translator_lock = None
@@ -188,6 +199,87 @@ class ServeClientTranslation(ServeClientBase):
         except Exception as e:
             logging.error(f"Translation failed for text '{text}': {e}")
             return text, source_language, self.target_language
+
+    def get_segment_source_language(self, segment):
+        return HelsinkiZhEnTranslator.normalize_language(segment.get("language"))
+
+    def get_buffer_source_language(self):
+        for segment in self.translation_buffer:
+            source_language = self.get_segment_source_language(segment)
+            if source_language:
+                return source_language
+        return None
+
+    def join_translation_buffer_text(self):
+        source_language = self.get_buffer_source_language()
+        texts = [segment.get("text", "").strip() for segment in self.translation_buffer]
+        texts = [text for text in texts if text]
+        if source_language == "zh":
+            return "".join(texts)
+        return " ".join(texts)
+
+    def should_flush_translation_buffer(self, force=False):
+        if not self.translation_buffer:
+            return False
+        if force:
+            return True
+
+        text = self.join_translation_buffer_text().strip()
+        if not text:
+            return False
+        if text.endswith(tuple(self.translation_sentence_endings)):
+            return True
+        if len(text) >= self.translation_max_chars:
+            return True
+        if (
+            self.translation_buffer_started_at is not None
+            and len(text) >= self.translation_min_chars
+            and time.monotonic() - self.translation_buffer_started_at >= self.translation_max_wait_seconds
+        ):
+            return True
+        return False
+
+    def add_segment_to_translation_buffer(self, segment):
+        incoming_language = self.get_segment_source_language(segment)
+        current_language = self.get_buffer_source_language()
+        if self.translation_buffer and incoming_language and current_language and incoming_language != current_language:
+            self.flush_translation_buffer(force=True)
+
+        if not self.translation_buffer:
+            self.translation_buffer_started_at = time.monotonic()
+        self.translation_buffer.append(segment)
+
+    def flush_translation_buffer(self, force=False):
+        if not self.should_flush_translation_buffer(force=force):
+            return
+
+        buffered_segments = self.translation_buffer
+        original_text = self.join_translation_buffer_text().strip()
+        source_language = self.get_buffer_source_language()
+        self.translation_buffer = []
+        self.translation_buffer_started_at = None
+
+        if not original_text:
+            return
+
+        translated_text, source_language, target_language = self.translate_text(
+            original_text,
+            source_language,
+        )
+
+        translated_segment = {
+            "start": buffered_segments[0]["start"],
+            "end": buffered_segments[-1]["end"],
+            "text": translated_text,
+            "completed": True,
+            "source_language": source_language,
+            "target_language": target_language,
+            "translation_model": self.model_name,
+        }
+
+        self.translated_segments.append(translated_segment)
+        segments_to_send = self.prepare_translated_segments()
+        self.send_translation_to_client(segments_to_send)
     
     def process_translation_queue(self):
         """
@@ -204,6 +296,7 @@ class ServeClientTranslation(ServeClientBase):
                 # Check for exit signal
                 if segment is None:
                     logging.info(f"Received exit signal for translation client {self.client_uid}")
+                    self.flush_translation_buffer(force=True)
                     break
                     
                 # Only translate completed segments
@@ -211,32 +304,13 @@ class ServeClientTranslation(ServeClientBase):
                     self.translation_queue.task_done()
                     continue
                     
-                # Translate the segment
-                original_text = segment.get("text", "")
-                source_language = segment.get("language")
-                translated_text, source_language, target_language = self.translate_text(
-                    original_text,
-                    source_language,
-                )
-                
-                # Create translated segment
-                translated_segment = {
-                    "start": segment["start"],
-                    "end": segment["end"],
-                    "text": translated_text,
-                    "completed": segment.get("completed", False),
-                    "source_language": source_language,
-                    "target_language": target_language,
-                    "translation_model": self.model_name,
-                }
-                
-                self.translated_segments.append(translated_segment)
-                segments_to_send = self.prepare_translated_segments()
-                self.send_translation_to_client(segments_to_send)
+                self.add_segment_to_translation_buffer(segment)
+                self.flush_translation_buffer()
                 
                 self.translation_queue.task_done()
                 
             except queue.Empty:
+                self.flush_translation_buffer()
                 continue
             except Exception as e:
                 logging.error(f"Error processing translation queue: {e}")
@@ -292,6 +366,10 @@ class ServeClientTranslation(ServeClientBase):
     def cleanup(self):
         """Clean up translation resources."""
         logging.info(f"Cleaning up translation resources for client {self.client_uid}")
+        try:
+            self.flush_translation_buffer(force=True)
+        except Exception as e:
+            logging.error(f"Failed to flush translation buffer during cleanup: {e}")
         self.exit = True
         
         try:
@@ -300,5 +378,7 @@ class ServeClientTranslation(ServeClientBase):
             pass
         
         self.translated_segments.clear()
+        self.translation_buffer.clear()
+        self.translation_buffer_started_at = None
         self.translator = None
         self.translator_lock = None
