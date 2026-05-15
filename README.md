@@ -145,6 +145,57 @@ python3 run_server.py --port 9090 \
 
 ### Docker（推荐用于跨平台部署）
 
+本项目提供了一个本地调试型 server 镜像，会把项目脚本、`web/`、`scripts/`、`tests/`、`run_client.py` 等常用文件复制进 `/app`，并安装 server/client 两侧依赖。镜像不会包含本地 `model/`、`logs/`、`venv/` 和导出的镜像包，模型需要运行时挂载。
+
+构建：
+
+```bash
+docker build --network=host -f docker/Dockerfile.server -t whisperlive-server .
+```
+
+进入容器调试：
+
+```bash
+docker run --rm -it --gpus '"device=0"' \
+  -p 9090:9090 \
+  -v "$PWD/model:/app/model:ro" \
+  whisperlive-server \
+  bash
+```
+
+容器内启动服务：
+
+```bash
+python run_server.py \
+  --port 9090 \
+  --backend faster_whisper \
+  --max_clients 12 \
+  --max_connection_time 600 \
+  -fw model/asr/small
+```
+
+导出镜像给其他机器：
+
+```bash
+docker save whisperlive-server:latest -o whisperlive-server.tar
+gzip whisperlive-server.tar
+scp whisperlive-server.tar.gz user@目标机器:/path/to/
+```
+
+目标机器导入：
+
+```bash
+docker load -i whisperlive-server.tar.gz
+```
+
+如果只是想把 `tar.gz` 还原成 `tar`：
+
+```bash
+gunzip whisperlive-server.tar.gz
+```
+
+不要用 `tar -xzf whisperlive-server.tar.gz` 导入 Docker 镜像；Docker 镜像包应该用 `docker load`。
+
 GPU + Faster-Whisper：
 
 ```bash

@@ -1,0 +1,14 @@
+.git
+.gitignore
+
+venv
+model
+logs
+__pycache__
+.pytest_cache
+.mypy_cache
+
+*.tar
+*.tar.gz
+*.tgz
+*.zip

@@ -1,4 +1,6 @@
 PyAudio
 av
+numpy<2
 scipy
 websocket-client
+requests
