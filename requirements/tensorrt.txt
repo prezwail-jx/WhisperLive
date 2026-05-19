@@ -1,0 +1,27 @@
+# TensorRT runtime additions.
+# Do not install requirements/server.txt here: it pins torch/fastapi versions
+# that are incompatible with tensorrt_llm==0.18.2.
+faster-whisper==1.2.0
+websockets==16.0
+onnxruntime==1.17.0
+numpy<2
+scipy
+av
+soundfile
+librosa
+audioread
+decorator
+joblib
+lazy-loader
+msgpack
+pooch
+scikit-learn
+soxr
+kaldialign
+openai-whisper==20250625
+janus
+python-multipart
+sentencepiece
+huggingface_hub==0.36.2
+requests
+websocket-client

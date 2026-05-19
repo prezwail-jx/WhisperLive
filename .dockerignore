@@ -3,6 +3,7 @@
 
 venv
 model
+third_party
 logs
 __pycache__
 .pytest_cache

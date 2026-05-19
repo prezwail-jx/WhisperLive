@@ -25,6 +25,8 @@ bash build_whisper_tensorrt.sh /app/TensorRT-LLM-examples small
 ```
 
 ## Run WhisperLive Server with TensorRT Backend
+TensorRT 镜像使用 `requirements/tensorrt.txt`。不要在该镜像里安装完整 `requirements/server.txt`，否则会覆盖 TensorRT-LLM 需要的 `torch` / `fastapi` / `transformers` 版本。
+
 ```bash
 # Run English only model
 python3 run_server.py --port 9090 \

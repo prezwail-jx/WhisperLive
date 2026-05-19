@@ -39,6 +39,7 @@ mic_test_resampled.wav
 models/
 /model/
 .cache/
+third_party/
 
 # Logs and temporary files
 *.log

@@ -1,11 +1,17 @@
-FROM python:3.10-bookworm
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends portaudio19-dev \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        python3.10 \
+        python3.10-dev \
+        python3-pip \
+        python-is-python3 \
+        portaudio19-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -14,12 +20,10 @@ WORKDIR /app
 RUN pip install --no-cache-dir -U "pip>=24"
 
 COPY requirements/server.txt /tmp/server.txt
-COPY requirements/client.txt /tmp/client.txt
 RUN pip install --no-cache-dir --timeout 120 --retries 10 -r /tmp/server.txt \
-    && pip install --no-cache-dir --timeout 120 --retries 10 -r /tmp/client.txt \
-    && rm /tmp/server.txt /tmp/client.txt
+    && rm /tmp/server.txt
 
-ENV LD_LIBRARY_PATH="/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib"
 
 COPY . /app
 

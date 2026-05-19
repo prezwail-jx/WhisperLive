@@ -245,6 +245,7 @@ class TranscriptionServer:
                     no_speech_thresh=options.get("no_speech_thresh", 0.45),
                     clip_audio=options.get("clip_audio", False),
                     same_output_threshold=options.get("same_output_threshold", 10),
+                    translation_queue=translation_queue,
                 )
                 logging.info("Running TensorRT backend.")
             except Exception as e:
@@ -396,7 +397,7 @@ class TranscriptionServer:
                 websocket.close()
                 return False  # Indicates that the connection should not continue
 
-            if self.backend.is_tensorrt():
+            if self.backend.is_tensorrt() and self.use_vad:
                 self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
             self.initialize_client(websocket, options, faster_whisper_custom_model_path,
                                    whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session)

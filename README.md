@@ -145,18 +145,31 @@ python3 run_server.py --port 9090 \
 
 ### Docker（推荐用于跨平台部署）
 
-本项目提供了一个本地调试型 server 镜像，会把项目脚本、`web/`、`scripts/`、`tests/`、`run_client.py` 等常用文件复制进 `/app`，并安装 server/client 两侧依赖。镜像不会包含本地 `model/`、`logs/`、`venv/` 和导出的镜像包，模型需要运行时挂载。
+`whisperlive-server` 用于运行 faster-whisper server，只包含 server 运行相关内容。模型目录需要运行时挂载。TensorRT 使用单独的 `whisperlive-tensorrt` 镜像。
 
-构建：
+构建 server 镜像：
 
 ```bash
 docker build --network=host -f docker/Dockerfile.server -t whisperlive-server .
+```
+
+构建 Web client 镜像：
+
+```bash
+docker build -f docker/Dockerfile.client -t whisperlive-client .
+```
+
+推荐使用自定义 Docker 网络，避免默认 bridge 和 VPN 路由冲突：
+
+```bash
+docker network create --subnet 172.30.0.0/24 whisperlive-net
 ```
 
 进入容器调试：
 
 ```bash
 docker run --rm -it --gpus '"device=0"' \
+  --network whisperlive-net \
   -p 9090:9090 \
   -v "$PWD/model:/app/model:ro" \
   whisperlive-server \
@@ -174,6 +187,32 @@ python run_server.py \
   -fw model/asr/small
 ```
 
+启动 Web client：
+
+```bash
+docker run --rm -it -p 8080:80 whisperlive-client
+```
+
+浏览器打开：
+
+```text
+http://localhost:8080
+```
+
+页面里的 server 填运行后端服务的地址，端口填 `9090`。如果通过 VS Code Remote 端口转发访问后端，可以填 `localhost`；如果直接访问远端机器，填远端机器 IP 或域名。
+
+如果要换 Web 页面端口，改 `-p` 左侧端口即可：
+
+```bash
+docker run --rm -it -p 3000:80 whisperlive-client
+```
+
+对应打开：
+
+```text
+http://localhost:3000
+```
+
 导出镜像给其他机器：
 
 ```bash
@@ -187,14 +226,6 @@ scp whisperlive-server.tar.gz user@目标机器:/path/to/
 ```bash
 docker load -i whisperlive-server.tar.gz
 ```
-
-如果只是想把 `tar.gz` 还原成 `tar`：
-
-```bash
-gunzip whisperlive-server.tar.gz
-```
-
-不要用 `tar -xzf whisperlive-server.tar.gz` 导入 Docker 镜像；Docker 镜像包应该用 `docker load`。
 
 GPU + Faster-Whisper：
 
@@ -536,6 +567,8 @@ large-v3-turbo -> model/asr/large-v3-turbo
 因此预下载后，启动服务时不需要再临时下载 ASR 模型。
 
 TensorRT（原文命令，保留）：
+
+TensorRT 镜像使用 `requirements/tensorrt.txt`，不要在里面安装完整 `requirements/server.txt`，否则会覆盖 TensorRT-LLM 需要的 `torch` / `fastapi` / `transformers` 版本。
 
 ```bash
 docker build . -f docker/Dockerfile.tensorrt -t whisperlive-tensorrt

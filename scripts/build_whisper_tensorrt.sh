@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 download_and_build_model() {
     local model_name="$1"
@@ -55,21 +56,33 @@ download_and_build_model() {
     local weight_only_precision="${2:-float16}"
     local max_beam_width=4
     local max_batch_size=4
+    local model_root="${TENSORRT_MODEL_ROOT:-/app/model/tensorrt}"
+    local assets_dir="${model_root}/assets"
+    local checkpoints_dir="${model_root}/checkpoints"
+    local engines_dir="${model_root}/engines"
 
-    echo "Downloading $model_name..."
-    # wget --directory-prefix=assets "$model_url"
-    # echo "Download completed: ${model_name}.pt"
-    if [ ! -f "assets/${model_name}.pt" ]; then
-        wget --directory-prefix=assets "$model_url"
-        echo "Download completed: ${model_name}.pt"
+    mkdir -p "$assets_dir" "$checkpoints_dir" "$engines_dir" assets
+
+    local model_file="${assets_dir}/${model_name}.pt"
+    echo "Preparing $model_name checkpoint at $model_file..."
+    if [ ! -f "$model_file" ]; then
+        wget -O "$model_file" "$model_url"
+        echo "Download completed: $model_file"
     else
-        echo "${model_name}.pt already exists in assets directory."
+        echo "$model_file already exists."
     fi
+    ln -sf "$model_file" "assets/${model_name}.pt"
 
     local sanitized_model_name="${model_name//./_}"
-    local checkpoint_dir="whisper_${sanitized_model_name}_weights_${weight_only_precision}"
-    local output_dir="whisper_${sanitized_model_name}_${weight_only_precision}"
-    echo "$output_dir"
+    local checkpoint_dir="${checkpoints_dir}/whisper_${sanitized_model_name}_weights_${weight_only_precision}"
+    local output_dir="${engines_dir}/whisper_${sanitized_model_name}_${weight_only_precision}"
+
+    if [ -d "${output_dir}/encoder" ] && [ -d "${output_dir}/decoder" ]; then
+        echo "TensorRT engine already exists: $output_dir"
+        echo "Use this path with --trt_model_path."
+        return 0
+    fi
+
     echo "Converting model weights for $model_name..."
     python3 convert_checkpoint.py \
         $( [[ "$weight_only_precision" == "int8" || "$weight_only_precision" == "int4" ]] && echo "--use_weight_only --weight_only_precision $weight_only_precision" ) \
@@ -102,11 +115,11 @@ download_and_build_model() {
 
     echo "TensorRT LLM engine built for $model_name."
     echo "========================================="
-    echo "Model is located at: $(pwd)/$output_dir"
+    echo "Model is located at: $output_dir"
 }
 
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <path-to-tensorrt-examples-dir> [model-name]"
+    echo "Usage: $0 <path-to-tensorrt-examples-dir> [model-name] [weight_only_precision]"
     exit 1
 fi
 
@@ -114,7 +127,7 @@ tensorrt_examples_dir="$1"
 model_name="${2:-small.en}"
 weight_only_precision="${3:-float16}"  # Default to float16 if not provided
 
-cd $tensorrt_examples_dir/whisper
+cd "$tensorrt_examples_dir/whisper"
 pip install --no-deps -r requirements.txt
 
 download_and_build_model "$model_name" "$weight_only_precision"

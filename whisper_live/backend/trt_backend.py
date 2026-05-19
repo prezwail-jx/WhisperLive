@@ -1,5 +1,6 @@
 import json
 import logging
+import queue
 import threading
 import time
 
@@ -26,6 +27,7 @@ class ServeClientTensorRT(ServeClientBase):
         no_speech_thresh=0.45,
         clip_audio=False,
         same_output_threshold=10,
+        translation_queue=None,
     ):
         """
         Initialize a ServeClient instance.
@@ -47,6 +49,7 @@ class ServeClientTensorRT(ServeClientBase):
             no_speech_thresh (float, optional): Segments with no speech probability above this threshold will be discarded. Defaults to 0.45.
             clip_audio (bool, optional): Whether to clip audio with no valid segments. Defaults to False.
             same_output_threshold (int, optional): Number of repeated outputs before considering it as a valid segment. Defaults to 10.
+            translation_queue (Queue, optional): Queue for completed segments that should be translated.
         """
         super().__init__(
             client_uid,
@@ -55,6 +58,7 @@ class ServeClientTensorRT(ServeClientBase):
             no_speech_thresh,
             clip_audio,
             same_output_threshold,
+            translation_queue,
         )
 
         self.language = language if multilingual else "en"
@@ -163,10 +167,24 @@ class ServeClientTensorRT(ServeClientBase):
             last_segment (str): Last transcribed audio from the whisper model.
             duration (float): Duration of the last audio chunk.
         """
-        if not len(self.transcript):
-            self.transcript.append({"text": last_segment + " "})
-        elif self.transcript[-1]["text"].strip() != last_segment:
-            self.transcript.append({"text": last_segment + " "})
+        should_append = (
+            not len(self.transcript)
+            or self.transcript[-1]["text"].strip() != last_segment
+        )
+        if should_append:
+            completed_segment = self.format_segment(
+                self.timestamp_offset,
+                self.timestamp_offset + duration,
+                last_segment + " ",
+                completed=True,
+            )
+            self.transcript.append(completed_segment)
+
+            if self.translation_queue:
+                try:
+                    self.translation_queue.put(completed_segment.copy(), timeout=0.1)
+                except queue.Full:
+                    logging.warning("Translation queue is full, skipping segment")
         
         with self.lock:
             self.timestamp_offset += duration
