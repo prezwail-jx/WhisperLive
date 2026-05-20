@@ -16,6 +16,8 @@ from faster_whisper import WhisperModel
 import torch
 
 from enum import Enum
+
+from whisper_live import metrics as wl_metrics
 from typing import List, Optional
 import numpy as np
 from websockets.sync.server import serve
@@ -183,6 +185,36 @@ class TranscriptionServer:
         self.single_model = False
         self.batch_config = None
         self.raw_pcm_input = False
+        self.segment_post_processor = None
+        self.default_hotwords = None
+
+    @staticmethod
+    def load_hotwords_file(path):
+        if not path:
+            return None
+        if not os.path.isfile(path):
+            logging.warning(f"Hotwords file not found: {path}")
+            return None
+
+        hotwords = []
+        with open(path, "r", encoding="utf-8") as file:
+            for line in file:
+                word = line.strip()
+                if not word or word.startswith("#"):
+                    continue
+                hotwords.append(word)
+
+        if not hotwords:
+            logging.info(f"Hotwords file is empty: {path}")
+            return None
+
+        return " ".join(hotwords)
+
+    def apply_default_hotwords(self, options):
+        if options.get("hotwords"):
+            return
+        if self.default_hotwords:
+            options["hotwords"] = self.default_hotwords
 
     def resolve_asr_model_path(self, model):
         if model in self.LOCAL_ASR_MODEL_NAMES:
@@ -338,7 +370,10 @@ class TranscriptionServer:
                     clip_audio=options.get("clip_audio", False),
                     same_output_threshold=options.get("same_output_threshold", 10),
                     cache_path=self.cache_path,
-                    translation_queue=translation_queue
+                    translation_queue=translation_queue,
+                    hotwords=options.get("hotwords"),
+                    diarization=self._create_diarizer(options),
+                    word_timestamps=options.get("word_timestamps", False),
                 )
 
                 logging.info("Running faster_whisper backend.")
@@ -361,11 +396,34 @@ class TranscriptionServer:
         if client is None:
             raise ValueError(f"Backend type {self.backend.value} not recognised or not handled.")
 
+        # Attach segment post-processor if configured
+        if self.segment_post_processor is not None:
+            client.segment_post_processor = self.segment_post_processor
+
         if translation_client:
             client.translation_client = translation_client
             client.translation_thread = translation_thread
 
         self.client_manager.add_client(websocket, client)
+
+    def _create_diarizer(self, options):
+        """Create a SpeakerDiarizer if the client requested diarization.
+
+        Returns:
+            SpeakerDiarizer or None
+        """
+        if not options.get("enable_diarization", False):
+            return None
+        try:
+            from whisper_live.diarization import SpeakerDiarizer
+            return SpeakerDiarizer(
+                similarity_threshold=options.get("diarization_threshold", 0.55),
+                max_speakers=options.get("max_speakers", 10),
+                hf_token=options.get("hf_token"),
+            )
+        except ImportError:
+            logging.warning("pyannote.audio not installed; diarization disabled")
+            return None
 
     def get_audio_from_websocket(self, websocket):
         """
@@ -391,9 +449,11 @@ class TranscriptionServer:
             logging.info("New client connected")
             options = websocket.recv()
             options = json.loads(options)
+            self.apply_default_hotwords(options)
 
             self.use_vad = options.get('use_vad')
             if self.client_manager.is_server_full(websocket, options):
+                wl_metrics.track_connection_rejected(reason="full")
                 websocket.close()
                 return False  # Indicates that the connection should not continue
 
@@ -401,6 +461,7 @@ class TranscriptionServer:
                 self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
             self.initialize_client(websocket, options, faster_whisper_custom_model_path,
                                    whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session)
+            wl_metrics.track_connection_opened()
             return True
         except json.JSONDecodeError:
             logging.error("Failed to decode JSON from client")
@@ -479,6 +540,7 @@ class TranscriptionServer:
             if self.client_manager.get_client(websocket):
                 self.cleanup(websocket)
                 websocket.close()
+            wl_metrics.track_connection_closed()
             del websocket
 
     def run(self,
@@ -499,7 +561,10 @@ class TranscriptionServer:
             batch_enabled=False,
             batch_max_size=8,
             batch_window_ms=50,
-            raw_pcm_input=False):
+            raw_pcm_input=False,
+            metrics_port: int = 0,
+            hotwords_file=None,
+            segment_post_processor=None):
         """
         Run the transcription server.
 
@@ -515,9 +580,21 @@ class TranscriptionServer:
             batch_window_ms (int): Maximum time in milliseconds to wait for
                 the batch to fill after the first request arrives. Defaults
                 to 50.
+            segment_post_processor (callable, optional): A callable that receives
+                a transcription segment dict and returns a modified segment dict.
+                Applied to every segment before sending to the client. Useful for
+                plugging in custom post-processing (e.g. formatting, redaction).
+                Defaults to None.
         """
         self.cache_path = cache_path
         self.raw_pcm_input = raw_pcm_input
+        self.default_hotwords = self.load_hotwords_file(hotwords_file)
+        if self.default_hotwords:
+            logging.info(
+                "Loaded %d default hotword tokens from %s",
+                len(self.default_hotwords.split()),
+                hotwords_file,
+            )
 
         if max_clients < 1:
             raise ValueError(f"max_clients must be >= 1, got {max_clients}")
@@ -528,6 +605,7 @@ class TranscriptionServer:
         if batch_enabled and batch_window_ms < 0:
             raise ValueError(f"batch_window_ms must be >= 0, got {batch_window_ms}")
 
+        self.segment_post_processor = segment_post_processor
         self.client_manager = ClientManager(max_clients, max_connection_time)
         if faster_whisper_custom_model_path is not None and not os.path.exists(faster_whisper_custom_model_path):
             if "/" not in faster_whisper_custom_model_path:
@@ -556,6 +634,10 @@ class TranscriptionServer:
         if not BackendType.is_valid(backend):
             raise ValueError(f"{backend} is not a valid backend type. Choose backend from {BackendType.valid_types()}")
 
+        # Start Prometheus metrics endpoint if port is specified
+        if metrics_port > 0:
+            wl_metrics.start_metrics_server(metrics_port)
+
         # New OpenAI-compatible REST API (toggleable via enable_rest boolean)
         if enable_rest:
             app = FastAPI(title="WhisperLive OpenAI-Compatible API")
@@ -583,15 +665,18 @@ class TranscriptionServer:
                 include: Optional[List[str]] = Form(default=None),
                 known_speaker_names: Optional[List[str]] = Form(default=None),
                 known_speaker_references: Optional[List[str]] = Form(default=None),
-                stream: bool = Form(default=False)
+                stream: bool = Form(default=False),
+                hotwords: Optional[str] = Form(default=None),
             ):
                 if stream:
+                    wl_metrics.track_rest_request(endpoint="transcriptions", status=400)
                     return JSONResponse({"error": "Streaming not supported in this backend."}, status_code=400)
                 if chunking_strategy or known_speaker_names or known_speaker_references:
                     logging.warning("Diarization/chunking params ignored; not supported.")
 
                 supported_formats = ["json", "text", "srt", "verbose_json", "vtt"]
                 if response_format not in supported_formats:
+                    wl_metrics.track_rest_request(endpoint="transcriptions", status=400)
                     return JSONResponse({"error": f"Unsupported response_format. Supported: {supported_formats}"}, status_code=400)
 
                 if model != "whisper-1":
@@ -614,15 +699,18 @@ class TranscriptionServer:
                         initial_prompt=prompt,
                         temperature=temperature,
                         vad_filter=False,
-                        word_timestamps=(timestamp_granularities and "word" in timestamp_granularities)
+                        word_timestamps=(timestamp_granularities and "word" in timestamp_granularities),
+                        hotwords=hotwords,
                     )
 
                     text = " ".join([s.text.strip() for s in segments])
                     os.unlink(tmp_path)
 
                     if response_format == "text":
+                        wl_metrics.track_rest_request(endpoint="transcriptions", status=200)
                         return PlainTextResponse(text)
                     elif response_format == "json":
+                        wl_metrics.track_rest_request(endpoint="transcriptions", status=200)
                         return {"text": text}
                     elif response_format == "verbose_json":
                         verbose = {
@@ -648,6 +736,7 @@ class TranscriptionServer:
                             if timestamp_granularities and "word" in timestamp_granularities:
                                 seg_dict["words"] = [{"word": w.word, "start": w.start, "end": w.end, "probability": w.probability} for w in seg.words]
                             verbose["segments"].append(seg_dict)
+                        wl_metrics.track_rest_request(endpoint="transcriptions", status=200)
                         return verbose
                     elif response_format in ["srt", "vtt"]:
                         output = []
@@ -658,8 +747,11 @@ class TranscriptionServer:
                                 output.append(f"{i}\n{start.replace('.', ',')} --> {end.replace('.', ',')}\n{seg.text.strip()}\n")
                             else:  # vtt
                                 output.append(f"{start} --> {end}\n{seg.text.strip()}\n")
+                        wl_metrics.track_rest_request(endpoint="transcriptions", status=200)
                         return PlainTextResponse("\n".join(output))
                 except Exception as e:
+                    wl_metrics.track_rest_request(endpoint="transcriptions", status=500)
+                    wl_metrics.track_error("rest_transcription")
                     return JSONResponse({"error": str(e)}, status_code=500)
 
             threading.Thread(

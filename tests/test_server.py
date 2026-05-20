@@ -1,6 +1,7 @@
 import subprocess
 import time
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -21,6 +22,38 @@ class TestTranscriptionServerInitialization(unittest.TestCase):
         self.assertEqual(server.client_manager.max_connection_time, 600)
         self.assertDictEqual(server.client_manager.clients, {})
         self.assertDictEqual(server.client_manager.start_times, {})
+
+
+class TestServerDefaultHotwords(unittest.TestCase):
+    def test_load_hotwords_file_ignores_blank_lines_and_comments(self):
+        path = "test_hotwords.txt"
+        with open(path, "w", encoding="utf-8") as file:
+            file.write("# comment\nACE\n\nDocker\nWhisper small\n")
+        try:
+            self.assertEqual(
+                TranscriptionServer.load_hotwords_file(path),
+                "ACE Docker Whisper small",
+            )
+        finally:
+            os.remove(path)
+
+    def test_missing_hotwords_file_returns_none(self):
+        self.assertIsNone(TranscriptionServer.load_hotwords_file("missing-hotwords.txt"))
+
+    def test_apply_default_hotwords_only_when_client_did_not_send_value(self):
+        server = TranscriptionServer()
+        server.default_hotwords = "ACE Docker"
+        options = {"uid": "client"}
+        server.apply_default_hotwords(options)
+        self.assertEqual(options["hotwords"], "ACE Docker")
+
+        options = {"uid": "client", "hotwords": "Custom"}
+        server.apply_default_hotwords(options)
+        self.assertEqual(options["hotwords"], "Custom")
+
+        options = {"uid": "client", "hotwords": ""}
+        server.apply_default_hotwords(options)
+        self.assertEqual(options["hotwords"], "ACE Docker")
 
 
 class TestGetWaitTime(unittest.TestCase):

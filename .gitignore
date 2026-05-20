@@ -1,6 +1,8 @@
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
+*.pyc
+*.pyo
 *$py.class
 .pytest_cache/
 .mypy_cache/
@@ -12,21 +14,26 @@ htmlcov/
 .venv/
 venv/
 venv-*/
+whisper_env/
 env/
 ENV/
-*.tar
-*.tar.gz
+.env
 
 # Packaging and build output
 *.egg-info/
 build/
 dist/
 *.egg
+.eggs/
+*.so
+*.o
 
 # Local runtime output
 chunks/
+output*.srt
 output.srt
 output_translated.srt
+translation*.srt
 transcript*.srt
 *_resampled.wav
 output_recording.wav
@@ -35,11 +42,16 @@ mic_test_resampled.wav
 *.mp4
 *.wav
 
-# Local model and cache directories
+# Local model, cache, and vendored source directories
 models/
 /model/
 .cache/
 third_party/
+
+# Docker/image archives and generated docs
+*.tar
+*.tar.gz
+docs/site/
 
 # Logs and temporary files
 *.log
@@ -48,7 +60,6 @@ third_party/
 .DS_Store
 *.docx
 *.json
-
 
 # IDE/editor files
 .idea/

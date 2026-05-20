@@ -46,6 +46,10 @@ class Client:
         translation_srt_file_path="output_translated.srt",
         enable_timestamps=False,
         display_segments=4,
+        hotwords=None,
+        enable_diarization=False,
+        max_speakers=10,
+        word_timestamps=False,
     ):
         """
         Initializes a Client instance for audio recording and streaming to a server.
@@ -107,7 +111,10 @@ class Client:
             self.task = "translate"
         self.enable_timestamps = enable_timestamps
         self.display_segments = display_segments
-
+        self.hotwords = hotwords
+        self.enable_diarization = enable_diarization
+        self.max_speakers = max_speakers
+        self.word_timestamps = word_timestamps
         self.audio_bytes = None
 
         if host is not None and port is not None:
@@ -313,6 +320,10 @@ class Client:
                     "translation_provider": self.translation_provider,
                     "zh_en_model_path": self.zh_en_model_path,
                     "en_zh_model_path": self.en_zh_model_path,
+                    "hotwords": self.hotwords,
+                    "enable_diarization": self.enable_diarization,
+                    "max_speakers": self.max_speakers,
+                    "word_timestamps": self.word_timestamps,
                 }
             )
         )
@@ -837,7 +848,12 @@ class TranscriptionClient(TranscriptionTeeClient):
         translation_srt_file_path="./output_translated.srt",
         enable_timestamps=False,
         display_segments=4,
+        hotwords=None,
+        enable_diarization=False,
+        max_speakers=10,
+        word_timestamps=False,
     ):
+
         self.client = Client(
             host,
             port,
@@ -862,6 +878,10 @@ class TranscriptionClient(TranscriptionTeeClient):
             translation_srt_file_path=translation_srt_file_path,
             enable_timestamps=enable_timestamps,
             display_segments=display_segments,
+            hotwords=hotwords,
+            enable_diarization=enable_diarization,
+            max_speakers=max_speakers,
+            word_timestamps=word_timestamps,
         )
 
         if save_output_recording and not output_recording_filename.endswith(".wav"):

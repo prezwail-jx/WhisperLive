@@ -90,6 +90,18 @@ if __name__ == "__main__":
         help='Expect raw PCM int16 audio from clients instead of float32. '
              'Audio will be normalized to float32 range [-1.0, 1.0].'
     )
+    parser.add_argument(
+        '--metrics_port',
+        type=int,
+        default=0,
+        help='Port for Prometheus /metrics endpoint. 0 = disabled (default). Requires prometheus_client.'
+    )
+    parser.add_argument(
+        '--hotwords_file',
+        type=str,
+        default='config/hotwords.txt',
+        help='Path to a text file containing default hotwords, one word or phrase per line.'
+    )
     args = parser.parse_args()
 
     if args.backend == "tensorrt":
@@ -120,4 +132,6 @@ if __name__ == "__main__":
         batch_max_size=args.batch_max_size,
         batch_window_ms=args.batch_window_ms,
         raw_pcm_input=args.raw_pcm_input,
+        metrics_port=args.metrics_port,
+        hotwords_file=args.hotwords_file,
     )

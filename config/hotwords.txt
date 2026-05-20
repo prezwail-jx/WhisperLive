@@ -1,0 +1,2 @@
+# One hotword or phrase per line. Blank lines and comments are ignored.
+

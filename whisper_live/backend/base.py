@@ -5,6 +5,8 @@ import time
 import queue
 import numpy as np
 
+from whisper_live import metrics as wl_metrics
+
 
 class ServeClientBase(object):
     RATE = 16000
@@ -37,6 +39,8 @@ class ServeClientBase(object):
         clip_audio=False,
         same_output_threshold=10,
         translation_queue=None,
+        diarization=None,
+        word_timestamps=False,
     ):
         self.client_uid = client_uid
         self.websocket = websocket
@@ -44,6 +48,8 @@ class ServeClientBase(object):
         self.no_speech_thresh = no_speech_thresh
         self.clip_audio = clip_audio
         self.same_output_threshold = same_output_threshold
+        self.diarization = diarization
+        self.word_timestamps = word_timestamps
 
         self.frames = b""
         self.timestamp_offset = 0.0
@@ -57,6 +63,13 @@ class ServeClientBase(object):
         self.transcript = []
         self.end_time_for_same_output = None
         self.translation_queue = translation_queue
+
+        # Optional post-processing callable for segments.
+        # If set, called with a segment dict and must return a segment dict.
+        # Allows external projects to plug in custom post-processing
+        # (e.g. PII redaction, formatting, diarization) without modifying
+        # WhisperLive's core code.
+        self.segment_post_processor = None
 
         # threading
         self.lock = threading.Lock()
@@ -93,16 +106,20 @@ class ServeClientBase(object):
                 continue
             try:
                 input_sample = input_bytes.copy()
+                t0 = time.time()
                 result = self.transcribe_audio(input_sample)
 
                 if result is None or self.language is None:
                     self.timestamp_offset += duration
                     time.sleep(0.25)    # wait for voice activity, result is None when no voice activity
                     continue
+                wl_metrics.track_transcription_latency(time.time() - t0)
+                wl_metrics.track_audio_processed(duration)
                 self.handle_transcription_output(result, duration)
 
             except Exception as e:
                 logging.error(f"[ERROR]: Failed to transcribe audio chunk: {e}")
+                wl_metrics.track_error("transcription")
                 time.sleep(0.01)
 
     def transcribe_audio(self):
@@ -111,7 +128,7 @@ class ServeClientBase(object):
     def handle_transcription_output(self, result, duration):
         raise NotImplementedError
     
-    def format_segment(self, start, end, text, completed=False):
+    def format_segment(self, start, end, text, completed=False, speaker=None, words=None):
         """
         Formats a transcription segment with precise start and end times alongside the transcribed text.
 
@@ -119,19 +136,26 @@ class ServeClientBase(object):
             start (float): The start time of the transcription segment in seconds.
             end (float): The end time of the transcription segment in seconds.
             text (str): The transcribed text corresponding to the segment.
+            speaker (str, optional): Speaker label from diarization.
+            words (list, optional): Word-level timestamps and probabilities.
 
         Returns:
             dict: A dictionary representing the formatted transcription segment, including
                 'start' and 'end' times as strings with three decimal places and the 'text'
                 of the transcription.
         """
-        return {
+        seg = {
             'start': "{:.3f}".format(start),
             'end': "{:.3f}".format(end),
             'text': text,
             'completed': completed,
             'language': getattr(self, "language", None)
         }
+        if speaker is not None:
+            seg['speaker'] = speaker
+        if words is not None:
+            seg['words'] = words
+        return seg
 
     def add_frames(self, frame_np):
         """
@@ -264,9 +288,23 @@ class ServeClientBase(object):
         This method formats the transcription segments into a JSON object and attempts to send
         this object to the client. If an error occurs during the send operation, it logs the error.
 
+        If a ``segment_post_processor`` callable is set, each segment is passed through it
+        before sending. The callable receives a segment dict and must return a segment dict.
+
         Returns:
             segments (list): A list of transcription segments to be sent to the client.
         """
+        if self.segment_post_processor is not None:
+            processed = []
+            for seg in segments:
+                try:
+                    result = self.segment_post_processor(seg)
+                    processed.append(result if result is not None else seg)
+                except Exception as e:
+                    logging.error(f"[ERROR]: segment_post_processor failed: {e}")
+                    processed.append(seg)
+            segments = processed
+
         try:
             self.websocket.send(
                 json.dumps({
@@ -274,6 +312,8 @@ class ServeClientBase(object):
                     "segments": segments,
                 })
             )
+            for seg in segments:
+                wl_metrics.track_segment_emitted(completed=seg.get("completed", False))
         except Exception as e:
             logging.error(f"[ERROR]: Sending data to client: {e}")
 
@@ -311,6 +351,45 @@ class ServeClientBase(object):
     def get_segment_end(self, segment):
         return getattr(segment, "end", getattr(segment, "end_ts", 0))
 
+    def _identify_speaker(self, segment):
+        """Run diarization on a segment's audio slice if diarization is enabled.
+
+        Returns:
+            str or None: Speaker label, or None if diarization is disabled or audio unavailable.
+        """
+        if self.diarization is None or self.frames_np is None:
+            return None
+        try:
+            seg_start = self.get_segment_start(segment)
+            seg_end = self.get_segment_end(segment)
+            start_sample = int(seg_start * self.RATE)
+            end_sample = int(seg_end * self.RATE)
+            samples_offset = max(0, int((self.timestamp_offset - self.frames_offset) * self.RATE))
+            audio_slice = self.frames_np[samples_offset + start_sample:samples_offset + end_sample]
+            if len(audio_slice) < self.RATE * 0.3:
+                return None
+            return self.diarization.identify_speaker(audio_slice, self.RATE)
+        except Exception as e:
+            logging.error(f"Diarization error: {e}")
+            return None
+
+    def _extract_words(self, segment, time_offset):
+        """Extracts word-level timestamps from a segment if word_timestamps is enabled."""
+        if not self.word_timestamps:
+            return None
+        words = getattr(segment, "words", None)
+        if not words:
+            return None
+        return [
+            {
+                "word": w.word,
+                "start": "{:.3f}".format(time_offset + w.start),
+                "end": "{:.3f}".format(time_offset + w.end),
+                "probability": round(w.probability, 4),
+            }
+            for w in words
+        ]
+
     def update_segments(self, segments, duration):
         """
         Processes the segments from Whisper and updates the transcript.
@@ -340,7 +419,9 @@ class ServeClientBase(object):
                     continue
                 if self.get_segment_no_speech_prob(s) > self.no_speech_thresh:
                     continue
-                completed_segment = self.format_segment(start, end, text_, completed=True)
+                speaker = self._identify_speaker(s)
+                words = self._extract_words(s, self.timestamp_offset)
+                completed_segment = self.format_segment(start, end, text_, completed=True, speaker=speaker, words=words)
                 self.transcript.append(completed_segment)
 
                 if self.translation_queue:
@@ -353,12 +434,14 @@ class ServeClientBase(object):
         # Process the last segment if its no_speech_prob is acceptable.
         if self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
             self.current_out += segments[-1].text
+            words = self._extract_words(segments[-1], self.timestamp_offset)
             with self.lock:
                 last_segment = self.format_segment(
                     self.timestamp_offset + self.get_segment_start(segments[-1]),
                     self.timestamp_offset + min(duration, self.get_segment_end(segments[-1])),
                     self.current_out,
-                    completed=False
+                    completed=False,
+                    words=words
                 )
 
         # Handle repeated output logic.
