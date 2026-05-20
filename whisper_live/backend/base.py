@@ -26,6 +26,7 @@ class ServeClientBase(object):
 
     MAX_TRANSCRIPT_LENGTH = 500
     MAX_TRANSLATION_QUEUE_SIZE = 100
+    MAX_PENDING_AUDIO_SECONDS = 8.0
 
     def __init__(
         self,
@@ -161,7 +162,32 @@ class ServeClientBase(object):
             self.frames_np = frame_np.copy()
         else:
             self.frames_np = np.concatenate((self.frames_np, frame_np), axis=0)
+        self.trim_pending_audio_if_needed()
         self.lock.release()
+
+    def trim_pending_audio_if_needed(self):
+        if self.frames_np is None or self.MAX_PENDING_AUDIO_SECONDS <= 0:
+            return
+
+        frames_duration = self.frames_np.shape[0] / self.RATE
+        processed_seconds = max(0.0, self.timestamp_offset - self.frames_offset)
+        pending_seconds = max(0.0, frames_duration - processed_seconds)
+        if pending_seconds <= self.MAX_PENDING_AUDIO_SECONDS:
+            return
+
+        new_timestamp_offset = self.frames_offset + frames_duration - self.MAX_PENDING_AUDIO_SECONDS
+        dropped_seconds = max(0.0, new_timestamp_offset - self.timestamp_offset)
+        if dropped_seconds <= 0:
+            return
+
+        self.timestamp_offset = new_timestamp_offset
+        logging.warning(
+            "[REALTIME_DROP] uid=%s pending=%.2fs keep=%.2fs dropped=%.2fs",
+            self.client_uid,
+            pending_seconds,
+            self.MAX_PENDING_AUDIO_SECONDS,
+            dropped_seconds,
+        )
 
     def clip_audio_if_no_valid_segment(self):
         """
