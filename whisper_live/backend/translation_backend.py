@@ -1,6 +1,7 @@
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from typing import Optional
@@ -14,6 +15,13 @@ class HelsinkiZhEnTranslator:
     """Local zh<->en translator backed by two Marian/Helsinki models."""
 
     SUPPORTED_TARGETS = {"auto", "zh", "en"}
+    ENGLISH_TERM_PATTERN = re.compile(
+        r"(?<![A-Za-z0-9])"
+        r"(?:[A-Za-z][A-Za-z0-9+#._/-]*"
+        r"(?:\s+[A-Za-z][A-Za-z0-9+#._/-]*){0,3})"
+        r"(?![A-Za-z0-9])"
+    )
+    MIN_PROTECTED_ALPHA_CHARS = 2
 
     def __init__(
         self,
@@ -66,6 +74,44 @@ class HelsinkiZhEnTranslator:
         logging.warning(f"Unsupported source language for Helsinki zh-en translator: {source_language}")
         return None
 
+    @classmethod
+    def should_protect_english_term(cls, term: str) -> bool:
+        alpha_chars = [char for char in term if char.isalpha()]
+        return len(alpha_chars) >= cls.MIN_PROTECTED_ALPHA_CHARS
+
+    @classmethod
+    def protect_english_terms(cls, text: str):
+        protected_terms = {}
+
+        def replace(match):
+            term = match.group(0)
+            if not cls.should_protect_english_term(term):
+                return term
+
+            placeholder = f"XKEEPTERM{len(protected_terms)}X"
+            protected_terms[placeholder] = term
+            return placeholder
+
+        return cls.ENGLISH_TERM_PATTERN.sub(replace, text), protected_terms
+
+    @staticmethod
+    def restore_english_terms(text: str, protected_terms):
+        restored_text = text
+        for placeholder, term in protected_terms.items():
+            restored_text = restored_text.replace(placeholder, term)
+            restored_text = restored_text.replace(placeholder.lower(), term)
+
+            index = placeholder.removeprefix("XKEEPTERM").removesuffix("X")
+            spaced_placeholder = re.compile(
+                rf"X\s*KEEP\s*TERM\s*{re.escape(index)}\s*X",
+                flags=re.IGNORECASE,
+            )
+            restored_text = spaced_placeholder.sub(term, restored_text)
+
+        if "XKEEPTERM" in restored_text.upper():
+            logging.warning("[MIXED_LANG_PROTECT][WARN] unresolved placeholder in translated text")
+        return restored_text
+
     def translate(self, text: str, source_language: Optional[str], target_language: str):
         direction = self.resolve_direction(source_language, target_language)
         if direction is None:
@@ -74,13 +120,27 @@ class HelsinkiZhEnTranslator:
         model_key, resolved_target_language = direction
         tokenizer = self.tokenizers[model_key]
         model = self.models[model_key]
+        protected_terms = {}
+        text_to_translate = text
 
-        encoded_input = tokenizer(text, return_tensors="pt", truncation=True).to(self.device)
+        if model_key == "zh-en":
+            text_to_translate, protected_terms = self.protect_english_terms(text)
+            if protected_terms:
+                logging.info(
+                    "[MIXED_LANG_PROTECT] direction=zh-en terms=%d text_len=%d",
+                    len(protected_terms),
+                    len(text),
+                )
+
+        encoded_input = tokenizer(text_to_translate, return_tensors="pt", truncation=True).to(self.device)
         with torch.no_grad():
             generated_tokens = model.generate(**encoded_input)
         output = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+        translated_text = output[0] if output else text
+        if protected_terms:
+            translated_text = self.restore_english_terms(translated_text, protected_terms)
         return (
-            output[0] if output else text,
+            translated_text,
             self.normalize_language(source_language),
             resolved_target_language,
         )

@@ -3,7 +3,7 @@ import queue
 import unittest
 from unittest import mock
 
-from whisper_live.backend.translation_backend import ServeClientTranslation
+from whisper_live.backend.translation_backend import HelsinkiZhEnTranslator, ServeClientTranslation
 
 
 class FakeTensorBatch(dict):
@@ -25,6 +25,70 @@ class FakeModel:
 
     def generate(self, **kwargs):
         return [[1, 2, 3]]
+
+
+class PlaceholderFakeTokenizer:
+    def __init__(self, decoded_text):
+        self.decoded_text = decoded_text
+        self.last_text = None
+
+    def __call__(self, text, return_tensors=None, truncation=None):
+        self.last_text = text
+        return FakeTensorBatch(input_ids=[1, 2, 3])
+
+    def batch_decode(self, generated_tokens, skip_special_tokens=True):
+        return [self.decoded_text]
+
+
+class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
+    def test_protects_english_terms_in_chinese_text(self):
+        protected_text, terms = HelsinkiZhEnTranslator.protect_english_terms(
+            "我现在用 Docker 跑 Whisper small，latency 比 medium 高"
+        )
+
+        self.assertIn("XKEEPTERM0X", protected_text)
+        self.assertIn("XKEEPTERM1X", protected_text)
+        self.assertIn("XKEEPTERM2X", protected_text)
+        self.assertIn("XKEEPTERM3X", protected_text)
+        self.assertEqual(terms["XKEEPTERM0X"], "Docker")
+        self.assertEqual(terms["XKEEPTERM1X"], "Whisper small")
+        self.assertEqual(terms["XKEEPTERM2X"], "latency")
+        self.assertEqual(terms["XKEEPTERM3X"], "medium")
+
+    def test_restore_handles_case_and_spaced_placeholder_variants(self):
+        restored = HelsinkiZhEnTranslator.restore_english_terms(
+            "Use xkeepterm0x and X KEEP TERM 1 X.",
+            {"XKEEPTERM0X": "Docker", "XKEEPTERM1X": "Whisper small"},
+        )
+
+        self.assertEqual(restored, "Use Docker and Whisper small.")
+
+    def test_translate_restores_terms_only_for_zh_en(self):
+        translator = HelsinkiZhEnTranslator()
+        tokenizer = PlaceholderFakeTokenizer("Use X KEEP TERM 0 X with xkeepterm1x.")
+        translator.tokenizers["zh-en"] = tokenizer
+        translator.models["zh-en"] = FakeModel()
+
+        translated, source_language, target_language = translator.translate(
+            "我用 Docker 和 ACE",
+            "zh",
+            "en",
+        )
+
+        self.assertEqual(translated, "Use Docker with ACE.")
+        self.assertEqual(source_language, "zh")
+        self.assertEqual(target_language, "en")
+        self.assertIn("XKEEPTERM0X", tokenizer.last_text)
+        self.assertIn("XKEEPTERM1X", tokenizer.last_text)
+        self.assertNotIn("Docker", tokenizer.last_text)
+
+    def test_pure_chinese_has_no_terms_to_protect(self):
+        protected_text, terms = HelsinkiZhEnTranslator.protect_english_terms(
+            "这个模型识别中文比较慢"
+        )
+
+        self.assertEqual(protected_text, "这个模型识别中文比较慢")
+        self.assertEqual(terms, {})
 
 
 class TestServeClientTranslationModelCache(unittest.TestCase):
