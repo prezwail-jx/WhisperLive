@@ -22,6 +22,32 @@ class HelsinkiZhEnTranslator:
         r"(?![A-Za-z0-9])"
     )
     MIN_PROTECTED_ALPHA_CHARS = 2
+    PLACEHOLDER_PREFIX = "ZZX"
+    PLACEHOLDER_SUFFIX = "ZZ"
+    NATURAL_TERM_PLACEHOLDERS = [
+        "第一个术语",
+        "第二个术语",
+        "第三个术语",
+        "第四个术语",
+        "第五个术语",
+        "第六个术语",
+        "第七个术语",
+        "第八个术语",
+        "第九个术语",
+        "第十个术语",
+    ]
+    ENGLISH_ORDINALS = [
+        ("first", "1st", "one"),
+        ("second", "2nd", "two"),
+        ("third", "3rd", "three"),
+        ("fourth", "4th", "four"),
+        ("fifth", "5th", "five"),
+        ("sixth", "6th", "six"),
+        ("seventh", "7th", "seven"),
+        ("eighth", "8th", "eight"),
+        ("ninth", "9th", "nine"),
+        ("tenth", "10th", "ten"),
+    ]
 
     def __init__(
         self,
@@ -80,6 +106,92 @@ class HelsinkiZhEnTranslator:
         return len(alpha_chars) >= cls.MIN_PROTECTED_ALPHA_CHARS
 
     @classmethod
+    def make_placeholder(cls, index: int) -> str:
+        return f"{cls.PLACEHOLDER_PREFIX}{index}{cls.PLACEHOLDER_SUFFIX}"
+
+    @classmethod
+    def make_natural_term_placeholder(cls, index: int) -> str:
+        if index < len(cls.NATURAL_TERM_PLACEHOLDERS):
+            return cls.NATURAL_TERM_PLACEHOLDERS[index]
+        return f"第{index + 1}个术语"
+
+    @classmethod
+    def get_natural_term_index(cls, placeholder: str) -> Optional[int]:
+        if placeholder in cls.NATURAL_TERM_PLACEHOLDERS:
+            return cls.NATURAL_TERM_PLACEHOLDERS.index(placeholder)
+        match = re.fullmatch(r"第(\d+)个术语", placeholder)
+        if match:
+            return max(0, int(match.group(1)) - 1)
+        return None
+
+    @staticmethod
+    def get_placeholder_index(placeholder: str) -> Optional[str]:
+        if placeholder.startswith("ZZX") and placeholder.endswith("ZZ"):
+            return placeholder.removeprefix("ZZX").removesuffix("ZZ")
+        if placeholder.startswith("XKEEPTERM") and placeholder.endswith("X"):
+            return placeholder.removeprefix("XKEEPTERM").removesuffix("X")
+        return None
+
+    @classmethod
+    def protect_english_terms_with_natural_placeholders(cls, text: str):
+        protected_terms = {}
+
+        def replace(match):
+            term = match.group(0)
+            if not cls.should_protect_english_term(term):
+                return term
+
+            placeholder = cls.make_natural_term_placeholder(len(protected_terms))
+            protected_terms[placeholder] = term
+            return placeholder
+
+        return cls.ENGLISH_TERM_PATTERN.sub(replace, text), protected_terms
+
+    @classmethod
+    def restore_natural_term_placeholders(cls, text: str, protected_terms):
+        restored_text = text
+        for placeholder, term in protected_terms.items():
+            index = cls.get_natural_term_index(placeholder)
+            restored_text = re.sub(re.escape(placeholder), term, restored_text, flags=re.IGNORECASE)
+            if index is None:
+                continue
+
+            numeric_index = str(index + 1)
+            natural_index = re.escape(placeholder)
+            patterns = [
+                rf"the\s+{numeric_index}(?:st|nd|rd|th)?\s+term",
+                rf"{numeric_index}(?:st|nd|rd|th)?\s+term",
+                rf"term\s+{numeric_index}",
+                natural_index,
+            ]
+
+            if index < len(cls.ENGLISH_ORDINALS):
+                ordinal, ordinal_number, word_number = cls.ENGLISH_ORDINALS[index]
+                patterns.extend([
+                    rf"the\s+{ordinal}\s+term",
+                    rf"{ordinal}\s+term",
+                    rf"the\s+{ordinal_number}\s+term",
+                    rf"{ordinal_number}\s+term",
+                    rf"term\s+{word_number}",
+                ])
+
+            for pattern in patterns:
+                restored_text = re.sub(pattern, term, restored_text, flags=re.IGNORECASE)
+
+        return restored_text
+
+    @classmethod
+    def has_unresolved_placeholders(cls, text: str) -> bool:
+        return bool(re.search(
+            r"ZZ\s*X\s*\d+\s*ZZ|"
+            r"X\s*K\s*E+\s*P?\s*E?\s*T\s*E\s*R\s*M\s*\d+\s*X|"
+            r"第\d+个术语|"
+            r"第[一二三四五六七八九十]+个术语",
+            text,
+            re.IGNORECASE,
+        ))
+
+    @classmethod
     def protect_english_terms(cls, text: str):
         protected_terms = {}
 
@@ -88,27 +200,41 @@ class HelsinkiZhEnTranslator:
             if not cls.should_protect_english_term(term):
                 return term
 
-            placeholder = f"XKEEPTERM{len(protected_terms)}X"
+            placeholder = cls.make_placeholder(len(protected_terms))
             protected_terms[placeholder] = term
             return placeholder
 
         return cls.ENGLISH_TERM_PATTERN.sub(replace, text), protected_terms
 
-    @staticmethod
-    def restore_english_terms(text: str, protected_terms):
+    @classmethod
+    def restore_english_terms(cls, text: str, protected_terms):
         restored_text = text
         for placeholder, term in protected_terms.items():
-            restored_text = restored_text.replace(placeholder, term)
-            restored_text = restored_text.replace(placeholder.lower(), term)
+            restored_text = re.sub(re.escape(placeholder), term, restored_text, flags=re.IGNORECASE)
 
-            index = placeholder.removeprefix("XKEEPTERM").removesuffix("X")
-            spaced_placeholder = re.compile(
-                rf"X\s*KEEP\s*TERM\s*{re.escape(index)}\s*X",
+            index = cls.get_placeholder_index(placeholder)
+            if index is None:
+                natural_index = cls.get_natural_term_index(placeholder)
+                index = str(natural_index) if natural_index is not None else None
+            if index is None:
+                continue
+
+            # New placeholder format, in case the model inserts spaces between characters.
+            compact_placeholder = re.compile(
+                rf"Z\s*Z\s*X\s*{re.escape(index)}\s*Z\s*Z",
                 flags=re.IGNORECASE,
             )
-            restored_text = spaced_placeholder.sub(term, restored_text)
+            restored_text = compact_placeholder.sub(term, restored_text)
 
-        if "XKEEPTERM" in restored_text.upper():
+            # Backward compatibility for old placeholders and common model-corrupted variants:
+            # XKEEPTERM0X, XKETERM0X, XKEPETERM0X, and spaced forms.
+            legacy_placeholder = re.compile(
+                rf"X\s*K\s*E+\s*P?\s*E?\s*T\s*E\s*R\s*M\s*{re.escape(index)}\s*X",
+                flags=re.IGNORECASE,
+            )
+            restored_text = legacy_placeholder.sub(term, restored_text)
+
+        if cls.has_unresolved_placeholders(restored_text):
             logging.warning("[MIXED_LANG_PROTECT][WARN] unresolved placeholder in translated text")
         return restored_text
 
@@ -124,10 +250,10 @@ class HelsinkiZhEnTranslator:
         text_to_translate = text
 
         if model_key == "zh-en":
-            text_to_translate, protected_terms = self.protect_english_terms(text)
+            text_to_translate, protected_terms = self.protect_english_terms_with_natural_placeholders(text)
             if protected_terms:
                 logging.info(
-                    "[MIXED_LANG_PROTECT] direction=zh-en terms=%d text_len=%d",
+                    "[MIXED_LANG_PROTECT] direction=zh-en natural_terms=%d text_len=%d",
                     len(protected_terms),
                     len(text),
                 )
@@ -138,6 +264,7 @@ class HelsinkiZhEnTranslator:
         output = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
         translated_text = output[0] if output else text
         if protected_terms:
+            translated_text = self.restore_natural_term_placeholders(translated_text, protected_terms)
             translated_text = self.restore_english_terms(translated_text, protected_terms)
         return (
             translated_text,

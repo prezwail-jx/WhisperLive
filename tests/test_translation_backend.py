@@ -46,26 +46,70 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
             "我现在用 Docker 跑 Whisper small，latency 比 medium 高"
         )
 
-        self.assertIn("XKEEPTERM0X", protected_text)
-        self.assertIn("XKEEPTERM1X", protected_text)
-        self.assertIn("XKEEPTERM2X", protected_text)
-        self.assertIn("XKEEPTERM3X", protected_text)
-        self.assertEqual(terms["XKEEPTERM0X"], "Docker")
-        self.assertEqual(terms["XKEEPTERM1X"], "Whisper small")
-        self.assertEqual(terms["XKEEPTERM2X"], "latency")
-        self.assertEqual(terms["XKEEPTERM3X"], "medium")
+        self.assertIn("ZZX0ZZ", protected_text)
+        self.assertIn("ZZX1ZZ", protected_text)
+        self.assertIn("ZZX2ZZ", protected_text)
+        self.assertIn("ZZX3ZZ", protected_text)
+        self.assertEqual(terms["ZZX0ZZ"], "Docker")
+        self.assertEqual(terms["ZZX1ZZ"], "Whisper small")
+        self.assertEqual(terms["ZZX2ZZ"], "latency")
+        self.assertEqual(terms["ZZX3ZZ"], "medium")
 
     def test_restore_handles_case_and_spaced_placeholder_variants(self):
         restored = HelsinkiZhEnTranslator.restore_english_terms(
-            "Use xkeepterm0x and X KEEP TERM 1 X.",
-            {"XKEEPTERM0X": "Docker", "XKEEPTERM1X": "Whisper small"},
+            "Use zzx0zz, Z Z X 1 Z Z, XKETERM2X, and XKEPETERM3X.",
+            {
+                "ZZX0ZZ": "Docker",
+                "ZZX1ZZ": "Whisper small",
+                "XKEEPTERM2X": "CUDA",
+                "XKEEPTERM3X": "TensorRT",
+            },
         )
 
-        self.assertEqual(restored, "Use Docker and Whisper small.")
+        self.assertEqual(restored, "Use Docker, Whisper small, CUDA, and TensorRT.")
+
+    def test_natural_placeholders_protect_english_terms_in_chinese_text(self):
+        protected_text, terms = HelsinkiZhEnTranslator.protect_english_terms_with_natural_placeholders(
+            "我现在用 Docker 跑 Whisper small，latency 比 medium 高"
+        )
+
+        self.assertIn("第一个术语", protected_text)
+        self.assertIn("第二个术语", protected_text)
+        self.assertIn("第三个术语", protected_text)
+        self.assertIn("第四个术语", protected_text)
+        self.assertEqual(terms["第一个术语"], "Docker")
+        self.assertEqual(terms["第二个术语"], "Whisper small")
+        self.assertEqual(terms["第三个术语"], "latency")
+        self.assertEqual(terms["第四个术语"], "medium")
+
+    def test_restore_natural_placeholders_handles_common_translation_variants(self):
+        restored = HelsinkiZhEnTranslator.restore_natural_term_placeholders(
+            "Use the first term with term 2, third term, and the 4th term.",
+            {
+                "第一个术语": "Docker",
+                "第二个术语": "ACE",
+                "第三个术语": "CUDA",
+                "第四个术语": "TensorRT",
+            },
+        )
+
+        self.assertEqual(restored, "Use Docker with ACE, CUDA, and TensorRT.")
+
+    def test_legacy_placeholder_fallback_works_with_natural_term_keys(self):
+        restored = HelsinkiZhEnTranslator.restore_english_terms(
+            "Use ZZX0ZZ, XKEPETERM1X, and XKETERM2X.",
+            {
+                "第一个术语": "Docker",
+                "第二个术语": "ACE",
+                "第三个术语": "CUDA",
+            },
+        )
+
+        self.assertEqual(restored, "Use Docker, ACE, and CUDA.")
 
     def test_translate_restores_terms_only_for_zh_en(self):
         translator = HelsinkiZhEnTranslator()
-        tokenizer = PlaceholderFakeTokenizer("Use X KEEP TERM 0 X with xkeepterm1x.")
+        tokenizer = PlaceholderFakeTokenizer("Use the first term with term 2.")
         translator.tokenizers["zh-en"] = tokenizer
         translator.models["zh-en"] = FakeModel()
 
@@ -78,9 +122,10 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
         self.assertEqual(translated, "Use Docker with ACE.")
         self.assertEqual(source_language, "zh")
         self.assertEqual(target_language, "en")
-        self.assertIn("XKEEPTERM0X", tokenizer.last_text)
-        self.assertIn("XKEEPTERM1X", tokenizer.last_text)
+        self.assertIn("第一个术语", tokenizer.last_text)
+        self.assertIn("第二个术语", tokenizer.last_text)
         self.assertNotIn("Docker", tokenizer.last_text)
+        self.assertNotIn("ZZX0ZZ", tokenizer.last_text)
 
     def test_pure_chinese_has_no_terms_to_protect(self):
         protected_text, terms = HelsinkiZhEnTranslator.protect_english_terms(
