@@ -14,6 +14,7 @@ from whisper_live.backend.base import ServeClientBase
 class ServeClientFasterWhisper(ServeClientBase):
     SINGLE_MODEL = None
     SINGLE_MODEL_LOCK = threading.Lock()
+    SINGLE_MODEL_INIT_LOCK = threading.Lock()
     BATCH_WORKER = None
 
     def __init__(
@@ -98,11 +99,14 @@ class ServeClientFasterWhisper(ServeClientBase):
     
         try:
             if single_model:
-                if ServeClientFasterWhisper.SINGLE_MODEL is None:
-                    self.create_model(device)
-                    ServeClientFasterWhisper.SINGLE_MODEL = self.transcriber
-                else:
-                    self.transcriber = ServeClientFasterWhisper.SINGLE_MODEL
+                with ServeClientFasterWhisper.SINGLE_MODEL_INIT_LOCK:
+                    if ServeClientFasterWhisper.SINGLE_MODEL is None:
+                        logging.info("Loading shared faster-whisper model")
+                        self.create_model(device)
+                        ServeClientFasterWhisper.SINGLE_MODEL = self.transcriber
+                    else:
+                        logging.info("Reusing shared faster-whisper model")
+                        self.transcriber = ServeClientFasterWhisper.SINGLE_MODEL
             else:
                 self.create_model(device)
         except Exception as e:
