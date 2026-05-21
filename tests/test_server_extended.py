@@ -312,6 +312,49 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
         result = self.server.handle_new_connection(mock_ws, None, None, False)
         self.assertFalse(result)
 
+    @mock.patch("whisper_live.server.threading.Thread")
+    @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    @mock.patch("whisper_live.backend.translation_backend.ServeClientTranslation")
+    def test_initialize_client_passes_server_translation_device(
+        self, mock_translation_client, mock_faster_client, mock_thread
+    ):
+        mock_faster_client.return_value = MagicMock()
+        mock_translation_client.return_value = MagicMock()
+        self.server.translation_device = "cpu"
+        options = {
+            "uid": "test",
+            "language": "zh",
+            "task": "transcribe",
+            "model": "small",
+            "enable_translation": True,
+        }
+
+        self.server.initialize_client(MagicMock(), options, None, None, False)
+
+        self.assertEqual(mock_translation_client.call_args.kwargs["translation_device"], "cpu")
+
+    @mock.patch("whisper_live.server.threading.Thread")
+    @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    @mock.patch("whisper_live.backend.translation_backend.ServeClientTranslation")
+    def test_initialize_client_client_translation_device_overrides_server_default(
+        self, mock_translation_client, mock_faster_client, mock_thread
+    ):
+        mock_faster_client.return_value = MagicMock()
+        mock_translation_client.return_value = MagicMock()
+        self.server.translation_device = "cpu"
+        options = {
+            "uid": "test",
+            "language": "zh",
+            "task": "transcribe",
+            "model": "small",
+            "enable_translation": True,
+            "translation_device": "cuda",
+        }
+
+        self.server.initialize_client(MagicMock(), options, None, None, False)
+
+        self.assertEqual(mock_translation_client.call_args.kwargs["translation_device"], "cuda")
+
 
 class TestTranscriptionServerCleanup(unittest.TestCase):
     def setUp(self):

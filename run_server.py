@@ -102,6 +102,13 @@ if __name__ == "__main__":
         default='config/hotwords.txt',
         help='Path to a text file containing default hotwords, one word or phrase per line.'
     )
+    parser.add_argument(
+        '--translation_device',
+        type=str,
+        choices=['cpu', 'cuda', 'auto'],
+        default='cpu',
+        help='Device for server-side translation models. Defaults to CPU so ASR can keep the GPU.'
+    )
     args = parser.parse_args()
 
     if args.backend == "tensorrt":
@@ -134,4 +141,5 @@ if __name__ == "__main__":
         raw_pcm_input=args.raw_pcm_input,
         metrics_port=args.metrics_port,
         hotwords_file=args.hotwords_file,
+        translation_device=args.translation_device,
     )

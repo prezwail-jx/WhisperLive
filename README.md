@@ -171,9 +171,9 @@ docker network create --subnet 172.30.0.0/24 whisperlive-net
 docker run --rm -it --gpus '"device=0"' \
   --network whisperlive-net \
   -p 9090:9090 \
-  -v "$PWD/model:/app/model:ro" \
-  whisperlive-server \
-  bash
+  -v "$PWD:/app" \
+  -w /app \
+  whisperlive-server bash
 ```
 
 容器内启动服务：
@@ -184,6 +184,7 @@ python run_server.py \
   --backend faster_whisper \
   --max_clients 12 \
   --max_connection_time 600 \
+  --translation_device cpu \
   -fw model/asr/small
 ```
 
@@ -804,6 +805,7 @@ Here are the details of client instance implemented in `run_client.py` script:
   - `mute_audio_playback`: Whether to mute audio playback when transcribing an audio file. Defaults to False.
   - `enable_translation`: Start translation thread on the server (from any to any).
   - `target_language`: Server translation thread's target translation language.
+  - `translation_device`: Server translation model device, one of `cpu`, `cuda`, or `auto`. Server default is `cpu` so ASR can keep the GPU.
 
 ```python
 from whisper_live.client import TranscriptionClient
@@ -898,6 +900,7 @@ Diarization uses online cosine-similarity clustering of speaker embeddings. If `
 Batch multiple client sessions into single GPU calls for higher throughput:
 ```bash
 python3 run_server.py --port 9090 --backend faster_whisper \
+  --translation_device cpu \
   --batch_inference --batch_max_size 8 --batch_window_ms 50
 ```
 

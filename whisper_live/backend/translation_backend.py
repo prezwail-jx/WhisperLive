@@ -53,12 +53,27 @@ class HelsinkiZhEnTranslator:
         self,
         zh_en_model_path="model/opus-mt-zh-en",
         en_zh_model_path="model/opus-mt-en-zh",
+        device="cpu",
     ):
         self.zh_en_model_path = zh_en_model_path
         self.en_zh_model_path = en_zh_model_path
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = self.resolve_device(device)
         self.models = {}
         self.tokenizers = {}
+
+    @staticmethod
+    def normalize_device_name(device):
+        device = (device or "cpu").lower()
+        if device not in ("cpu", "cuda", "auto"):
+            raise ValueError(f"Unsupported translation device: {device}")
+        return device
+
+    @classmethod
+    def resolve_device(cls, device):
+        device = cls.normalize_device_name(device)
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        return torch.device(device)
 
     def load(self):
         logging.info(f"Loading Helsinki zh-en translation models on device: {self.device}")
@@ -297,6 +312,7 @@ class ServeClientTranslation(ServeClientBase):
         model_name="helsinki_zh_en",
         zh_en_model_path="model/opus-mt-zh-en",
         en_zh_model_path="model/opus-mt-en-zh",
+        translation_device="cpu",
         translation_min_chars=8,
         translation_max_chars=60,
         translation_max_wait_seconds=1.0,
@@ -319,6 +335,7 @@ class ServeClientTranslation(ServeClientBase):
         self.model_name = model_name
         self.zh_en_model_path = zh_en_model_path
         self.en_zh_model_path = en_zh_model_path
+        self.translation_device = HelsinkiZhEnTranslator.normalize_device_name(translation_device)
         self.translation_min_chars = translation_min_chars
         self.translation_max_chars = translation_max_chars
         self.translation_max_wait_seconds = translation_max_wait_seconds
@@ -333,12 +350,11 @@ class ServeClientTranslation(ServeClientBase):
 
     def get_translation_cache_key(self):
         """Build the process-local cache key for the configured translation model."""
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return (
             self.model_name,
             self.zh_en_model_path,
             self.en_zh_model_path,
-            str(device),
+            self.translation_device,
         )
         
     def load_translation_model(self):
@@ -352,6 +368,7 @@ class ServeClientTranslation(ServeClientBase):
                     translator = HelsinkiZhEnTranslator(
                         zh_en_model_path=self.zh_en_model_path,
                         en_zh_model_path=self.en_zh_model_path,
+                        device=self.translation_device,
                     )
                     translator.load()
                     self._TRANSLATOR_CACHE[cache_key] = translator

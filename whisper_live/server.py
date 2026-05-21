@@ -187,6 +187,7 @@ class TranscriptionServer:
         self.raw_pcm_input = False
         self.segment_post_processor = None
         self.default_hotwords = None
+        self.translation_device = "cpu"
 
     @staticmethod
     def load_hotwords_file(path):
@@ -239,6 +240,7 @@ class TranscriptionServer:
         
         if enable_translation:
             target_language = options.get("target_language", "auto")
+            translation_device = options.get("translation_device", self.translation_device)
             translation_queue = queue.Queue(maxsize=ServeClientBase.MAX_TRANSLATION_QUEUE_SIZE)
             from whisper_live.backend.translation_backend import ServeClientTranslation
             translation_client = ServeClientTranslation(
@@ -249,6 +251,7 @@ class TranscriptionServer:
                 send_last_n_segments=options.get("send_last_n_segments", 10),
                 model_name=options.get("translation_provider", "helsinki_zh_en"),
                 zh_en_model_path=options.get("zh_en_model_path", "model/opus-mt-zh-en"),
+                translation_device=translation_device,
                 en_zh_model_path=options.get("en_zh_model_path", "model/opus-mt-en-zh"),
             )
             
@@ -564,6 +567,7 @@ class TranscriptionServer:
             raw_pcm_input=False,
             metrics_port: int = 0,
             hotwords_file=None,
+            translation_device="cpu",
             segment_post_processor=None):
         """
         Run the transcription server.
@@ -588,6 +592,7 @@ class TranscriptionServer:
         """
         self.cache_path = cache_path
         self.raw_pcm_input = raw_pcm_input
+        self.translation_device = translation_device
         self.default_hotwords = self.load_hotwords_file(hotwords_file)
         if self.default_hotwords:
             logging.info(

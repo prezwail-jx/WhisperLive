@@ -3,6 +3,8 @@ import queue
 import unittest
 from unittest import mock
 
+import torch
+
 from whisper_live.backend.translation_backend import HelsinkiZhEnTranslator, ServeClientTranslation
 
 
@@ -136,6 +138,23 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
         self.assertEqual(terms, {})
 
 
+class TestHelsinkiZhEnTranslatorDevice(unittest.TestCase):
+    def test_cpu_device_is_explicit(self):
+        translator = HelsinkiZhEnTranslator(device="cpu")
+
+        self.assertEqual(translator.device, torch.device("cpu"))
+
+    @mock.patch("whisper_live.backend.translation_backend.torch.cuda.is_available", return_value=True)
+    def test_auto_device_keeps_existing_cuda_selection(self, mock_cuda_available):
+        translator = HelsinkiZhEnTranslator(device="auto")
+
+        self.assertEqual(translator.device, torch.device("cuda"))
+
+    def test_invalid_device_raises(self):
+        with self.assertRaises(ValueError):
+            HelsinkiZhEnTranslator(device="mps")
+
+
 class TestServeClientTranslationModelCache(unittest.TestCase):
     def setUp(self):
         ServeClientTranslation._TRANSLATOR_CACHE.clear()
@@ -222,6 +241,34 @@ class TestServeClientTranslationModelCache(unittest.TestCase):
         self.assertIsNot(client_a.translator, client_b.translator)
         self.assertEqual(mock_tokenizer.call_count, 4)
         self.assertEqual(mock_model.call_count, 4)
+
+    @mock.patch.object(HelsinkiZhEnTranslator, "load")
+    def test_cache_key_distinguishes_translation_device(self, mock_load):
+        client_cpu = ServeClientTranslation(
+            client_uid="client-cpu",
+            websocket=mock.Mock(),
+            translation_queue=queue.Queue(),
+            translation_device="cpu",
+        )
+        client_cuda = ServeClientTranslation(
+            client_uid="client-cuda",
+            websocket=mock.Mock(),
+            translation_queue=queue.Queue(),
+            translation_device="cuda",
+        )
+        client_auto = ServeClientTranslation(
+            client_uid="client-auto",
+            websocket=mock.Mock(),
+            translation_queue=queue.Queue(),
+            translation_device="auto",
+        )
+
+        self.assertIsNot(client_cpu.translator, client_cuda.translator)
+        self.assertIsNot(client_cpu.translator, client_auto.translator)
+        self.assertEqual(client_cpu.get_translation_cache_key()[-1], "cpu")
+        self.assertEqual(client_cuda.get_translation_cache_key()[-1], "cuda")
+        self.assertEqual(client_auto.get_translation_cache_key()[-1], "auto")
+        self.assertEqual(mock_load.call_count, 3)
 
 
 class TestServeClientTranslationBuffer(unittest.TestCase):
