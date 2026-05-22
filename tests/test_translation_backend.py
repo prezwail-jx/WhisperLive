@@ -86,7 +86,7 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
 
     def test_restore_natural_placeholders_handles_common_translation_variants(self):
         restored = HelsinkiZhEnTranslator.restore_natural_term_placeholders(
-            "Use the first term with term 2, third term, and the 4th term.",
+            "Use the first word with word 2, third word, and the 4th word.",
             {
                 "第一个术语": "Docker",
                 "第二个术语": "ACE",

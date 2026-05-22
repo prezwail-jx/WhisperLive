@@ -188,6 +188,32 @@ python run_server.py \
   -fw model/asr/small
 ```
 
+### WebSocket 压测脚本
+
+服务启动后，可以用 `scripts/stress_ws.py` 模拟多路客户端实时推音频。建议在容器里跑，因为依赖已齐全：
+
+```bash
+docker exec fervent_napier python /app/scripts/stress_ws.py \
+  --host 127.0.0.1 \
+  --port 9090 \
+  --audio /app/test_zn.wav \
+  --clients 2 \
+  --language zh \
+  --target_language en \
+  --enable_translation \
+  --same_output_threshold 2
+```
+
+脚本默认会把结果写到 `scripts/stress_logs/`，终端最后会显示 `log_file=...`。常看字段：
+
+- `success`：本次压测是否达到脚本成功标准。
+- `ready=2/2`：成功连上服务的客户端数。
+- `rt_factor`：总耗时 / 音频时长；`1.0` 接近实时，`1.35` 表示比实时慢约 35%，默认超过 `1.5` 视为不稳。
+- `translations` / `tr_msgs`：翻译消息数；开启翻译时每路至少应大于 0。
+- `errors` / `timeout`：连接、服务端或等待超时问题。
+
+注意：如果服务启动时使用了 `-fw`，实际 ASR 模型由服务端 `-fw` 决定；压测脚本里的 `--model` 只在服务端没有 `-fw` 时才会影响模型选择。
+
 启动 Web client：
 
 ```bash

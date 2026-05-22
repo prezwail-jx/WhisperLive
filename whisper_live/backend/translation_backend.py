@@ -177,6 +177,9 @@ class HelsinkiZhEnTranslator:
                 rf"the\s+{numeric_index}(?:st|nd|rd|th)?\s+term",
                 rf"{numeric_index}(?:st|nd|rd|th)?\s+term",
                 rf"term\s+{numeric_index}",
+                rf"the\s+{numeric_index}(?:st|nd|rd|th)?\s+word",
+                rf"{numeric_index}(?:st|nd|rd|th)?\s+word",
+                rf"word\s+{numeric_index}",
                 natural_index,
             ]
 
@@ -188,6 +191,11 @@ class HelsinkiZhEnTranslator:
                     rf"the\s+{ordinal_number}\s+term",
                     rf"{ordinal_number}\s+term",
                     rf"term\s+{word_number}",
+                    rf"the\s+{ordinal}\s+word",
+                    rf"{ordinal}\s+word",
+                    rf"the\s+{ordinal_number}\s+word",
+                    rf"{ordinal_number}\s+word",
+                    rf"word\s+{word_number}",
                 ])
 
             for pattern in patterns:
@@ -301,7 +309,7 @@ class ServeClientTranslation(ServeClientBase):
     _TRANSLATOR_CACHE = {}
     _TRANSLATOR_INFERENCE_LOCKS = {}
     _TRANSLATOR_CACHE_LOCK = threading.Lock()
-    
+
     def __init__(
         self,
         client_uid,
@@ -313,14 +321,13 @@ class ServeClientTranslation(ServeClientBase):
         zh_en_model_path="model/opus-mt-zh-en",
         en_zh_model_path="model/opus-mt-en-zh",
         translation_device="cpu",
-        translation_min_chars=8,
-        translation_max_chars=60,
-        translation_max_wait_seconds=1.0,
+        translation_min_chars=12,
+        translation_max_chars=100,
+        translation_max_wait_seconds=2.0,
         translation_sentence_endings="。！？.!?",
     ):
         """
         Initialize the translation client.
-        
         Args:
             client_uid (str): Unique identifier for the client
             websocket: WebSocket connection to the client
@@ -356,7 +363,7 @@ class ServeClientTranslation(ServeClientBase):
             self.en_zh_model_path,
             self.translation_device,
         )
-        
+
     def load_translation_model(self):
         """Load the translation model and tokenizer."""
         try:
@@ -383,20 +390,20 @@ class ServeClientTranslation(ServeClientBase):
             self.translator = None
             self.translator_lock = None
             self.model_loaded = False
-    
+
     def translate_text(self, text: str, source_language: Optional[str]):
         """
         Translate a single text segment.
-        
+
         Args:
             text (str): Text to translate
-            
+
         Returns:
             str: Translated text or original text if translation fails
         """
         if not self.model_loaded or not self.translator or not text.strip():
             return text, source_language, self.target_language
-            
+
         try:
             with self.translator_lock:
                 return self.translator.translate(text, source_language, self.target_language)
@@ -484,59 +491,59 @@ class ServeClientTranslation(ServeClientBase):
         self.translated_segments.append(translated_segment)
         segments_to_send = self.prepare_translated_segments()
         self.send_translation_to_client(segments_to_send)
-    
+
     def process_translation_queue(self):
         """
         Process segments from the translation queue.
         Continuously reads from the queue until None is received (exit signal).
         """
         logging.info(f"Starting translation processing for client {self.client_uid}")
-        
+
         while not self.exit:
             try:
                 # Get segment from queue with timeout
                 segment = self.translation_queue.get(timeout=1.0)
-                
+
                 # Check for exit signal
                 if segment is None:
                     logging.info(f"Received exit signal for translation client {self.client_uid}")
                     self.flush_translation_buffer(force=True)
                     break
-                    
+
                 # Only translate completed segments
                 if not segment.get("completed", False):
                     self.translation_queue.task_done()
                     continue
-                    
+
                 self.add_segment_to_translation_buffer(segment)
                 self.flush_translation_buffer()
-                
+
                 self.translation_queue.task_done()
-                
+
             except queue.Empty:
                 self.flush_translation_buffer()
                 continue
             except Exception as e:
                 logging.error(f"Error processing translation queue: {e}")
                 continue
-        
+
         logging.info(f"Translation processing ended for client {self.client_uid}")
-    
+
     def prepare_translated_segments(self):
         """
         Prepare the last n translated segments to send to client.
-        
+
         Returns:
             list: List of recent translated segments
         """
         if len(self.translated_segments) >= self.send_last_n_segments:
             return self.translated_segments[-self.send_last_n_segments:]
         return self.translated_segments[:]
-    
+
     def send_translation_to_client(self, translated_segments):
         """
         Send translated segments to the client via WebSocket.
-        
+
         Args:
             translated_segments (list): List of translated segments to send
         """
@@ -549,24 +556,24 @@ class ServeClientTranslation(ServeClientBase):
             )
         except Exception as e:
             logging.error(f"[ERROR]: Sending translation data to client: {e}")
-    
+
     def speech_to_text(self):
         """
         Override parent method to handle translation processing.
         This method will be called when the translation thread starts.
         """
         self.process_translation_queue()
-    
+
     def set_target_language(self, language: str):
         """
         Change the target language for translation.
-        
+
         Args:
             language (str): New target language code
         """
         self.target_language = language
         logging.info(f"Target language changed to: {language}")
-    
+
     def cleanup(self):
         """Clean up translation resources."""
         logging.info(f"Cleaning up translation resources for client {self.client_uid}")
@@ -575,12 +582,12 @@ class ServeClientTranslation(ServeClientBase):
         except Exception as e:
             logging.error(f"Failed to flush translation buffer during cleanup: {e}")
         self.exit = True
-        
+
         try:
             self.translation_queue.put(None, timeout=1.0)
         except:
             pass
-        
+
         self.translated_segments.clear()
         self.translation_buffer.clear()
         self.translation_buffer_started_at = None
