@@ -370,5 +370,78 @@ class TestTranscriptionServerCleanup(unittest.TestCase):
         client.cleanup.assert_called_once()
 
 
+class TestClientManagerAdminStatus(unittest.TestCase):
+    def setUp(self):
+        self.cm = ClientManager(max_clients=4, max_connection_time=600)
+        self.ws = MagicMock()
+        self.client = MagicMock()
+        self.client.client_uid = "uid-1"
+        self.options = {
+            "uid": "uid-1",
+            "language": "zh",
+            "model": "model/asr/small",
+            "enable_translation": True,
+            "target_language": "en",
+        }
+
+    def test_register_client_status_snapshot(self):
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+
+        payload = self.cm.get_client_status_snapshot()
+        status = payload["clients"][0]
+
+        self.assertEqual(status["uid"], "uid-1")
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["backend"], "faster_whisper")
+        self.assertEqual(status["language"], "zh")
+        self.assertEqual(status["model"], "model/asr/small")
+        self.assertTrue(status["translation_enabled"])
+        self.assertEqual(status["target_language"], "en")
+
+    def test_update_client_message_tracks_asr_and_translation(self):
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+
+        self.cm.update_client_message(self.ws, "segments", [{"text": "你好"}, {"text": "世界"}])
+        self.cm.update_client_message(self.ws, "translated_segments", [{"text": "hello world"}])
+
+        status = self.cm.get_client_status_snapshot()["clients"][0]
+        self.assertEqual(status["segment_msgs"], 1)
+        self.assertEqual(status["segment_items"], 2)
+        self.assertEqual(status["last_source_text"], "世界")
+        self.assertEqual(status["translation_msgs"], 1)
+        self.assertEqual(status["translation_items"], 1)
+        self.assertEqual(status["last_translation_text"], "hello world")
+
+    def test_mark_client_disconnected_keeps_snapshot(self):
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+        self.cm.mark_client_disconnected(self.ws)
+
+        status = self.cm.get_client_status_snapshot()["clients"][0]
+        self.assertFalse(status["connected"])
+        self.assertIsNotNone(status["disconnected_at"])
+
+    def test_delete_disconnected_client_status_removes_snapshot(self):
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+        self.cm.mark_client_disconnected(self.ws)
+
+        result = self.cm.delete_disconnected_client_status("uid-1")
+
+        self.assertEqual(result, "deleted")
+        self.assertEqual(self.cm.get_client_status_snapshot()["clients"], [])
+
+    def test_delete_connected_client_status_is_rejected(self):
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+
+        result = self.cm.delete_disconnected_client_status("uid-1")
+
+        self.assertEqual(result, "connected")
+        self.assertEqual(len(self.cm.get_client_status_snapshot()["clients"]), 1)
+
+    def test_delete_missing_client_status_returns_not_found(self):
+        result = self.cm.delete_disconnected_client_status("missing")
+
+        self.assertEqual(result, "not_found")
+
+
 if __name__ == "__main__":
     unittest.main()

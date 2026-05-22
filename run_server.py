@@ -53,7 +53,7 @@ if __name__ == "__main__":
                         default="~/.cache/whisper-live/",
                         help='Path to cache the converted ctranslate2 models.')
     parser.add_argument(
-        "--rest_port", type=int, default=8000, help="Port for the REST API server."
+        "--rest_port", type=int, default=8000, help="Port for the admin status API and optional REST API server."
     )
     parser.add_argument(
         "--enable_rest",

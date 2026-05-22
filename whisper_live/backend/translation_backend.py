@@ -554,6 +554,11 @@ class ServeClientTranslation(ServeClientBase):
                     "translated_segments": translated_segments,
                 })
             )
+            if self.admin_status_callback:
+                try:
+                    self.admin_status_callback(translated_segments)
+                except Exception as e:
+                    logging.error(f"[ERROR]: admin translation status update failed: {e}")
         except Exception as e:
             logging.error(f"[ERROR]: Sending translation data to client: {e}")
 

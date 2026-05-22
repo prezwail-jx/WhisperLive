@@ -42,6 +42,92 @@ class ClientManager:
         self.max_clients = max_clients
         self.max_connection_time = max_connection_time
         self.lock = threading.Lock()
+        self.client_status = {}
+
+    @staticmethod
+    def _latest_segment_text(segments):
+        if not segments:
+            return ""
+        for segment in reversed(segments):
+            text = segment.get("text", "") if isinstance(segment, dict) else ""
+            if text:
+                return text
+        return ""
+
+    def register_client_status(self, websocket, client, options, backend):
+        now = time.time()
+        uid = getattr(client, "client_uid", options.get("uid"))
+        status = {
+            "uid": uid,
+            "connected": True,
+            "connected_at": now,
+            "disconnected_at": None,
+            "backend": backend.value if isinstance(backend, BackendType) else str(backend),
+            "language": options.get("language"),
+            "model": options.get("model"),
+            "translation_enabled": bool(options.get("enable_translation", False)),
+            "target_language": options.get("target_language", "auto"),
+            "segment_msgs": 0,
+            "segment_items": 0,
+            "translation_msgs": 0,
+            "translation_items": 0,
+            "last_activity_at": now,
+            "last_source_text": "",
+            "last_translation_text": "",
+        }
+        with self.lock:
+            self.client_status[websocket] = status
+
+    def update_client_message(self, websocket, message_type, segments):
+        now = time.time()
+        text = self._latest_segment_text(segments)
+        with self.lock:
+            status = self.client_status.get(websocket)
+            if not status:
+                return
+            if message_type == "segments":
+                status["segment_msgs"] += 1
+                status["segment_items"] += len(segments or [])
+                if text:
+                    status["last_source_text"] = text
+            elif message_type == "translated_segments":
+                status["translation_msgs"] += 1
+                status["translation_items"] += len(segments or [])
+                if text:
+                    status["last_translation_text"] = text
+            status["last_activity_at"] = now
+
+    def mark_client_disconnected(self, websocket):
+        now = time.time()
+        with self.lock:
+            status = self.client_status.get(websocket)
+            if status:
+                status["connected"] = False
+                status["disconnected_at"] = now
+                status["last_activity_at"] = now
+
+    def get_client_status_snapshot(self):
+        now = time.time()
+        with self.lock:
+            statuses = [dict(status) for status in self.client_status.values()]
+        for status in statuses:
+            connected_at = status.get("connected_at") or now
+            last_activity_at = status.get("last_activity_at") or connected_at
+            status["connected_seconds"] = round((status.get("disconnected_at") or now) - connected_at, 3)
+            status["last_activity_seconds_ago"] = round(now - last_activity_at, 3)
+        statuses.sort(key=lambda item: item.get("connected_at", 0), reverse=True)
+        return {"server_time": now, "clients": statuses}
+
+    def delete_disconnected_client_status(self, uid):
+        with self.lock:
+            for websocket, status in list(self.client_status.items()):
+                if status.get("uid") != uid:
+                    continue
+                if status.get("connected"):
+                    return "connected"
+                del self.client_status[websocket]
+                return "deleted"
+        return "not_found"
 
     def add_client(self, websocket, client):
         """
@@ -216,6 +302,19 @@ class TranscriptionServer:
             return
         if self.default_hotwords:
             options["hotwords"] = self.default_hotwords
+
+    def get_admin_clients_payload(self):
+        if not self.client_manager:
+            return {"server_time": time.time(), "clients": []}
+        return self.client_manager.get_client_status_snapshot()
+
+    def _default_cors_origins(self, websocket_port):
+        return [
+            f"http://localhost:{websocket_port}",
+            f"http://127.0.0.1:{websocket_port}",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+        ]
 
     def resolve_asr_model_path(self, model):
         if model in self.LOCAL_ASR_MODEL_NAMES:
@@ -407,7 +506,19 @@ class TranscriptionServer:
             client.translation_client = translation_client
             client.translation_thread = translation_thread
 
+        if translation_client:
+            translation_client.admin_status_callback = functools.partial(
+                self.client_manager.update_client_message,
+                websocket,
+                "translated_segments",
+            )
+        client.admin_status_callback = functools.partial(
+            self.client_manager.update_client_message,
+            websocket,
+            "segments",
+        )
         self.client_manager.add_client(websocket, client)
+        self.client_manager.register_client_status(websocket, client, options, self.backend)
 
     def _create_diarizer(self, options):
         """Create a SpeakerDiarizer if the client requested diarization.
@@ -643,19 +754,38 @@ class TranscriptionServer:
         if metrics_port > 0:
             wl_metrics.start_metrics_server(metrics_port)
 
-        # New OpenAI-compatible REST API (toggleable via enable_rest boolean)
-        if enable_rest:
-            app = FastAPI(title="WhisperLive OpenAI-Compatible API")
-            origins = [o.strip() for o in cors_origins.split(',')] if cors_origins else []
-            app.add_middleware(
-                CORSMiddleware,
-                allow_origins=origins,
-                allow_credentials=True,
-                allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
-                allow_headers=["*"],  # Allows all headers
+        # Admin status API is always available on rest_port. The OpenAI-compatible
+        # REST API is added to the same app when enable_rest is true.
+        app = FastAPI(title="WhisperLive Admin API")
+        origins = [o.strip() for o in cors_origins.split(',')] if cors_origins else self._default_cors_origins(port)
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        @app.get("/admin/clients")
+        async def admin_clients():
+            return self.get_admin_clients_payload()
+
+        @app.delete("/admin/clients/{uid}")
+        async def delete_admin_client(uid: str):
+            result = self.client_manager.delete_disconnected_client_status(uid)
+            if result == "deleted":
+                return {"deleted": True, "uid": uid}
+            if result == "connected":
+                return JSONResponse(
+                    status_code=409,
+                    content={"deleted": False, "uid": uid, "error": "client is still connected"},
+                )
+            return JSONResponse(
+                status_code=404,
+                content={"deleted": False, "uid": uid, "error": "client not found"},
             )
 
-
+        if enable_rest:
             @app.post("/v1/audio/transcriptions")
             async def transcribe(
                 file: UploadFile,
@@ -759,13 +889,15 @@ class TranscriptionServer:
                     wl_metrics.track_error("rest_transcription")
                     return JSONResponse({"error": str(e)}, status_code=500)
 
-            threading.Thread(
-                target=uvicorn.run,
-                args=(app,),
-                kwargs={"host": "0.0.0.0", "port": rest_port, "log_level": "info"},
-                daemon=True
-            ).start()
-            logging.info(f"✅ OpenAI-Compatible API started on http://0.0.0.0:{rest_port}")
+        threading.Thread(
+            target=uvicorn.run,
+            args=(app,),
+            kwargs={"host": "0.0.0.0", "port": rest_port, "log_level": "info"},
+            daemon=True
+        ).start()
+        if enable_rest:
+            logging.info(f"OpenAI-compatible REST API started on http://0.0.0.0:{rest_port}")
+        logging.info(f"Admin API available at http://0.0.0.0:{rest_port}/admin/clients")
 
         # Original WebSocket server (always supported)
         with serve(
@@ -827,4 +959,5 @@ class TranscriptionServer:
             # Wait for translation thread to finish
             if hasattr(client, 'translation_thread') and client.translation_thread:
                 client.translation_thread.join(timeout=2.0)
+            self.client_manager.mark_client_disconnected(websocket)
             self.client_manager.remove_client(websocket)

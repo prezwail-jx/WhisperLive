@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WhisperLive 中控</title>
+    <link rel="stylesheet" href="./admin.css">
+  </head>
+  <body>
+    <main class="admin-shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">WhisperLive</p>
+          <h1>Client 中控</h1>
+        </div>
+        <span id="statusBadge" class="badge idle">未连接</span>
+      </section>
+
+      <section class="controls" aria-label="中控连接设置">
+        <label>
+          Admin API
+          <input id="apiInput" type="text" value="http://localhost:8000" autocomplete="off">
+        </label>
+        <label>
+          刷新间隔 ms
+          <input id="intervalInput" type="number" min="500" step="500" value="1000">
+        </label>
+        <div class="actions">
+          <button id="startButton" type="button">开始</button>
+          <button id="stopButton" type="button">停止</button>
+        </div>
+      </section>
+
+      <section class="summary-grid" aria-label="汇总指标">
+        <article><span>当前连接</span><strong id="activeCount">0</strong></article>
+        <article><span>翻译开启</span><strong id="translationCount">0</strong></article>
+        <article><span>最近活跃</span><strong id="recentCount">0</strong></article>
+        <article><span>总 Client</span><strong id="totalCount">0</strong></article>
+      </section>
+
+      <section class="table-panel" aria-label="Client 列表">
+        <header>
+          <h2>实时 Client 状态</h2>
+          <span id="updatedAt">未刷新</span>
+        </header>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>UID</th>
+                <th>时长</th>
+                <th>语言</th>
+                <th>模型</th>
+                <th>ASR</th>
+                <th>翻译</th>
+                <th>活跃</th>
+                <th>最后原文</th>
+                <th>最后译文</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="clientRows">
+              <tr><td colspan="11" class="empty">暂无数据</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="./admin.js"></script>
+  </body>
+</html>

@@ -63,6 +63,7 @@ class ServeClientBase(object):
         self.transcript = []
         self.end_time_for_same_output = None
         self.translation_queue = translation_queue
+        self.admin_status_callback = None
 
         # Optional post-processing callable for segments.
         # If set, called with a segment dict and must return a segment dict.
@@ -312,6 +313,11 @@ class ServeClientBase(object):
                     "segments": segments,
                 })
             )
+            if self.admin_status_callback:
+                try:
+                    self.admin_status_callback(segments)
+                except Exception as e:
+                    logging.error(f"[ERROR]: admin status update failed: {e}")
             for seg in segments:
                 wl_metrics.track_segment_emitted(completed=seg.get("completed", False))
         except Exception as e:
