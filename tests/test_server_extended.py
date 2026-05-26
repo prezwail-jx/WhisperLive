@@ -378,6 +378,7 @@ class TestClientManagerAdminStatus(unittest.TestCase):
         self.client.client_uid = "uid-1"
         self.options = {
             "uid": "uid-1",
+            "client_name": "会议室A",
             "language": "zh",
             "model": "model/asr/small",
             "enable_translation": True,
@@ -391,12 +392,21 @@ class TestClientManagerAdminStatus(unittest.TestCase):
         status = payload["clients"][0]
 
         self.assertEqual(status["uid"], "uid-1")
+        self.assertEqual(status["client_name"], "会议室A")
         self.assertTrue(status["connected"])
         self.assertEqual(status["backend"], "faster_whisper")
         self.assertEqual(status["language"], "zh")
         self.assertEqual(status["model"], "model/asr/small")
         self.assertTrue(status["translation_enabled"])
         self.assertEqual(status["target_language"], "en")
+
+    def test_register_client_status_uses_default_name(self):
+        self.options.pop("client_name")
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+
+        status = self.cm.get_client_status_snapshot()["clients"][0]
+
+        self.assertEqual(status["client_name"], "Client-uid-1")
 
     def test_update_client_message_tracks_asr_and_translation(self):
         self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)

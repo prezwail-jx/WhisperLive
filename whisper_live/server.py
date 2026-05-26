@@ -59,6 +59,7 @@ class ClientManager:
         uid = getattr(client, "client_uid", options.get("uid"))
         status = {
             "uid": uid,
+            "client_name": options.get("client_name") or f"Client-{str(uid)[:8]}",
             "connected": True,
             "connected_at": now,
             "disconnected_at": None,

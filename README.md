@@ -15,9 +15,9 @@ Docker 镜像拉起 WhisperLive 服务
 推荐固定使用这几个端口：
 
 ```text
-9090  WebSocket ASR 服务
-9093  Web 前端和中控页面
-9094  Admin API，映射到容器内 8000
+9090  后端 WebSocket ASR 服务
+9093  浏览器统一入口：Web 前端、中控、/ws、/admin/
+9094  后端 Admin API，映射到容器内 8000
 ```
 
 下面示例使用测试服务器 IP：
@@ -36,7 +36,13 @@ Docker 镜像拉起 WhisperLive 服务
 docker build --network=host -f docker/Dockerfile.server -t whisperlive-server .
 ```
 
-如果已经有 `whisperlive-server` 镜像，可以跳过这一步。
+构建 Web client 静态页面镜像，备用测试时使用：
+
+```bash
+docker build -f docker/Dockerfile.client -t whisperlive-client:latest .
+```
+
+如果已经有对应镜像，可以跳过这一步。
 
 ## 2. 创建 Docker 网络
 
@@ -82,6 +88,7 @@ python run_server.py \
 - `-fw` 指定服务端实际使用的 ASR 模型。
 - `--translation_device cpu` 表示翻译模型走 CPU，GPU 优先留给 ASR。
 - `--rest_port 8000` 是容器内 Admin API 端口，通过 `-p 9094:8000` 暴露到宿主机。
+- 浏览器推荐只访问 `9093`；`9093` 会把 `/ws` 转到 `9090`，把 `/admin/` 转到 `9094`。
 - `--cors-origins` 必须包含中控页面地址，否则浏览器会显示连接错误。
 
 如果要换模型，例如 small：
@@ -96,64 +103,83 @@ python run_server.py \
 -fw model/asr/faster-whisper-belle-large-v3-turbo-zh-int8
 ```
 
-## 4. Server 端：启动中控页面
+## 4. 推荐：统一 Web 入口
 
-server 端机器负责跑 ASR、翻译、Admin API 和中控页面。另开一个 server 端宿主机终端，在项目根目录执行：
+推荐生产和多人使用时采用统一入口：client 用户只打开一个地址，不需要在 client 机器上安装 Docker。
+
+统一入口 nginx 负责：
+
+```text
+/             -> Web 同传页面
+/admin.html   -> 中控页面
+/ws           -> 反代到后端 WebSocket 9090
+/admin/       -> 反代到后端 Admin API 9094
+```
+
+先按第 3 节启动后端容器和 `run_server.py`。如果统一入口页面使用 `http://192.168.1.100:9093`，服务启动命令里的 CORS 可以写：
+
+```bash
+python run_server.py \
+  --port 9090 \
+  --backend faster_whisper \
+  --max_clients 12 \
+  --max_connection_time 600 \
+  --translation_device cpu \
+  --rest_port 8000 \
+  --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093 \
+  -fw model/asr/whisper-small-zh_tw-ct2/
+```
+
+另开一个 server 端宿主机终端，启动统一入口 nginx：
 
 ```bash
 docker run --rm -it \
-  --name whisperlive-admin-web \
+  --name whisperlive-web-gateway \
   --network whisperlive-net \
+  --add-host=host.docker.internal:host-gateway \
   -p 9093:80 \
   -v "$PWD/web:/usr/share/nginx/html:ro" \
+  -v "$PWD/deploy/nginx/whisperlive.conf:/etc/nginx/conf.d/default.conf:ro" \
   nginx:alpine
 ```
 
-中控页面地址：
+client 用户打开：
+
+```text
+http://192.168.1.100:9093/
+```
+
+页面会默认连接：
+
+```text
+ws://192.168.1.100:9093/ws
+```
+
+页面里的 `Client 名称` 用来区分每一路 client，例如 `会议室A`、`前台电脑`。连接成功后，中控会在 `名称` 列显示这个名字；如果不填，会自动显示 `Client-xxxx`。
+
+中控打开：
 
 ```text
 http://192.168.1.100:9093/admin.html
 ```
 
-中控页面里的 `Admin API` 填 server 端 Admin API 地址：
+中控会默认请求：
 
 ```text
-http://192.168.1.100:9094
+http://192.168.1.100:9093/admin/clients
 ```
 
-如果是在 server 机器本机浏览器打开中控，也可以用：
+这种方式下，多台 client 机器都只需要浏览器打开同一个地址。多路并发仍由后端 `--max_clients`、模型大小和 GPU 性能决定。
+
+如果要让远程浏览器稳定使用麦克风，生产建议给统一入口配置 HTTPS，然后页面会自动使用：
 
 ```text
-http://localhost:9093/admin.html
+wss://你的域名/ws
 ```
 
-对应 `Admin API` 填：
+## 5. 备用：client 端 Docker 拉 Web 页面
 
-```text
-http://localhost:9094
-```
-
-## 5. Client 端：打开 Web 同传页面
-
-Web 同传页面使用打开网页那台机器的麦克风。client 端可以和 server 端是同一台机器，也可以是另一台机器。
-
-### 情况 A：client 和 server 是同一台机器
-
-浏览器打开：
-
-```text
-http://localhost:9093/
-```
-
-页面里的 `Server` 填：
-
-```text
-ws://localhost:9090
-```
-
-### 情况 B：client 和 server 不是同一台机器，client 端用 Docker 镜像启动 Web 页面（推荐）
-
-client 机器只负责提供浏览器 Web 页面，不跑 ASR、不跑翻译，也不需要 GPU。推荐使用 `whisperlive-client:latest` 镜像拉起：
+如果暂时没有统一入口或 HTTPS，可以让 client 机器自己拉起静态 Web 页面容器。client 机器只负责页面，不跑 ASR、不跑翻译，也不需要 GPU。
 
 ```bash
 docker run --rm -it \
@@ -168,92 +194,13 @@ client 机器浏览器打开：
 http://localhost:8080
 ```
 
-页面里的 `Server` 填远程 server 的 WebSocket 地址：
+页面里的 `Server` 手动填远程 server 的 WebSocket 地址：
 
 ```text
 ws://192.168.1.100:9090
 ```
 
-这种方式的好处是页面运行在 client 本机的 `localhost`，浏览器更容易允许麦克风权限；server 端只需要开放 `9090` WebSocket 和 `9094` Admin API，中控页面仍然可以在 server 端打开。client 端不需要运行 `run_client.py`。
-
-如果 client 机器还没有 `whisperlive-client:latest` 镜像，需要先构建或导入镜像。构建命令：
-
-```bash
-docker build -f docker/Dockerfile.client -t whisperlive-client:latest .
-```
-
-### 完整推荐流程：server 和 client 不同机器
-
-server 端执行：
-
-```bash
-# 1. 启动后端容器
-docker run --rm -it --gpus '"device=0"' \
-  --name whisperlive-server \
-  --network whisperlive-net \
-  -p 9090:9090 \
-  -p 9094:8000 \
-  -v "$PWD:/app" \
-  -w /app \
-  whisperlive-server bash
-
-# 2. 容器内启动服务
-python run_server.py \
-  --port 9090 \
-  --backend faster_whisper \
-  --max_clients 12 \
-  --max_connection_time 600 \
-  --translation_device cpu \
-  --rest_port 8000 \
-  --cors-origins http://192.168.1.100:9093,http://localhost:8080,http://127.0.0.1:8080 \
-  -fw model/asr/whisper-small-zh_tw-ct2/
-```
-
-server 端另开终端启动中控页面：
-
-```bash
-docker run --rm -it \
-  --name whisperlive-admin-web \
-  --network whisperlive-net \
-  -p 9093:80 \
-  -v "$PWD/web:/usr/share/nginx/html:ro" \
-  nginx:alpine
-```
-
-server 端打开中控：
-
-```text
-http://localhost:9093/admin.html
-```
-
-中控里的 `Admin API` 填：
-
-```text
-http://localhost:9094
-```
-
-client 端用 Docker 镜像启动 Web 页面：
-
-```bash
-docker run --rm -it \
-  --name whisperlive-client \
-  -p 8080:80 \
-  whisperlive-client:latest
-```
-
-client 端浏览器打开：
-
-```text
-http://localhost:8080
-```
-
-client 页面里的 `Server` 填：
-
-```text
-ws://192.168.1.100:9090
-```
-
-然后点击开始，允许浏览器麦克风权限。
+这种方式仍然支持多路并发：每台 client 的浏览器都会建立独立 WebSocket 连接到 server。
 
 ## 6. 命令行 client 使用
 
@@ -388,11 +335,13 @@ docker ps
 
 这个不是服务错误。`curl -I` 发的是 `HEAD` 请求，而 `/admin/clients` 只支持 `GET`。
 
-验证 Admin API 请用：
+验证统一入口的 Admin API 请用：
 
 ```bash
-curl http://127.0.0.1:9094/admin/clients
+curl http://127.0.0.1:9093/admin/clients
 ```
+
+如果要直接验证后端裸端口，也可以用 `http://127.0.0.1:9094/admin/clients`。
 
 ### `localhost` 容易混淆
 
@@ -404,20 +353,23 @@ localhost
 
 指的是你自己的电脑，不是 SSH 服务器。
 
-远程访问请使用：
+远程浏览器访问统一入口时只用 `9093`：
 
 ```text
-http://192.168.1.100:9093/admin.html
-http://192.168.1.100:9094
-ws://192.168.1.100:9090
+Web 页面：http://192.168.1.100:9093/
+中控页面：http://192.168.1.100:9093/admin.html
+WebSocket：ws://192.168.1.100:9093/ws
+Admin API：http://192.168.1.100:9093
 ```
+
+`9090/9094` 是后端真实端口，通常不直接填到浏览器页面里。
 
 ## 9. 停止服务
 
 停止前端容器：
 
 ```bash
-docker stop whisperlive-admin-web
+docker stop whisperlive-web-gateway
 ```
 
 停止后端容器：

@@ -3,6 +3,7 @@ const TARGET_SAMPLE_RATE = 16000;
 const elements = {
   form: document.getElementById("settingsForm"),
   server: document.getElementById("serverInput"),
+  clientName: document.getElementById("clientNameInput"),
   backend: document.getElementById("backendInput"),
   model: document.getElementById("modelInput"),
   customModel: document.getElementById("customModelInput"),
@@ -67,6 +68,37 @@ function createUid() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function defaultWebSocketUrl() {
+  if (!window.location.host) {
+    return "ws://localhost:9090";
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/ws`;
+}
+
+function initializeDefaultServer() {
+  const legacyDefault = "ws://localhost:9090";
+  if (!elements.server.value || elements.server.value === legacyDefault) {
+    elements.server.value = defaultWebSocketUrl();
+  }
+}
+
+function initializeClientName() {
+  const savedName = window.localStorage.getItem("whisperlive_client_name");
+  if (savedName && !elements.clientName.value) {
+    elements.clientName.value = savedName;
+  }
+}
+
+function resolveClientName(clientUid) {
+  const name = elements.clientName.value.trim();
+  if (name) {
+    window.localStorage.setItem("whisperlive_client_name", name);
+    return name;
+  }
+  return `Client-${clientUid.slice(0, 8)}`;
+}
+
 function setStatus(text, state = "idle") {
   elements.status.textContent = text;
   elements.status.className = `status ${state}`;
@@ -98,6 +130,7 @@ function updateMeetingLog(segments, log) {
 function buildMeetingLog() {
   return {
     meeting_id: meetingId,
+    client_name: currentConfig ? currentConfig.client_name : elements.clientName.value.trim(),
     created_at: meetingStartedAt,
     exported_at: new Date().toISOString(),
     server: elements.server.value.trim(),
@@ -268,11 +301,17 @@ function downsampleTo16k(input, inputSampleRate) {
   return output;
 }
 
-function sendConfig() {
+function sendConfig(event) {
+  const targetSocket = event?.target || socket;
+  if (!targetSocket || targetSocket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
   uid = createUid();
   const selectedLanguage = elements.language.value || null;
   const payload = {
     uid,
+    client_name: resolveClientName(uid),
     backend: elements.backend.value,
     language: selectedLanguage,
     task: "transcribe",
@@ -289,7 +328,21 @@ function sendConfig() {
     en_zh_model_path: "model/opus-mt-en-zh",
   };
   currentConfig = payload;
-  socket.send(JSON.stringify(payload));
+  targetSocket.send(JSON.stringify(payload));
+}
+
+async function requestMicrophoneStream() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("当前页面无法访问麦克风。请使用 HTTPS，或在 client 本机通过 http://localhost 打开页面。");
+  }
+
+  return navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      channelCount: 1,
+    },
+  });
 }
 
 async function startCapture() {
@@ -299,6 +352,8 @@ async function startCapture() {
   renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
   renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
   updateDirection(null);
+
+  mediaStream = await requestMicrophoneStream();
 
   socket = new WebSocket(elements.server.value.trim());
   socket.binaryType = "arraybuffer";
@@ -310,14 +365,6 @@ async function startCapture() {
       setStatus("已断开", "idle");
     }
     stopCapture(false);
-  });
-
-  mediaStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      channelCount: 1,
-    },
   });
 
   audioContext = new AudioContext();
@@ -393,6 +440,9 @@ elements.stop.addEventListener("click", () => {
 elements.exportLog.addEventListener("click", exportMeetingLog);
 
 elements.clearLog.addEventListener("click", clearMeetingLog);
+
+initializeDefaultServer();
+initializeClientName();
 
 elements.backend.addEventListener("change", renderModelOptions);
 

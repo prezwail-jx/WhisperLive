@@ -19,6 +19,14 @@ function setStatus(text, state) {
   els.badge.className = `badge ${state}`;
 }
 
+function initializeDefaultApi() {
+  const legacyDefault = "http://localhost:8000";
+  const defaultOrigin = window.location.origin === "null" ? legacyDefault : window.location.origin;
+  if (!els.api.value || els.api.value === legacyDefault) {
+    els.api.value = defaultOrigin;
+  }
+}
+
 function apiBaseUrl() {
   return els.api.value.replace(/\/$/, "");
 }
@@ -68,7 +76,7 @@ function render(data) {
   els.updatedAt.textContent = `刷新 ${new Date().toLocaleTimeString()}`;
 
   if (!clients.length) {
-    els.rows.innerHTML = '<tr><td colspan="11" class="empty">暂无 Client</td></tr>';
+    els.rows.innerHTML = '<tr><td colspan="12" class="empty">暂无 Client</td></tr>';
     return;
   }
 
@@ -76,6 +84,7 @@ function render(data) {
     const [stateClass, stateText] = clientState(client);
     return `<tr>
       <td><span class="state ${stateClass}">${stateText}</span></td>
+      <td class="name" title="${escapeHtml(client.client_name)}">${escapeHtml(client.client_name || "-")}</td>
       <td class="uid" title="${escapeHtml(client.uid)}">${escapeHtml(client.uid)}</td>
       <td>${fmtSeconds(client.connected_seconds)}</td>
       <td>${escapeHtml(client.language || "auto")}</td>
@@ -135,6 +144,8 @@ els.rows.addEventListener("click", (event) => {
   if (!button) return;
   deleteClient(button.dataset.uid);
 });
+
+initializeDefaultApi();
 
 els.start.addEventListener("click", startPolling);
 els.stop.addEventListener("click", () => {

@@ -97,7 +97,7 @@ h1 {
 
 .settings {
   display: grid;
-  grid-template-columns: minmax(220px, 1.6fr) repeat(5, minmax(130px, 1fr));
+  grid-template-columns: minmax(220px, 1.5fr) minmax(180px, 1fr) repeat(5, minmax(120px, 1fr));
   gap: 14px;
   margin-top: 22px;
 }

@@ -137,10 +137,10 @@ button {
 }
 #updatedAt { color: var(--muted); font-size: 13px; font-weight: 700; }
 .table-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; min-width: 1120px; }
+table { width: 100%; border-collapse: collapse; min-width: 1220px; }
 th, td { border-bottom: 1px solid var(--line); padding: 12px 10px; text-align: left; vertical-align: top; font-size: 13px; }
 th { color: var(--muted); background: rgba(255, 255, 255, 0.55); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
-td.uid, td.model, td.text { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.name, td.uid, td.model, td.text { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 td.actions-cell { text-align: center; white-space: nowrap; }
 .empty { text-align: center; color: var(--muted); padding: 42px 12px; }
 .delete-client {
