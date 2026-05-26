@@ -27,6 +27,102 @@ from whisper_live.backend.base import ServeClientBase
 
 logging.basicConfig(level=logging.INFO)
 
+def normalize_hotword_text(text):
+    if not text:
+        return ""
+    words = []
+    for line in str(text).splitlines():
+        word = line.strip()
+        if not word or word.startswith("#"):
+            continue
+        words.append(word)
+    return "\n".join(words)
+
+
+def hotword_text_to_prompt(text):
+    normalized = normalize_hotword_text(text)
+    if not normalized:
+        return None
+    return " ".join(normalized.splitlines())
+
+
+def count_hotwords(text):
+    normalized = normalize_hotword_text(text)
+    return len(normalized.splitlines()) if normalized else 0
+
+
+class MeetingHotwordStore:
+    def __init__(self, directory="config/hotwords.d"):
+        self.directory = directory
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def normalize_name(meeting_name):
+        return str(meeting_name or "").strip()
+
+    @staticmethod
+    def _empty_record(meeting_name):
+        return {"meeting_name": meeting_name, "filename": "", "text": "", "count": 0, "updated_at": None}
+
+    def _safe_path(self, meeting_name):
+        name = self.normalize_name(meeting_name)
+        if not name:
+            raise ValueError("meeting_name is required")
+        if os.path.basename(name) != name or "/" in name or "\\" in name:
+            raise ValueError("meeting_name must match a hotword txt filename")
+        return name, os.path.join(self.directory, f"{name}.txt")
+
+    def _record_from_file(self, meeting_name, path):
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                text = file.read()
+        except UnicodeDecodeError:
+            with open(path, "r", encoding="utf-8-sig") as file:
+                text = file.read()
+        normalized = normalize_hotword_text(text)
+        filename = os.path.basename(path)
+        return {
+            "meeting_name": meeting_name,
+            "filename": filename,
+            "path": path,
+            "text": normalized,
+            "count": count_hotwords(normalized),
+            "updated_at": os.path.getmtime(path),
+        }
+
+    def _scan(self):
+        if not self.directory:
+            return []
+        os.makedirs(self.directory, exist_ok=True)
+        records = []
+        for filename in os.listdir(self.directory):
+            if not filename.endswith(".txt"):
+                continue
+            path = os.path.join(self.directory, filename)
+            if not os.path.isfile(path):
+                continue
+            meeting_name = os.path.splitext(filename)[0]
+            try:
+                record = self._record_from_file(meeting_name, path)
+            except Exception as exc:
+                logging.warning("Failed to load meeting hotwords from %s: %s", path, exc)
+                continue
+            records.append(record)
+        records.sort(key=lambda item: item["meeting_name"])
+        return records
+
+    def list(self):
+        with self.lock:
+            return {"directory": self.directory, "meetings": self._scan()}
+
+    def get(self, meeting_name):
+        name, path = self._safe_path(meeting_name)
+        with self.lock:
+            if not os.path.isfile(path):
+                return self._empty_record(name)
+            return self._record_from_file(name, path)
+
+
 class ClientManager:
     def __init__(self, max_clients=4, max_connection_time=600):
         """
@@ -59,7 +155,12 @@ class ClientManager:
         uid = getattr(client, "client_uid", options.get("uid"))
         status = {
             "uid": uid,
-            "client_name": options.get("client_name") or f"Client-{str(uid)[:8]}",
+            "client_instance_id": options.get("client_instance_id") or "",
+            "client_name": options.get("client_name") or options.get("meeting_name") or f"Client-{str(uid)[:8]}",
+            "meeting_name": options.get("meeting_name") or "",
+            "hotwords_file": options.get("hotwords_file") or "",
+            "hotwords_count": int(options.get("hotwords_count") or count_hotwords(options.get("hotwords"))),
+            "hotwords_locked": True,
             "connected": True,
             "connected_at": now,
             "disconnected_at": None,
@@ -77,6 +178,16 @@ class ClientManager:
             "last_translation_text": "",
         }
         with self.lock:
+            instance_id = status.get("client_instance_id")
+            if instance_id:
+                for old_websocket, old_status in list(self.client_status.items()):
+                    if old_websocket is websocket:
+                        continue
+                    if old_status.get("client_instance_id") != instance_id:
+                        continue
+                    if old_status.get("connected"):
+                        continue
+                    del self.client_status[old_websocket]
             self.client_status[websocket] = status
 
     def update_client_message(self, websocket, message_type, segments):
@@ -275,6 +386,7 @@ class TranscriptionServer:
         self.segment_post_processor = None
         self.default_hotwords = None
         self.translation_device = "cpu"
+        self.meeting_hotwords = MeetingHotwordStore()
 
     @staticmethod
     def load_hotwords_file(path):
@@ -297,6 +409,20 @@ class TranscriptionServer:
             return None
 
         return " ".join(hotwords)
+
+    def apply_meeting_hotwords(self, options):
+        if options.get("hotwords"):
+            return
+        meeting_name = options.get("meeting_name")
+        if not meeting_name or not self.meeting_hotwords:
+            return
+        stored = self.meeting_hotwords.get(meeting_name)
+        prompt = hotword_text_to_prompt(stored.get("text"))
+        if prompt:
+            options["hotwords"] = prompt
+            options["hotwords_count"] = stored.get("count") or count_hotwords(stored.get("text"))
+            options["hotwords_file"] = stored.get("filename") or ""
+            options["hotwords_locked"] = True
 
     def apply_default_hotwords(self, options):
         if options.get("hotwords"):
@@ -564,6 +690,7 @@ class TranscriptionServer:
             logging.info("New client connected")
             options = websocket.recv()
             options = json.loads(options)
+            self.apply_meeting_hotwords(options)
             self.apply_default_hotwords(options)
 
             self.use_vad = options.get('use_vad')
@@ -680,6 +807,7 @@ class TranscriptionServer:
             metrics_port: int = 0,
             hotwords_file=None,
             translation_device="cpu",
+            meeting_hotwords_dir="config/hotwords.d",
             segment_post_processor=None):
         """
         Run the transcription server.
@@ -705,6 +833,7 @@ class TranscriptionServer:
         self.cache_path = cache_path
         self.raw_pcm_input = raw_pcm_input
         self.translation_device = translation_device
+        self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
         self.default_hotwords = self.load_hotwords_file(hotwords_file)
         if self.default_hotwords:
             logging.info(
@@ -785,6 +914,17 @@ class TranscriptionServer:
                 status_code=404,
                 content={"deleted": False, "uid": uid, "error": "client not found"},
             )
+
+        @app.get("/admin/hotwords")
+        async def list_admin_hotwords():
+            return self.meeting_hotwords.list()
+
+        @app.get("/admin/hotwords/{meeting_name}")
+        async def get_admin_hotwords(meeting_name: str):
+            try:
+                return self.meeting_hotwords.get(meeting_name)
+            except ValueError as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
 
         if enable_rest:
             @app.post("/v1/audio/transcriptions")

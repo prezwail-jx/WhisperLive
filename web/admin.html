@@ -31,6 +31,27 @@
         </div>
       </section>
 
+
+      <section class="hotword-panel" aria-label="会议热词管理">
+        <header>
+          <h2>会议热词文件</h2>
+          <span id="hotwordStatus">未刷新</span>
+        </header>
+        <div class="hotword-controls">
+          <label>
+            选择热词文件
+            <select id="hotwordSelectInput">
+              <option value="">请选择会议热词</option>
+            </select>
+          </label>
+          <div class="actions">
+            <button id="refreshHotwordsButton" type="button">刷新热词文件</button>
+          </div>
+        </div>
+        <div class="hotword-file-list" id="hotwordFileList">暂无热词文件</div>
+        <pre class="hotword-preview" id="hotwordPreview">选择列表中的会议查看内容。</pre>
+      </section>
+
       <section class="summary-grid" aria-label="汇总指标">
         <article><span>当前连接</span><strong id="activeCount">0</strong></article>
         <article><span>翻译开启</span><strong id="translationCount">0</strong></article>
@@ -50,6 +71,8 @@
                 <th>状态</th>
                 <th>名称</th>
                 <th>UID</th>
+                <th>会议</th>
+                <th>热词文件</th>
                 <th>时长</th>
                 <th>语言</th>
                 <th>模型</th>
@@ -62,12 +85,12 @@
               </tr>
             </thead>
             <tbody id="clientRows">
-              <tr><td colspan="12" class="empty">暂无数据</td></tr>
+              <tr><td colspan="14" class="empty">暂无数据</td></tr>
             </tbody>
           </table>
         </div>
       </section>
     </main>
-    <script src="./admin.js"></script>
+    <script src="./admin.js?v=hotword-dir-1"></script>
   </body>
 </html>

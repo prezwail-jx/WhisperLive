@@ -109,6 +109,12 @@ if __name__ == "__main__":
         default='cpu',
         help='Device for server-side translation models. Defaults to CPU so ASR can keep the GPU.'
     )
+    parser.add_argument(
+        '--meeting_hotwords_dir',
+        type=str,
+        default='config/hotwords.d',
+        help='Directory containing meeting hotword txt files. Filename without .txt is the meeting name.'
+    )
     args = parser.parse_args()
 
     if args.backend == "tensorrt":
@@ -142,4 +148,5 @@ if __name__ == "__main__":
         metrics_port=args.metrics_port,
         hotwords_file=args.hotwords_file,
         translation_device=args.translation_device,
+        meeting_hotwords_dir=args.meeting_hotwords_dir,
     )

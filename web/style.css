@@ -28,7 +28,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -97,7 +98,7 @@ h1 {
 
 .settings {
   display: grid;
-  grid-template-columns: minmax(220px, 1.5fr) minmax(180px, 1fr) repeat(5, minmax(120px, 1fr));
+  grid-template-columns: minmax(220px, 1.4fr) repeat(7, minmax(120px, 1fr));
   gap: 14px;
   margin-top: 22px;
 }
@@ -117,7 +118,8 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -128,9 +130,50 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: var(--green);
   box-shadow: 0 0 0 3px rgba(31, 111, 84, 0.14);
+}
+
+
+.hotword-panel {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+  padding: 14px;
+}
+
+.hotword-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.hotword-head h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+}
+
+.hotword-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.hotword-actions button {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.file-input {
+  max-width: 210px;
+  padding: 7px;
 }
 
 .actions {
@@ -152,6 +195,12 @@ button {
 
 button:hover:not(:disabled) {
   transform: translateY(-1px);
+}
+
+#refreshMeetingsButton {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 
 button:disabled {
@@ -262,4 +311,9 @@ button:disabled {
     height: 300px;
     font-size: 20px;
   }
+}
+
+@media (max-width: 760px) {
+  .settings, .meta-grid, .transcript-grid, .hotword-head { grid-template-columns: 1fr; }
+  .hotword-head { display: grid; }
 }

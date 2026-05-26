@@ -22,7 +22,7 @@ body {
   font-family: "Avenir Next", "Noto Sans SC", "Segoe UI", sans-serif;
 }
 
-button, input { font: inherit; }
+button, input, select, textarea { font: inherit; }
 
 .admin-shell {
   width: min(1360px, calc(100% - 32px));
@@ -33,6 +33,7 @@ button, input { font: inherit; }
 .topbar,
 .controls,
 .table-panel,
+.hotword-panel,
 .summary-grid article {
   background: rgba(255, 253, 247, 0.94);
   border: 1px solid var(--line);
@@ -92,7 +93,9 @@ label {
   font-weight: 800;
 }
 
-input {
+input,
+select,
+textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -102,7 +105,7 @@ input {
   outline: none;
 }
 
-input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(31, 111, 84, 0.14); }
+input:focus, select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(31, 111, 84, 0.14); }
 
 .actions { display: flex; gap: 10px; }
 button {
@@ -116,6 +119,59 @@ button {
   cursor: pointer;
 }
 #stopButton { background: transparent; color: var(--ink); }
+
+
+.hotword-panel {
+  margin-top: 18px;
+  overflow: hidden;
+}
+.hotword-panel header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  padding: 16px;
+}
+#hotwordStatus { color: var(--muted); font-size: 13px; font-weight: 700; }
+.hotword-controls {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+  padding: 16px;
+}
+.hotword-file-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 16px 16px;
+}
+.hotword-file-item {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) 100px 180px;
+  gap: 12px;
+  align-items: center;
+  min-height: 38px;
+  border-color: var(--line);
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+  font-weight: 700;
+}
+.hotword-file-item span { color: var(--muted); font-weight: 700; }
+.hotword-preview {
+  width: calc(100% - 32px);
+  max-height: 180px;
+  overflow: auto;
+  margin: 0 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  padding: 12px;
+  color: var(--ink);
+  white-space: pre-wrap;
+  font: 13px/1.5 "Avenir Next", "Noto Sans SC", "Segoe UI", sans-serif;
+}
+.empty.small { padding: 14px; }
 
 .summary-grid {
   display: grid;
@@ -137,7 +193,7 @@ button {
 }
 #updatedAt { color: var(--muted); font-size: 13px; font-weight: 700; }
 .table-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; min-width: 1220px; }
+table { width: 100%; border-collapse: collapse; min-width: 1360px; }
 th, td { border-bottom: 1px solid var(--line); padding: 12px 10px; text-align: left; vertical-align: top; font-size: 13px; }
 th { color: var(--muted); background: rgba(255, 255, 255, 0.55); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
 td.name, td.uid, td.model, td.text { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -165,6 +221,6 @@ td.actions-cell { text-align: center; white-space: nowrap; }
 .state.no_translation { background: #f8ded9; color: var(--red); }
 
 @media (max-width: 760px) {
-  .controls, .summary-grid { grid-template-columns: 1fr; }
+  .controls, .summary-grid, .hotword-controls, .hotword-file-item { grid-template-columns: 1fr; }
   .topbar { align-items: flex-start; }
 }

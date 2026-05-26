@@ -3,7 +3,10 @@ const TARGET_SAMPLE_RATE = 16000;
 const elements = {
   form: document.getElementById("settingsForm"),
   server: document.getElementById("serverInput"),
-  clientName: document.getElementById("clientNameInput"),
+  meetingName: document.getElementById("meetingNameInput"),
+  meetingSelect: document.getElementById("meetingSelectInput"),
+  refreshMeetings: document.getElementById("refreshMeetingsButton"),
+  hotwordStatus: document.getElementById("hotwordStatus"),
   backend: document.getElementById("backendInput"),
   model: document.getElementById("modelInput"),
   customModel: document.getElementById("customModelInput"),
@@ -37,6 +40,8 @@ let fullTranslationLog = [];
 let meetingId = createUid();
 let meetingStartedAt = new Date().toISOString();
 let currentConfig = null;
+let lockedHotwords = { hotwords: "", filename: "", count: 0 };
+let clientInstanceId = null;
 
 const MODEL_OPTIONS = {
   faster_whisper: [
@@ -51,9 +56,7 @@ const MODEL_OPTIONS = {
     "large-v3-turbo",
     "large-v3",
   ],
-  mlx_whisper: [
-    "model/whisper-medium-mlx",
-  ],
+  mlx_whisper: ["model/whisper-medium-mlx"],
 };
 
 function getDisplayLimit() {
@@ -68,6 +71,16 @@ function createUid() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function getClientInstanceId() {
+  const key = "whisperlive_client_instance_id";
+  let saved = window.localStorage.getItem(key);
+  if (!saved) {
+    saved = createUid();
+    window.localStorage.setItem(key, saved);
+  }
+  return saved;
+}
+
 function defaultWebSocketUrl() {
   if (!window.location.host) {
     return "ws://localhost:9090";
@@ -76,27 +89,91 @@ function defaultWebSocketUrl() {
   return `${protocol}//${window.location.host}/ws`;
 }
 
-function initializeDefaultServer() {
+function initializeDefaults() {
   const legacyDefault = "ws://localhost:9090";
   if (!elements.server.value || elements.server.value === legacyDefault) {
     elements.server.value = defaultWebSocketUrl();
   }
+  clientInstanceId = getClientInstanceId();
+  const savedMeeting = window.localStorage.getItem("whisperlive_meeting_name");
+  if (savedMeeting && !elements.meetingName.value) {
+    elements.meetingName.value = savedMeeting;
+  }
+  updateHotwordStatus("等待开始时加载会议热词文件");
+  loadMeetingOptions().catch(() => {
+    updateHotwordStatus("热词文件列表暂不可用，可手动填写会议号");
+  });
 }
 
-function initializeClientName() {
-  const savedName = window.localStorage.getItem("whisperlive_client_name");
-  if (savedName && !elements.clientName.value) {
-    elements.clientName.value = savedName;
-  }
+function countHotwordText(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#")).length;
 }
 
-function resolveClientName(clientUid) {
-  const name = elements.clientName.value.trim();
-  if (name) {
-    window.localStorage.setItem("whisperlive_client_name", name);
-    return name;
+function hotwordPromptFromText(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .join(" ");
+}
+
+function updateHotwordStatus(text = "") {
+  elements.hotwordStatus.textContent = text || "服务端按会议号匹配 txt；开始时自动加载并锁定。";
+}
+
+function hotwordApiBaseUrl() {
+  const serverUrl = elements.server.value.trim();
+  if (serverUrl.startsWith("wss://")) return serverUrl.replace(/^wss:/, "https:").replace(/\/ws\/?$/, "");
+  if (serverUrl.startsWith("ws://")) return serverUrl.replace(/^ws:/, "http:").replace(/\/ws\/?$/, "");
+  return window.location.origin === "null" ? "http://localhost:9093" : window.location.origin;
+}
+
+function hotwordListUrl() {
+  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/hotwords`;
+}
+
+function hotwordApiUrl(meetingName) {
+  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/hotwords/${encodeURIComponent(meetingName)}`;
+}
+
+
+async function loadMeetingOptions() {
+  if (!elements.meetingSelect) return;
+  const response = await fetch(hotwordListUrl(), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  const meetings = data.meetings || [];
+  const current = elements.meetingName.value.trim();
+  elements.meetingSelect.innerHTML = '<option value="">手动填写会议号</option>';
+  meetings.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.meeting_name;
+    option.textContent = `${item.meeting_name} (${item.count || 0})`;
+    option.dataset.filename = item.filename || "";
+    elements.meetingSelect.appendChild(option);
+  });
+  if (current && meetings.some((item) => item.meeting_name === current)) {
+    elements.meetingSelect.value = current;
   }
-  return `Client-${clientUid.slice(0, 8)}`;
+  updateHotwordStatus(meetings.length ? `已发现 ${meetings.length} 个服务器热词文件` : "服务器暂无会议热词文件，可手动填写会议号");
+}
+
+async function fetchMeetingHotwordSnapshot(meetingName) {
+  if (!meetingName) {
+    return { hotwords: "", filename: "", count: 0 };
+  }
+  const response = await fetch(hotwordApiUrl(meetingName), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  const text = data.text || "";
+  return {
+    hotwords: hotwordPromptFromText(text),
+    filename: data.filename || "",
+    count: Number(data.count || countHotwordText(text)),
+  };
 }
 
 function setStatus(text, state = "idle") {
@@ -130,7 +207,10 @@ function updateMeetingLog(segments, log) {
 function buildMeetingLog() {
   return {
     meeting_id: meetingId,
-    client_name: currentConfig ? currentConfig.client_name : elements.clientName.value.trim(),
+    client_name: currentConfig ? currentConfig.client_name : elements.meetingName.value.trim(),
+    meeting_name: currentConfig ? currentConfig.meeting_name : elements.meetingName.value.trim(),
+    hotwords_count: currentConfig ? currentConfig.hotwords_count : 0,
+    hotwords_file: currentConfig ? currentConfig.hotwords_file : "",
     created_at: meetingStartedAt,
     exported_at: new Date().toISOString(),
     server: elements.server.value.trim(),
@@ -309,9 +389,16 @@ function sendConfig(event) {
 
   uid = createUid();
   const selectedLanguage = elements.language.value || null;
+  const meetingName = elements.meetingName.value.trim();
   const payload = {
     uid,
-    client_name: resolveClientName(uid),
+    client_instance_id: clientInstanceId || getClientInstanceId(),
+    client_name: meetingName || `Client-${uid.slice(0, 8)}`,
+    meeting_name: meetingName,
+    hotwords: lockedHotwords.hotwords || null,
+    hotwords_count: lockedHotwords.count || 0,
+    hotwords_file: lockedHotwords.filename || "",
+    hotwords_locked: true,
     backend: elements.backend.value,
     language: selectedLanguage,
     task: "transcribe",
@@ -353,6 +440,22 @@ async function startCapture() {
   renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
   updateDirection(null);
 
+  const meetingName = elements.meetingName.value.trim();
+  if (meetingName) {
+    window.localStorage.setItem("whisperlive_meeting_name", meetingName);
+  }
+  try {
+    lockedHotwords = await fetchMeetingHotwordSnapshot(meetingName);
+    updateHotwordStatus(
+      lockedHotwords.filename
+        ? `已锁定热词文件 ${lockedHotwords.filename}，${lockedHotwords.count} 个热词`
+        : "未找到会议热词文件，本次使用默认热词"
+    );
+  } catch (error) {
+    lockedHotwords = { hotwords: "", filename: "", count: 0 };
+    updateHotwordStatus("热词预取不可用，将由服务端按会议号匹配");
+  }
+
   mediaStream = await requestMicrophoneStream();
 
   socket = new WebSocket(elements.server.value.trim());
@@ -389,6 +492,9 @@ async function startCapture() {
   elements.form.querySelectorAll("input, select").forEach((item) => {
     item.disabled = true;
   });
+  elements.meetingName.disabled = true;
+  if (elements.meetingSelect) elements.meetingSelect.disabled = true;
+  if (elements.refreshMeetings) elements.refreshMeetings.disabled = true;
 }
 
 function stopCapture(sendEnd = true) {
@@ -422,6 +528,9 @@ function stopCapture(sendEnd = true) {
   elements.form.querySelectorAll("input, select").forEach((item) => {
     item.disabled = false;
   });
+  elements.meetingName.disabled = false;
+  if (elements.meetingSelect) elements.meetingSelect.disabled = false;
+  if (elements.refreshMeetings) elements.refreshMeetings.disabled = false;
 }
 
 elements.start.addEventListener("click", () => {
@@ -438,11 +547,34 @@ elements.stop.addEventListener("click", () => {
 });
 
 elements.exportLog.addEventListener("click", exportMeetingLog);
-
 elements.clearLog.addEventListener("click", clearMeetingLog);
 
-initializeDefaultServer();
-initializeClientName();
+elements.meetingName.addEventListener("change", () => {
+  const meetingName = elements.meetingName.value.trim();
+  window.localStorage.setItem("whisperlive_meeting_name", meetingName);
+  if (elements.meetingSelect) {
+    const exists = Array.from(elements.meetingSelect.options).some((option) => option.value === meetingName);
+    elements.meetingSelect.value = meetingName && exists ? meetingName : "";
+  }
+  updateHotwordStatus("等待开始时加载会议热词文件");
+});
+
+if (elements.meetingSelect) {
+  elements.meetingSelect.addEventListener("change", () => {
+    if (!elements.meetingSelect.value) return;
+    elements.meetingName.value = elements.meetingSelect.value;
+    window.localStorage.setItem("whisperlive_meeting_name", elements.meetingName.value.trim());
+    updateHotwordStatus("等待开始时加载会议热词文件");
+  });
+}
+
+if (elements.refreshMeetings) {
+  elements.refreshMeetings.addEventListener("click", () => {
+    loadMeetingOptions().catch((error) => {
+      updateHotwordStatus(`热词文件列表加载失败：${error}`);
+    });
+  });
+}
 
 elements.backend.addEventListener("change", renderModelOptions);
 
@@ -457,4 +589,5 @@ elements.clearTranslation.addEventListener("click", () => {
   updateDirection(null);
 });
 
+initializeDefaults();
 renderModelOptions();

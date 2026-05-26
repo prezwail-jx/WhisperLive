@@ -1,11 +1,13 @@
 import json
+import os
 import time
 import threading
+import tempfile
 import unittest
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-from whisper_live.server import TranscriptionServer, BackendType, ClientManager
+from whisper_live.server import TranscriptionServer, BackendType, ClientManager, MeetingHotwordStore, count_hotwords
 
 
 class TestClientManagerAddRemove(unittest.TestCase):
@@ -370,6 +372,55 @@ class TestTranscriptionServerCleanup(unittest.TestCase):
         client.cleanup.assert_called_once()
 
 
+class TestMeetingHotwordStore(unittest.TestCase):
+    def test_list_and_get_scan_txt_files_from_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "会议A.txt"), "w", encoding="utf-8") as file:
+                file.write("# comment\n图灵科技\n\nfaster-whisper\n")
+            with open(os.path.join(directory, "ignore.md"), "w", encoding="utf-8") as file:
+                file.write("ignored")
+
+            store = MeetingHotwordStore(directory)
+            meetings = store.list()["meetings"]
+            self.assertEqual(len(meetings), 1)
+            self.assertEqual(meetings[0]["meeting_name"], "会议A")
+            self.assertEqual(meetings[0]["filename"], "会议A.txt")
+            self.assertEqual(meetings[0]["count"], 2)
+
+            loaded = store.get("会议A")
+            self.assertEqual(loaded["text"], "图灵科技\nfaster-whisper")
+            self.assertEqual(loaded["count"], 2)
+
+            missing = store.get("会议B")
+            self.assertEqual(missing["count"], 0)
+            self.assertEqual(missing["filename"], "")
+
+    def test_count_hotwords_ignores_blank_lines_and_comments(self):
+        self.assertEqual(count_hotwords("# c\nACE\n\nDocker"), 2)
+
+    def test_apply_meeting_hotwords_before_default_hotwords(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "会议A.txt"), "w", encoding="utf-8") as file:
+                file.write("图灵科技\nfaster-whisper")
+            server = TranscriptionServer()
+            server.meeting_hotwords = MeetingHotwordStore(directory)
+            server.default_hotwords = "Default"
+
+            options = {"uid": "client", "meeting_name": "会议A"}
+            server.apply_meeting_hotwords(options)
+            server.apply_default_hotwords(options)
+
+            self.assertEqual(options["hotwords"], "图灵科技 faster-whisper")
+            self.assertEqual(options["hotwords_count"], 2)
+            self.assertEqual(options["hotwords_file"], "会议A.txt")
+            self.assertTrue(options["hotwords_locked"])
+
+            options = {"uid": "client", "meeting_name": "会议A", "hotwords": "Custom"}
+            server.apply_meeting_hotwords(options)
+            server.apply_default_hotwords(options)
+            self.assertEqual(options["hotwords"], "Custom")
+
+
 class TestClientManagerAdminStatus(unittest.TestCase):
     def setUp(self):
         self.cm = ClientManager(max_clients=4, max_connection_time=600)
@@ -379,6 +430,10 @@ class TestClientManagerAdminStatus(unittest.TestCase):
         self.options = {
             "uid": "uid-1",
             "client_name": "会议室A",
+            "meeting_name": "会议A",
+            "hotwords": "图灵科技 faster-whisper",
+            "hotwords_count": 2,
+            "hotwords_file": "terms.txt",
             "language": "zh",
             "model": "model/asr/small",
             "enable_translation": True,
@@ -393,6 +448,10 @@ class TestClientManagerAdminStatus(unittest.TestCase):
 
         self.assertEqual(status["uid"], "uid-1")
         self.assertEqual(status["client_name"], "会议室A")
+        self.assertEqual(status["meeting_name"], "会议A")
+        self.assertEqual(status["hotwords_count"], 2)
+        self.assertEqual(status["hotwords_file"], "terms.txt")
+        self.assertTrue(status["hotwords_locked"])
         self.assertTrue(status["connected"])
         self.assertEqual(status["backend"], "faster_whisper")
         self.assertEqual(status["language"], "zh")
@@ -406,7 +465,7 @@ class TestClientManagerAdminStatus(unittest.TestCase):
 
         status = self.cm.get_client_status_snapshot()["clients"][0]
 
-        self.assertEqual(status["client_name"], "Client-uid-1")
+        self.assertEqual(status["client_name"], "会议A")
 
     def test_update_client_message_tracks_asr_and_translation(self):
         self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
@@ -429,6 +488,37 @@ class TestClientManagerAdminStatus(unittest.TestCase):
         status = self.cm.get_client_status_snapshot()["clients"][0]
         self.assertFalse(status["connected"])
         self.assertIsNotNone(status["disconnected_at"])
+
+    def test_same_client_instance_replaces_disconnected_snapshot(self):
+        self.options["client_instance_id"] = "browser-1"
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+        self.cm.mark_client_disconnected(self.ws)
+
+        new_ws = MagicMock()
+        new_client = MagicMock()
+        new_client.client_uid = "uid-2"
+        new_options = dict(self.options, uid="uid-2")
+        self.cm.register_client_status(new_ws, new_client, new_options, BackendType.FASTER_WHISPER)
+
+        clients = self.cm.get_client_status_snapshot()["clients"]
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0]["uid"], "uid-2")
+        self.assertEqual(clients[0]["client_instance_id"], "browser-1")
+        self.assertTrue(clients[0]["connected"])
+
+    def test_same_client_instance_keeps_concurrent_connected_snapshot(self):
+        self.options["client_instance_id"] = "browser-1"
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+
+        new_ws = MagicMock()
+        new_client = MagicMock()
+        new_client.client_uid = "uid-2"
+        new_options = dict(self.options, uid="uid-2")
+        self.cm.register_client_status(new_ws, new_client, new_options, BackendType.FASTER_WHISPER)
+
+        clients = self.cm.get_client_status_snapshot()["clients"]
+        self.assertEqual(len(clients), 2)
+        self.assertEqual({client["uid"] for client in clients}, {"uid-1", "uid-2"})
 
     def test_delete_disconnected_client_status_removes_snapshot(self):
         self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)

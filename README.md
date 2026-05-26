@@ -79,6 +79,7 @@ python run_server.py \
   --max_connection_time 600 \
   --translation_device cpu \
   --rest_port 8000 \
+  --meeting_hotwords_dir config/hotwords.d \
   --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093 \
   -fw model/asr/whisper-small-zh_tw-ct2/
 ```
@@ -88,6 +89,7 @@ python run_server.py \
 - `-fw` 指定服务端实际使用的 ASR 模型。
 - `--translation_device cpu` 表示翻译模型走 CPU，GPU 优先留给 ASR。
 - `--rest_port 8000` 是容器内 Admin API 端口，通过 `-p 9094:8000` 暴露到宿主机。
+- `--meeting_hotwords_dir` 指定服务端会议热词目录，目录内 `会议号.txt` 会自动出现在 Client 和中控下拉列表。
 - 浏览器推荐只访问 `9093`；`9093` 会把 `/ws` 转到 `9090`，把 `/admin/` 转到 `9094`。
 - `--cors-origins` 必须包含中控页面地址，否则浏览器会显示连接错误。
 
@@ -126,6 +128,7 @@ python run_server.py \
   --max_connection_time 600 \
   --translation_device cpu \
   --rest_port 8000 \
+  --meeting_hotwords_dir config/hotwords.d \
   --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093 \
   -fw model/asr/whisper-small-zh_tw-ct2/
 ```
@@ -155,7 +158,7 @@ http://192.168.1.100:9093/
 ws://192.168.1.100:9093/ws
 ```
 
-页面里的 `Client 名称` 用来区分每一路 client，例如 `会议室A`、`前台电脑`。连接成功后，中控会在 `名称` 列显示这个名字；如果不填，会自动显示 `Client-xxxx`。
+页面里的 `会议号` 同时作为 client 可读名称和热词归属。Client 页面可以从下拉选择服务端已有热词文件，也可以手动填写会议号；点击开始时会自动加载同名 txt 热词文件并锁定本次连接。
 
 中控打开：
 
@@ -177,7 +180,38 @@ http://192.168.1.100:9093/admin/clients
 wss://你的域名/ws
 ```
 
-## 5. 备用：client 端 Docker 拉 Web 页面
+
+## 5. 会议热词表
+
+热词文件提前放在 server 机器的 `config/hotwords.d/` 目录中。文件名去掉 `.txt` 后就是会议号，例如：
+
+```text
+config/hotwords.d/产品周会.txt  -> 会议号：产品周会
+config/hotwords.d/meeting-a.txt -> 会议号：meeting-a
+```
+
+文件格式：
+
+```text
+图灵科技
+faster-whisper
+张三
+# 这行是注释
+```
+
+使用规则：
+
+- 服务启动参数使用 `--meeting_hotwords_dir config/hotwords.d`。
+- Admin 页面只负责刷新、下拉选择和预览服务器已有热词文件，不在网页上传或删除文件。
+- Client 页面可以从下拉选择已有会议热词，也可以手动填写会议号。
+- Client 点击开始时会按会议号读取 `config/hotwords.d/会议号.txt` 的快照并锁定本次连接。
+- 开始后再修改服务器 txt 文件，只影响下一次开始。
+- 如果会议号没有对应 txt，服务端才会使用 `--hotwords_file` 的全局默认热词。
+- 中控 Client 列表会显示会议号、热词文件名、热词是否锁定和热词数量。
+
+新增或修改热词文件后，不需要重启 ASR 服务；在 Client 或 Admin 页面点击刷新即可看到最新列表。
+
+## 6. 备用：client 端 Docker 拉 Web 页面
 
 如果暂时没有统一入口或 HTTPS，可以让 client 机器自己拉起静态 Web 页面容器。client 机器只负责页面，不跑 ASR、不跑翻译，也不需要 GPU。
 
@@ -202,7 +236,7 @@ ws://192.168.1.100:9090
 
 这种方式仍然支持多路并发：每台 client 的浏览器都会建立独立 WebSocket 连接到 server。
 
-## 6. 命令行 client 使用
+## 7. 命令行 client 使用
 
 推荐在后端容器内执行，依赖最完整。
 
@@ -242,7 +276,7 @@ python run_client.py \
 
 注意：如果服务端启动时已经用了 `-fw`，实际 ASR 模型由服务端 `-fw` 决定，client 传的 `--model` 不会覆盖服务端固定模型。
 
-## 7. 压测脚本
+## 8. 压测脚本
 
 压测脚本用于模拟多路 WebSocket client 实时推流。
 
@@ -295,7 +329,7 @@ scripts/stress_logs/
 - `translations`：翻译消息数。
 - `errors` / `timeout`：连接错误或等待超时。
 
-## 8. 常见问题
+## 9. 常见问题
 
 ### 页面能打开，但中控一直显示连接错误
 
@@ -364,7 +398,7 @@ Admin API：http://192.168.1.100:9093
 
 `9090/9094` 是后端真实端口，通常不直接填到浏览器页面里。
 
-## 9. 停止服务
+## 10. 停止服务
 
 停止前端容器：
 
@@ -378,7 +412,7 @@ docker stop whisperlive-web-gateway
 docker stop whisperlive-server
 ```
 
-## 10. 原始项目地址
+## 11. 原始项目地址
 
 原 fork / 上游 README 可参考：
 

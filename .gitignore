@@ -28,6 +28,11 @@ dist/
 *.so
 *.o
 
+
+# Meeting hotword files contain deployment-specific terms
+config/hotwords.d/*
+!config/hotwords.d/.gitkeep
+
 # Local runtime output
 chunks/
 output*.srt
