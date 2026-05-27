@@ -322,7 +322,7 @@ class ServeClientTranslation(ServeClientBase):
         en_zh_model_path="model/opus-mt-en-zh",
         translation_device="cpu",
         translation_min_chars=12,
-        translation_max_chars=100,
+        translation_max_chars=130,
         translation_max_wait_seconds=2.0,
         translation_sentence_endings="。！？.!?",
     ):

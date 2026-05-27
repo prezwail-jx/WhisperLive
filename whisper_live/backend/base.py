@@ -25,6 +25,10 @@ class ServeClientBase(object):
     """Whether to clip audio with no valid segments."""
     same_output_threshold: int
     """Number of repeated outputs before considering it as a valid segment."""
+    min_segment_rms: float
+    """Minimum RMS energy required before accepting an ASR segment."""
+    max_incomplete_segment_seconds: float
+    """Maximum audio duration to keep reprocessing a single incomplete segment."""
 
     MAX_TRANSCRIPT_LENGTH = 500
     MAX_TRANSLATION_QUEUE_SIZE = 100
@@ -41,6 +45,8 @@ class ServeClientBase(object):
         translation_queue=None,
         diarization=None,
         word_timestamps=False,
+        min_segment_rms=0.0015,
+        max_incomplete_segment_seconds=0.0,
     ):
         self.client_uid = client_uid
         self.websocket = websocket
@@ -48,6 +54,12 @@ class ServeClientBase(object):
         self.no_speech_thresh = no_speech_thresh
         self.clip_audio = clip_audio
         self.same_output_threshold = same_output_threshold
+        if min_segment_rms is None:
+            min_segment_rms = 0.0015
+        self.min_segment_rms = max(0.0, float(min_segment_rms))
+        if max_incomplete_segment_seconds is None:
+            max_incomplete_segment_seconds = 0.0
+        self.max_incomplete_segment_seconds = max(0.0, float(max_incomplete_segment_seconds))
         self.diarization = diarization
         self.word_timestamps = word_timestamps
 
@@ -357,6 +369,38 @@ class ServeClientBase(object):
     def get_segment_end(self, segment):
         return getattr(segment, "end", getattr(segment, "end_ts", 0))
 
+    def _audio_rms_for_relative_range(self, start, end, duration):
+        if self.min_segment_rms <= 0 or self.frames_np is None:
+            return None
+
+        start = max(0.0, min(float(start or 0.0), duration))
+        end = max(start, min(float(end or 0.0), duration))
+        if end <= start:
+            return 0.0
+
+        with self.lock:
+            samples_offset = max(0, int((self.timestamp_offset - self.frames_offset) * self.RATE))
+            start_sample = samples_offset + int(start * self.RATE)
+            end_sample = samples_offset + int(end * self.RATE)
+            audio_slice = self.frames_np[start_sample:end_sample].copy()
+
+        if audio_slice.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(np.square(audio_slice, dtype=np.float64))))
+
+    def _is_low_energy_range(self, start, end, duration, text):
+        rms = self._audio_rms_for_relative_range(start, end, duration)
+        if rms is None or rms >= self.min_segment_rms:
+            return False
+        logging.info(
+            "[LOW_ENERGY_SEGMENT_DROP] uid=%s rms=%.6f threshold=%.6f text=%r",
+            self.client_uid,
+            rms,
+            self.min_segment_rms,
+            str(text or "").strip()[:80],
+        )
+        return True
+
     def _identify_speaker(self, segment):
         """Run diarization on a segment's audio slice if diarization is enabled.
 
@@ -417,14 +461,19 @@ class ServeClientBase(object):
         if len(segments) > 1 and self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
             for s in segments[:-1]:
                 text_ = s.text
-                self.text.append(text_)
+                rel_start = self.get_segment_start(s)
+                rel_end = min(duration, self.get_segment_end(s))
                 with self.lock:
-                    start = self.timestamp_offset + self.get_segment_start(s)
-                    end = self.timestamp_offset + min(duration, self.get_segment_end(s))
+                    start = self.timestamp_offset + rel_start
+                    end = self.timestamp_offset + rel_end
                 if start >= end:
                     continue
                 if self.get_segment_no_speech_prob(s) > self.no_speech_thresh:
                     continue
+                if self._is_low_energy_range(rel_start, rel_end, duration, text_):
+                    offset = rel_end
+                    continue
+                self.text.append(text_)
                 speaker = self._identify_speaker(s)
                 words = self._extract_words(s, self.timestamp_offset)
                 completed_segment = self.format_segment(start, end, text_, completed=True, speaker=speaker, words=words)
@@ -435,20 +484,25 @@ class ServeClientBase(object):
                         self.translation_queue.put(completed_segment.copy(), timeout=0.1)
                     except queue.Full:
                         logging.warning("Translation queue is full, skipping segment")
-                offset = min(duration, self.get_segment_end(s))
+                offset = rel_end
 
         # Process the last segment if its no_speech_prob is acceptable.
         if self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
-            self.current_out += segments[-1].text
-            words = self._extract_words(segments[-1], self.timestamp_offset)
-            with self.lock:
-                last_segment = self.format_segment(
-                    self.timestamp_offset + self.get_segment_start(segments[-1]),
-                    self.timestamp_offset + min(duration, self.get_segment_end(segments[-1])),
-                    self.current_out,
-                    completed=False,
-                    words=words
-                )
+            rel_start = self.get_segment_start(segments[-1])
+            rel_end = min(duration, self.get_segment_end(segments[-1]))
+            if self._is_low_energy_range(rel_start, rel_end, duration, segments[-1].text):
+                offset = rel_end
+            else:
+                self.current_out += segments[-1].text
+                words = self._extract_words(segments[-1], self.timestamp_offset)
+                with self.lock:
+                    last_segment = self.format_segment(
+                        self.timestamp_offset + rel_start,
+                        self.timestamp_offset + rel_end,
+                        self.current_out,
+                        completed=False,
+                        words=words
+                    )
 
         # Handle repeated output logic.
         if self.current_out.strip() == self.prev_out.strip() and self.current_out != '':
@@ -466,12 +520,14 @@ class ServeClientBase(object):
         # If the same incomplete segment is repeated too many times,
         # append it to the transcript and update the offset.
         if self.same_output_count > self.same_output_threshold:
-            if not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower():
+            repeated_end = min(duration, self.end_time_for_same_output)
+            low_energy_repeated = self._is_low_energy_range(0.0, repeated_end, duration, self.current_out)
+            if not low_energy_repeated and (not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower()):
                 self.text.append(self.current_out)
                 with self.lock:
                     completed_segment = self.format_segment(
                         self.timestamp_offset,
-                        self.timestamp_offset + min(duration, self.end_time_for_same_output),
+                        self.timestamp_offset + repeated_end,
                         self.current_out,
                         completed=True
                     )
@@ -484,12 +540,50 @@ class ServeClientBase(object):
                             logging.warning("Translation queue is full, skipping segment")
 
             self.current_out = ''
-            offset = min(duration, self.end_time_for_same_output)
+            offset = repeated_end
             self.same_output_count = 0
             last_segment = None
             self.end_time_for_same_output = None
         else:
             self.prev_out = self.current_out
+
+        if (
+            offset is None
+            and last_segment is not None
+            and self.max_incomplete_segment_seconds > 0
+            and duration >= self.max_incomplete_segment_seconds
+            and self.current_out.strip()
+        ):
+            repeated_end = min(duration, self.get_segment_end(segments[-1]))
+            if repeated_end > 0:
+                logging.info(
+                    "[FORCE_COMPLETE_INCOMPLETE] uid=%s duration=%.2fs threshold=%.2fs text=%r",
+                    self.client_uid,
+                    duration,
+                    self.max_incomplete_segment_seconds,
+                    self.current_out.strip()[:80],
+                )
+                with self.lock:
+                    completed_segment = self.format_segment(
+                        self.timestamp_offset,
+                        self.timestamp_offset + repeated_end,
+                        self.current_out,
+                        completed=True
+                    )
+                    self.transcript.append(completed_segment)
+
+                    if self.translation_queue:
+                        try:
+                            self.translation_queue.put(completed_segment.copy(), timeout=0.1)
+                        except queue.Full:
+                            logging.warning("Translation queue is full, skipping segment")
+
+                self.text.append(self.current_out)
+                self.current_out = ''
+                offset = repeated_end
+                self.same_output_count = 0
+                last_segment = None
+                self.end_time_for_same_output = None
 
         if offset is not None:
             with self.lock:

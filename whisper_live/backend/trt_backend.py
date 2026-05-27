@@ -28,6 +28,7 @@ class ServeClientTensorRT(ServeClientBase):
         clip_audio=False,
         same_output_threshold=10,
         translation_queue=None,
+        min_segment_rms=0.0015,
     ):
         """
         Initialize a ServeClient instance.
@@ -59,6 +60,7 @@ class ServeClientTensorRT(ServeClientBase):
             clip_audio,
             same_output_threshold,
             translation_queue,
+            min_segment_rms=min_segment_rms,
         )
 
         self.language = language if multilingual else "en"

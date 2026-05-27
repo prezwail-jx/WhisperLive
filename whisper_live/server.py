@@ -507,6 +507,7 @@ class TranscriptionServer:
                     clip_audio=options.get("clip_audio", False),
                     same_output_threshold=options.get("same_output_threshold", 10),
                     translation_queue=translation_queue,
+                    min_segment_rms=options.get("min_segment_rms", 0.0015),
                 )
                 logging.info("Running TensorRT backend.")
             except Exception as e:
@@ -534,6 +535,7 @@ class TranscriptionServer:
                     no_speech_thresh=options.get("no_speech_thresh", 0.45),
                     clip_audio=options.get("clip_audio", False),
                     same_output_threshold=options.get("same_output_threshold", 10),
+                    min_segment_rms=options.get("min_segment_rms", 0.0015),
                 )
                 logging.info("Running OpenVINO backend.")
             except Exception as e:
@@ -562,6 +564,7 @@ class TranscriptionServer:
                     clip_audio=options.get("clip_audio", False),
                     same_output_threshold=options.get("same_output_threshold", 10),
                     translation_queue=translation_queue,
+                    min_segment_rms=options.get("min_segment_rms", 0.0015),
                 )
                 logging.info("Running MLX Whisper backend.")
             except Exception as e:
@@ -598,6 +601,8 @@ class TranscriptionServer:
                     no_speech_thresh=options.get("no_speech_thresh", 0.45),
                     clip_audio=options.get("clip_audio", False),
                     same_output_threshold=options.get("same_output_threshold", 10),
+                    min_segment_rms=options.get("min_segment_rms", 0.0015),
+                    max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 0.0),
                     cache_path=self.cache_path,
                     translation_queue=translation_queue,
                     hotwords=options.get("hotwords"),

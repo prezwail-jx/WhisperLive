@@ -90,6 +90,7 @@ python run_server.py \
 - `--translation_device cpu` 表示翻译模型走 CPU，GPU 优先留给 ASR。
 - `--rest_port 8000` 是容器内 Admin API 端口，通过 `-p 9094:8000` 暴露到宿主机。
 - `--meeting_hotwords_dir` 指定服务端会议热词目录，目录内 `会议号.txt` 会自动出现在 Client 和中控下拉列表。
+- Web client 默认发送 `min_segment_rms=0.0015`，用于过滤极低音量静音段里的热词幻觉；需要关闭时可在 client payload 中设为 `0`。
 - 浏览器推荐只访问 `9093`；`9093` 会把 `/ws` 转到 `9090`，把 `/admin/` 转到 `9094`。
 - `--cors-origins` 必须包含中控页面地址，否则浏览器会显示连接错误。
 

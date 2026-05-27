@@ -33,6 +33,7 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertAlmostEqual(client.no_speech_thresh, 0.45)
         self.assertFalse(client.clip_audio)
         self.assertEqual(client.same_output_threshold, 10)
+        self.assertAlmostEqual(client.min_segment_rms, 0.0015)
         self.assertIsNone(client.frames_np)
         self.assertAlmostEqual(client.timestamp_offset, 0.0)
         self.assertFalse(client.exit)
@@ -48,12 +49,14 @@ class TestServeClientBaseInit(unittest.TestCase):
             no_speech_thresh=0.6,
             clip_audio=True,
             same_output_threshold=20,
+            min_segment_rms=0.002,
             translation_queue=q,
         )
         self.assertEqual(client.send_last_n_segments, 5)
         self.assertAlmostEqual(client.no_speech_thresh, 0.6)
         self.assertTrue(client.clip_audio)
         self.assertEqual(client.same_output_threshold, 20)
+        self.assertAlmostEqual(client.min_segment_rms, 0.002)
         self.assertIs(client.translation_queue, q)
 
 
@@ -304,7 +307,7 @@ class TestUpdateSegments(unittest.TestCase):
             no_speech_thresh=0.45,
             same_output_threshold=3,
         )
-        self.client.frames_np = np.zeros(16000 * 5, dtype=np.float32)
+        self.client.frames_np = np.full(16000 * 5, 0.01, dtype=np.float32)
 
     def _make_segment(self, start, end, text, no_speech_prob=0.0):
         seg = MagicMock()
@@ -370,6 +373,38 @@ class TestUpdateSegments(unittest.TestCase):
         self.assertFalse(q.empty())
         item = q.get_nowait()
         self.assertIn("first", item["text"])
+
+    def test_low_energy_completed_segment_is_dropped(self):
+        q = queue.Queue()
+        self.client.translation_queue = q
+        self.client.frames_np = np.zeros(16000 * 5, dtype=np.float32)
+        segs = [
+            self._make_segment(0.0, 1.0, " hotword"),
+            self._make_segment(1.0, 2.0, " next"),
+        ]
+        last = self.client.update_segments(segs, duration=3.0)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertTrue(q.empty())
+        self.assertIsNone(last)
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_low_energy_incomplete_segment_does_not_repeat(self):
+        self.client.frames_np = np.zeros(16000 * 5, dtype=np.float32)
+        self.client.prev_out = " hotword"
+        seg = self._make_segment(0.0, 1.0, " hotword")
+        last = self.client.update_segments([seg], duration=2.0)
+        self.assertIsNone(last)
+        self.assertEqual(self.client.same_output_count, 0)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_min_segment_rms_zero_disables_low_energy_filter(self):
+        self.client.min_segment_rms = 0
+        self.client.frames_np = np.zeros(16000 * 5, dtype=np.float32)
+        seg = self._make_segment(0.0, 1.0, " quiet speech")
+        last = self.client.update_segments([seg], duration=2.0)
+        self.assertIsNotNone(last)
+        self.assertIn("quiet speech", last["text"])
 
     def test_timestamp_offset_advances(self):
         segs = [

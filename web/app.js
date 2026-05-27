@@ -408,6 +408,8 @@ function sendConfig(event) {
     no_speech_thresh: 0.45,
     clip_audio: false,
     same_output_threshold: 2,
+    min_segment_rms: 0.005,
+    max_incomplete_segment_seconds: 0.0,
     enable_translation: true,
     target_language: "auto",
     translation_provider: "helsinki_zh_en",

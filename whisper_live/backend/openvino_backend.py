@@ -28,6 +28,7 @@ class ServeClientOpenVINO(ServeClientBase):
         no_speech_thresh=0.45,
         clip_audio=False,
         same_output_threshold=10,
+        min_segment_rms=0.0015,
     ):
         """
         Initialize a ServeClient instance.
@@ -56,6 +57,7 @@ class ServeClientOpenVINO(ServeClientBase):
             no_speech_thresh,
             clip_audio,
             same_output_threshold,
+            min_segment_rms=min_segment_rms,
         )
         self.language = "en" if language is None else language
         if not self.language.startswith("<|"):
