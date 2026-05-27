@@ -10,6 +10,11 @@ import numpy as np
 from whisper_live.backend.base import ServeClientBase
 
 
+class FakeOpenCCConverter:
+    def convert(self, text):
+        return str(text).replace("繁體", "繁体").replace("臺灣", "台湾")
+
+
 class ConcreteServeClient(ServeClientBase):
     """Concrete subclass for testing the abstract base class."""
 
@@ -230,6 +235,11 @@ class TestFormatSegment(unittest.TestCase):
         seg = self.client.format_segment(0.0, 1.0, "text")
         self.assertFalse(seg["completed"])
 
+    def test_format_converts_asr_text_to_simplified(self):
+        self.client.opencc_converter = FakeOpenCCConverter()
+        seg = self.client.format_segment(0.0, 1.0, "繁體中文和臺灣", completed=True)
+        self.assertEqual(seg["text"], "繁体中文和台湾")
+
 
 class TestSendTranscriptionToClient(unittest.TestCase):
     def setUp(self):
@@ -373,6 +383,18 @@ class TestUpdateSegments(unittest.TestCase):
         self.assertFalse(q.empty())
         item = q.get_nowait()
         self.assertIn("first", item["text"])
+
+    def test_translation_queue_receives_simplified_completed_text(self):
+        q = queue.Queue()
+        self.client.translation_queue = q
+        self.client.opencc_converter = FakeOpenCCConverter()
+        segs = [
+            self._make_segment(0.0, 1.0, " 繁體中文"),
+            self._make_segment(1.0, 2.0, " second"),
+        ]
+        self.client.update_segments(segs, duration=3.0)
+        item = q.get_nowait()
+        self.assertIn("繁体中文", item["text"])
 
     def test_low_energy_completed_segment_is_dropped(self):
         q = queue.Queue()

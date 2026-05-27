@@ -57,6 +57,7 @@ const MODEL_OPTIONS = {
     "large-v3",
   ],
   mlx_whisper: ["model/whisper-medium-mlx"],
+  funasr: ["model/funasr/SenseVoiceSmall", "iic/SenseVoiceSmall"],
 };
 
 function getDisplayLimit() {
@@ -300,7 +301,7 @@ function resolveSelectedModel() {
   const customModel = elements.customModel.value.trim();
   const selectedModel = customModel || elements.model.value;
 
-  if (backend === "mlx_whisper") {
+  if (backend === "mlx_whisper" || backend === "funasr") {
     return selectedModel;
   }
 

@@ -1,5 +1,6 @@
 faster-whisper==1.2.0
 torch==2.11.0
+torchaudio==2.11.0
 websockets==16.0
 onnxruntime==1.17.0
 numba
@@ -16,6 +17,8 @@ openai-whisper==20250625
 tokenizers==0.20.3
 transformers[torch]==4.46.3
 sentencepiece
+opencc-python-reimplemented
+funasr
 huggingface_hub==0.36.2
 
 # openvino

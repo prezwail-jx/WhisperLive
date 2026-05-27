@@ -23,6 +23,34 @@ class TestTranscriptionServerInitialization(unittest.TestCase):
         self.assertDictEqual(server.client_manager.clients, {})
         self.assertDictEqual(server.client_manager.start_times, {})
 
+    def test_backend_type_accepts_funasr(self):
+        self.assertTrue(BackendType.is_valid("funasr"))
+        self.assertTrue(BackendType("funasr").is_funasr())
+
+    def test_funasr_uses_server_model_when_client_sends_default_model_id(self):
+        server = TranscriptionServer()
+        model = server.resolve_funasr_model_path(
+            "iic/SenseVoiceSmall",
+            "model/funasr/SenseVoiceSmall",
+        )
+        self.assertEqual(model, "model/funasr/SenseVoiceSmall")
+
+    def test_funasr_ignores_whisper_client_model(self):
+        server = TranscriptionServer()
+        model = server.resolve_funasr_model_path(
+            "model/asr/small",
+            "model/funasr/SenseVoiceSmall",
+        )
+        self.assertEqual(model, "model/funasr/SenseVoiceSmall")
+
+    def test_funasr_allows_explicit_funasr_client_path(self):
+        server = TranscriptionServer()
+        model = server.resolve_funasr_model_path(
+            "model/funasr/CustomSenseVoice",
+            "model/funasr/SenseVoiceSmall",
+        )
+        self.assertEqual(model, "model/funasr/CustomSenseVoice")
+
 
 class TestServerDefaultHotwords(unittest.TestCase):
     def test_load_hotwords_file_ignores_blank_lines_and_comments(self):

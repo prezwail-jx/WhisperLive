@@ -346,6 +346,7 @@ class BackendType(Enum):
     TENSORRT = "tensorrt"
     OPENVINO = "openvino"
     MLX_WHISPER = "mlx_whisper"
+    FUNASR = "funasr"
 
     @staticmethod
     def valid_types() -> List[str]:
@@ -366,6 +367,9 @@ class BackendType(Enum):
 
     def is_mlx_whisper(self) -> bool:
         return self == BackendType.MLX_WHISPER
+
+    def is_funasr(self) -> bool:
+        return self == BackendType.FUNASR
 
 
 class TranscriptionServer:
@@ -450,9 +454,28 @@ class TranscriptionServer:
                 return local_model
         return model
 
+    def resolve_funasr_model_path(self, client_model, server_model):
+        server_model = server_model or "iic/SenseVoiceSmall"
+        client_model = str(client_model or "").strip()
+        if not client_model:
+            return server_model
+        if client_model in self.LOCAL_ASR_MODEL_NAMES or client_model.startswith("model/asr/"):
+            return server_model
+        if client_model == "iic/SenseVoiceSmall" and server_model != "iic/SenseVoiceSmall":
+            return server_model
+        if (
+            client_model.startswith("model/funasr/")
+            or client_model.startswith("/")
+            or client_model.startswith("~")
+            or "/" in client_model
+        ):
+            return client_model
+        return server_model
+
     def initialize_client(
         self, websocket, options, faster_whisper_custom_model_path,
         whisper_tensorrt_path, trt_multilingual, trt_py_session=False,
+        funasr_model="iic/SenseVoiceSmall", funasr_device="auto",
     ):
         client: Optional[ServeClientBase] = None
 
@@ -578,6 +601,39 @@ class TranscriptionServer:
                 websocket.close()
                 raise
 
+        if self.backend.is_funasr():
+            try:
+                from whisper_live.backend.funasr_backend import ServeClientFunASR
+                options["model"] = self.resolve_funasr_model_path(options.get("model"), funasr_model)
+                client = ServeClientFunASR(
+                    websocket,
+                    language=options["language"],
+                    task=options["task"],
+                    client_uid=options["uid"],
+                    model=options["model"],
+                    device=funasr_device,
+                    single_model=self.single_model,
+                    send_last_n_segments=options.get("send_last_n_segments", 10),
+                    no_speech_thresh=options.get("no_speech_thresh", 0.45),
+                    clip_audio=options.get("clip_audio", False),
+                    same_output_threshold=options.get("same_output_threshold", 3),
+                    min_segment_rms=options.get("min_segment_rms", 0.0015),
+                    max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 6.0),
+                    translation_queue=translation_queue,
+                    hotwords=options.get("hotwords"),
+                )
+                logging.info("Running FunASR backend.")
+            except Exception as e:
+                logging.error(f"FunASR not supported: {e}")
+                self.client_uid = options["uid"]
+                websocket.send(json.dumps({
+                    "uid": self.client_uid,
+                    "status": "ERROR",
+                    "message": str(e)
+                }))
+                websocket.close()
+                raise
+
         try:
             if self.backend.is_faster_whisper():
                 from whisper_live.backend.faster_whisper_backend import ServeClientFasterWhisper
@@ -690,7 +746,8 @@ class TranscriptionServer:
         return np.frombuffer(frame_data, dtype=np.float32)
 
     def handle_new_connection(self, websocket, faster_whisper_custom_model_path,
-                              whisper_tensorrt_path, trt_multilingual, trt_py_session=False):
+                              whisper_tensorrt_path, trt_multilingual, trt_py_session=False,
+                              funasr_model="iic/SenseVoiceSmall", funasr_device="auto"):
         try:
             logging.info("New client connected")
             options = websocket.recv()
@@ -707,7 +764,8 @@ class TranscriptionServer:
             if self.backend.is_tensorrt() and self.use_vad:
                 self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
             self.initialize_client(websocket, options, faster_whisper_custom_model_path,
-                                   whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session)
+                                   whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
+                                   funasr_model=funasr_model, funasr_device=funasr_device)
             wl_metrics.track_connection_opened()
             return True
         except json.JSONDecodeError:
@@ -745,7 +803,9 @@ class TranscriptionServer:
                    faster_whisper_custom_model_path=None,
                    whisper_tensorrt_path=None,
                    trt_multilingual=False,
-                   trt_py_session=False):
+                   trt_py_session=False,
+                   funasr_model="iic/SenseVoiceSmall",
+                   funasr_device="auto"):
         """
         Receive audio chunks from a client in an infinite loop.
 
@@ -772,7 +832,8 @@ class TranscriptionServer:
         """
         self.backend = backend
         if not self.handle_new_connection(websocket, faster_whisper_custom_model_path,
-                                          whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session):
+                                          whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
+                                          funasr_model=funasr_model, funasr_device=funasr_device):
             return
 
         try:
@@ -796,6 +857,8 @@ class TranscriptionServer:
             backend="tensorrt",
             faster_whisper_custom_model_path=None,
             whisper_tensorrt_path=None,
+            funasr_model="iic/SenseVoiceSmall",
+            funasr_device="auto",
             trt_multilingual=False,
             trt_py_session=False,
             single_model=False,
@@ -876,7 +939,7 @@ class TranscriptionServer:
             self.batch_config = None
 
         if single_model:
-            if faster_whisper_custom_model_path or whisper_tensorrt_path:
+            if faster_whisper_custom_model_path or whisper_tensorrt_path or backend == BackendType.FUNASR.value:
                 logging.info("Custom model option was provided. Switching to single model mode.")
                 self.single_model = True
                 # TODO: load model initially
@@ -1052,6 +1115,8 @@ class TranscriptionServer:
                 backend=BackendType(backend),
                 faster_whisper_custom_model_path=faster_whisper_custom_model_path,
                 whisper_tensorrt_path=whisper_tensorrt_path,
+                funasr_model=funasr_model,
+                funasr_device=funasr_device,
                 trt_multilingual=trt_multilingual,
                 trt_py_session=trt_py_session,
             ),

@@ -7,6 +7,11 @@ import numpy as np
 
 from whisper_live import metrics as wl_metrics
 
+try:
+    from opencc import OpenCC
+except ImportError:
+    OpenCC = None
+
 
 class ServeClientBase(object):
     RATE = 16000
@@ -33,6 +38,8 @@ class ServeClientBase(object):
     MAX_TRANSCRIPT_LENGTH = 500
     MAX_TRANSLATION_QUEUE_SIZE = 100
     MAX_PENDING_AUDIO_SECONDS = 8.0
+    OPENCC_CONFIG = "t2s"
+    OPENCC_UNAVAILABLE_LOGGED = False
 
     def __init__(
         self,
@@ -76,6 +83,7 @@ class ServeClientBase(object):
         self.end_time_for_same_output = None
         self.translation_queue = translation_queue
         self.admin_status_callback = None
+        self.opencc_converter = self._create_opencc_converter()
 
         # Optional post-processing callable for segments.
         # If set, called with a segment dict and must return a segment dict.
@@ -86,6 +94,34 @@ class ServeClientBase(object):
 
         # threading
         self.lock = threading.Lock()
+
+    @classmethod
+    def _log_opencc_unavailable_once(cls, message):
+        if cls.OPENCC_UNAVAILABLE_LOGGED:
+            return
+        logging.warning(message)
+        cls.OPENCC_UNAVAILABLE_LOGGED = True
+
+    def _create_opencc_converter(self):
+        if OpenCC is None:
+            self._log_opencc_unavailable_once(
+                "OpenCC is not installed; ASR text will not be converted to Simplified Chinese."
+            )
+            return None
+        try:
+            return OpenCC(self.OPENCC_CONFIG)
+        except Exception as e:
+            logging.warning("Failed to initialize OpenCC config %s: %s", self.OPENCC_CONFIG, e)
+            return None
+
+    def normalize_asr_text(self, text):
+        if text is None or self.opencc_converter is None:
+            return text
+        try:
+            return self.opencc_converter.convert(str(text))
+        except Exception as e:
+            logging.warning("OpenCC conversion failed: %s", e)
+            return text
 
     def speech_to_text(self):
         """
@@ -160,7 +196,7 @@ class ServeClientBase(object):
         seg = {
             'start': "{:.3f}".format(start),
             'end': "{:.3f}".format(end),
-            'text': text,
+            'text': self.normalize_asr_text(text),
             'completed': completed,
             'language': getattr(self, "language", None)
         }
@@ -432,7 +468,7 @@ class ServeClientBase(object):
             return None
         return [
             {
-                "word": w.word,
+                "word": self.normalize_asr_text(w.word),
                 "start": "{:.3f}".format(time_offset + w.start),
                 "end": "{:.3f}".format(time_offset + w.end),
                 "probability": round(w.probability, 4),

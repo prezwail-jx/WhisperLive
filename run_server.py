@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument('--backend', '-b',
                         type=str,
                         default='faster_whisper',
-                        help='Backends from ["tensorrt", "faster_whisper", "openvino", "mlx_whisper"]')
+                        help='Backends from ["tensorrt", "faster_whisper", "openvino", "mlx_whisper", "funasr"]')
     parser.add_argument('--faster_whisper_custom_model_path', '-fw',
                         type=str, default=None,
                         help="Custom Faster Whisper Model")
@@ -27,6 +27,15 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help='Whisper TensorRT model path')
+    parser.add_argument('--funasr_model',
+                        type=str,
+                        default='iic/SenseVoiceSmall',
+                        help='FunASR model ID or local path.')
+    parser.add_argument('--funasr_device',
+                        type=str,
+                        default='auto',
+                        choices=['auto', 'cpu', 'cuda'],
+                        help='Device for FunASR backend.')
     parser.add_argument('--trt_multilingual', '-m',
                         action="store_true",
                         help='Boolean only for TensorRT model. True if multilingual.')
@@ -132,6 +141,8 @@ if __name__ == "__main__":
         backend=args.backend,
         faster_whisper_custom_model_path=args.faster_whisper_custom_model_path,
         whisper_tensorrt_path=args.trt_model_path,
+        funasr_model=args.funasr_model,
+        funasr_device=args.funasr_device,
         trt_multilingual=args.trt_multilingual,
         trt_py_session=args.trt_py_session,
         single_model=not args.no_single_model,

@@ -57,6 +57,8 @@ setup(
         "kaldialign",
         "soundfile",
         "tokenizers==0.20.3",
+        "opencc-python-reimplemented",
+        "funasr",
         "librosa",
         "numpy==1.26.4",
         "openvino",

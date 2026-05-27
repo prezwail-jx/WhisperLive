@@ -134,6 +134,9 @@ python run_server.py \
   -fw model/asr/whisper-small-zh_tw-ct2/
 ```
 
+python run_server.py     --port 9090     --backend funasr     --funasr_model model/funasr/SenseVoiceSmall     --funasr_device cuda     --max_clients 12     --max_connection_time 600     --translation_device cpu     --rest_port 8000     --meeting_hotwords_dir config/hotwords.d     --cors-origins http://ub.tuitukj.com:9093,http://localhost:9093,http://127.0.0.1:9093
+
+
 另开一个 server 端宿主机终端，启动统一入口 nginx：
 
 ```bash
