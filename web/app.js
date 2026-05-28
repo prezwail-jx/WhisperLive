@@ -57,7 +57,7 @@ const MODEL_OPTIONS = {
     "large-v3",
   ],
   mlx_whisper: ["model/whisper-medium-mlx"],
-  funasr: ["model/funasr/SenseVoiceSmall", "iic/SenseVoiceSmall"],
+  funasr: ["model/funasr/SenseVoiceSmall", "model/funasr/paraformer-zh-streaming"],
 };
 
 function getDisplayLimit() {
@@ -409,7 +409,7 @@ function sendConfig(event) {
     no_speech_thresh: 0.45,
     clip_audio: false,
     same_output_threshold: 2,
-    min_segment_rms: 0.005,
+    min_segment_rms: 0.002,
     max_incomplete_segment_seconds: 0.0,
     enable_translation: true,
     target_language: "auto",

@@ -106,7 +106,51 @@ python run_server.py \
 -fw model/asr/faster-whisper-belle-large-v3-turbo-zh-int8
 ```
 
-## 4. 推荐：统一 Web 入口
+## 4. 可选：FunASR Paraformer 流式识别
+
+默认部署仍推荐按第 3 节使用 `faster_whisper`。如果需要测试 FunASR，可以使用 Paraformer 做流式字幕刷新，再用 SenseVoice 对完成后的整段语音做一次 final 精修。
+
+需要提前准备这些本地模型：
+
+```text
+model/funasr/paraformer-zh-streaming
+model/funasr/SenseVoiceSmall
+model/funasr/ct-punc
+model/vad/silero_vad.onnx
+```
+
+后端容器启动方式不变，仍然使用第 3 节的 `docker run ... whisperlive-server bash`。进入容器后启动 FunASR：
+
+```bash
+python run_server.py \
+  --port 9090 \
+  --backend funasr \
+  --funasr_mode paraformer_streaming \
+  --funasr_model model/funasr/paraformer-zh-streaming \
+  --funasr_final_model model/funasr/SenseVoiceSmall \
+  --funasr_punc_model model/funasr/ct-punc \
+  --funasr_device cuda \
+  --max_clients 12 \
+  --max_connection_time 600 \
+  --translation_device cpu \
+  --rest_port 8000 \
+  --meeting_hotwords_dir config/hotwords.d \
+  --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093
+```
+
+参数说明：
+
+- `--funasr_mode paraformer_streaming`：使用 Paraformer 流式模型持续刷新字幕。
+- `--funasr_model`：Paraformer 流式识别模型路径。
+- `--funasr_final_model`：断句完成后，用完整语音再跑一次离线识别，提高 final 文本质量。
+- `--funasr_punc_model`：对 final 文本做标点恢复。
+- `--funasr_device cuda`：FunASR 主识别模型使用 GPU。
+- `--funasr_final_device cpu|cuda|auto`：可选，指定 final 精修模型设备；不传时跟随 `--funasr_device`。
+- `--disable_funasr_final_refine`：可选，关闭 SenseVoice final 精修，换取更低 final 延迟。
+
+如果容器启动时使用了 `-v "$PWD:/app"` 挂载项目代码，修改 Python 或 Web 文件后通常只需要重启 `run_server.py`，不需要重新 build 镜像。只有代码被 COPY 进镜像时，才需要重新 build。
+
+## 5. 推荐：统一 Web 入口
 
 推荐生产和多人使用时采用统一入口：client 用户只打开一个地址，不需要在 client 机器上安装 Docker。
 
@@ -133,9 +177,6 @@ python run_server.py \
   --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093 \
   -fw model/asr/whisper-small-zh_tw-ct2/
 ```
-
-python run_server.py     --port 9090     --backend funasr     --funasr_model model/funasr/SenseVoiceSmall     --funasr_device cuda     --max_clients 12     --max_connection_time 600     --translation_device cpu     --rest_port 8000     --meeting_hotwords_dir config/hotwords.d     --cors-origins http://ub.tuitukj.com:9093,http://localhost:9093,http://127.0.0.1:9093
-
 
 另开一个 server 端宿主机终端，启动统一入口 nginx：
 
@@ -185,7 +226,7 @@ wss://你的域名/ws
 ```
 
 
-## 5. 会议热词表
+## 6. 会议热词表
 
 热词文件提前放在 server 机器的 `config/hotwords.d/` 目录中。文件名去掉 `.txt` 后就是会议号，例如：
 
@@ -215,7 +256,7 @@ faster-whisper
 
 新增或修改热词文件后，不需要重启 ASR 服务；在 Client 或 Admin 页面点击刷新即可看到最新列表。
 
-## 6. 备用：client 端 Docker 拉 Web 页面
+## 7. 备用：client 端 Docker 拉 Web 页面
 
 如果暂时没有统一入口或 HTTPS，可以让 client 机器自己拉起静态 Web 页面容器。client 机器只负责页面，不跑 ASR、不跑翻译，也不需要 GPU。
 
@@ -240,7 +281,7 @@ ws://192.168.1.100:9090
 
 这种方式仍然支持多路并发：每台 client 的浏览器都会建立独立 WebSocket 连接到 server。
 
-## 7. 命令行 client 使用
+## 8. 命令行 client 使用
 
 推荐在后端容器内执行，依赖最完整。
 
@@ -280,7 +321,7 @@ python run_client.py \
 
 注意：如果服务端启动时已经用了 `-fw`，实际 ASR 模型由服务端 `-fw` 决定，client 传的 `--model` 不会覆盖服务端固定模型。
 
-## 8. 压测脚本
+## 9. 压测脚本
 
 压测脚本用于模拟多路 WebSocket client 实时推流。
 
@@ -333,7 +374,31 @@ scripts/stress_logs/
 - `translations`：翻译消息数。
 - `errors` / `timeout`：连接错误或等待超时。
 
-## 9. 常见问题
+## 10. 常见问题
+
+### 改了代码后是否需要重新 build 镜像
+
+如果后端容器启动时使用了：
+
+```bash
+-v "$PWD:/app"
+```
+
+代码是从宿主机挂载进容器的，修改 Python 或 Web 文件后只需要停止当前 `run_server.py` 并重新启动。
+
+如果镜像里是通过 Dockerfile `COPY` 固化进去的代码，才需要重新执行 `docker build`。
+
+### FunASR 启动后为什么还会下载模型
+
+通常是启动参数没有指向本地模型目录，或者本地目录缺少核心文件。FunASR 本地路径建议使用：
+
+```text
+model/funasr/paraformer-zh-streaming
+model/funasr/SenseVoiceSmall
+model/funasr/ct-punc
+```
+
+如果传的是 `iic/SenseVoiceSmall` 这类模型 ID，FunASR 会从 ModelScope 下载到容器缓存目录。
 
 ### 页面能打开，但中控一直显示连接错误
 
@@ -402,7 +467,7 @@ Admin API：http://192.168.1.100:9093
 
 `9090/9094` 是后端真实端口，通常不直接填到浏览器页面里。
 
-## 10. 停止服务
+## 11. 停止服务
 
 停止前端容器：
 
@@ -416,7 +481,7 @@ docker stop whisperlive-web-gateway
 docker stop whisperlive-server
 ```
 
-## 11. 原始项目地址
+## 12. 原始项目地址
 
 原 fork / 上游 README 可参考：
 

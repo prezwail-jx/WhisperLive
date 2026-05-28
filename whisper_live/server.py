@@ -475,7 +475,10 @@ class TranscriptionServer:
     def initialize_client(
         self, websocket, options, faster_whisper_custom_model_path,
         whisper_tensorrt_path, trt_multilingual, trt_py_session=False,
-        funasr_model="iic/SenseVoiceSmall", funasr_device="auto",
+        funasr_model=None, funasr_device="auto",
+        funasr_mode="sensevoice", funasr_punc_model=None, funasr_vad_model=None,
+        funasr_final_model="model/funasr/SenseVoiceSmall", funasr_final_device=None,
+        funasr_final_refine=True,
     ):
         client: Optional[ServeClientBase] = None
 
@@ -604,7 +607,10 @@ class TranscriptionServer:
         if self.backend.is_funasr():
             try:
                 from whisper_live.backend.funasr_backend import ServeClientFunASR
-                options["model"] = self.resolve_funasr_model_path(options.get("model"), funasr_model)
+                if funasr_mode == "paraformer_streaming":
+                    options["model"] = funasr_model or "model/funasr/paraformer-zh-streaming"
+                else:
+                    options["model"] = self.resolve_funasr_model_path(options.get("model"), funasr_model)
                 client = ServeClientFunASR(
                     websocket,
                     language=options["language"],
@@ -612,6 +618,12 @@ class TranscriptionServer:
                     client_uid=options["uid"],
                     model=options["model"],
                     device=funasr_device,
+                    mode=funasr_mode,
+                    punc_model=funasr_punc_model,
+                    vad_model=funasr_vad_model,
+                    final_model=funasr_final_model,
+                    final_device=funasr_final_device,
+                    final_refine=funasr_final_refine,
                     single_model=self.single_model,
                     send_last_n_segments=options.get("send_last_n_segments", 10),
                     no_speech_thresh=options.get("no_speech_thresh", 0.45),
@@ -619,6 +631,7 @@ class TranscriptionServer:
                     same_output_threshold=options.get("same_output_threshold", 3),
                     min_segment_rms=options.get("min_segment_rms", 0.0015),
                     max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 6.0),
+                    use_vad=self.use_vad,
                     translation_queue=translation_queue,
                     hotwords=options.get("hotwords"),
                 )
@@ -747,7 +760,10 @@ class TranscriptionServer:
 
     def handle_new_connection(self, websocket, faster_whisper_custom_model_path,
                               whisper_tensorrt_path, trt_multilingual, trt_py_session=False,
-                              funasr_model="iic/SenseVoiceSmall", funasr_device="auto"):
+                              funasr_model=None, funasr_device="auto",
+                              funasr_mode="sensevoice", funasr_punc_model=None, funasr_vad_model=None,
+                              funasr_final_model="model/funasr/SenseVoiceSmall", funasr_final_device=None,
+                              funasr_final_refine=True):
         try:
             logging.info("New client connected")
             options = websocket.recv()
@@ -765,7 +781,12 @@ class TranscriptionServer:
                 self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
             self.initialize_client(websocket, options, faster_whisper_custom_model_path,
                                    whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
-                                   funasr_model=funasr_model, funasr_device=funasr_device)
+                                   funasr_model=funasr_model, funasr_device=funasr_device,
+                                   funasr_mode=funasr_mode, funasr_punc_model=funasr_punc_model,
+                                   funasr_vad_model=funasr_vad_model,
+                                   funasr_final_model=funasr_final_model,
+                                   funasr_final_device=funasr_final_device,
+                                   funasr_final_refine=funasr_final_refine)
             wl_metrics.track_connection_opened()
             return True
         except json.JSONDecodeError:
@@ -804,8 +825,14 @@ class TranscriptionServer:
                    whisper_tensorrt_path=None,
                    trt_multilingual=False,
                    trt_py_session=False,
-                   funasr_model="iic/SenseVoiceSmall",
-                   funasr_device="auto"):
+                   funasr_model=None,
+                   funasr_device="auto",
+                   funasr_mode="sensevoice",
+                   funasr_punc_model=None,
+                   funasr_vad_model=None,
+                   funasr_final_model="model/funasr/SenseVoiceSmall",
+                   funasr_final_device=None,
+                   funasr_final_refine=True):
         """
         Receive audio chunks from a client in an infinite loop.
 
@@ -833,7 +860,12 @@ class TranscriptionServer:
         self.backend = backend
         if not self.handle_new_connection(websocket, faster_whisper_custom_model_path,
                                           whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
-                                          funasr_model=funasr_model, funasr_device=funasr_device):
+                                          funasr_model=funasr_model, funasr_device=funasr_device,
+                                          funasr_mode=funasr_mode, funasr_punc_model=funasr_punc_model,
+                                          funasr_vad_model=funasr_vad_model,
+                                          funasr_final_model=funasr_final_model,
+                                          funasr_final_device=funasr_final_device,
+                                          funasr_final_refine=funasr_final_refine):
             return
 
         try:
@@ -857,7 +889,13 @@ class TranscriptionServer:
             backend="tensorrt",
             faster_whisper_custom_model_path=None,
             whisper_tensorrt_path=None,
-            funasr_model="iic/SenseVoiceSmall",
+            funasr_model=None,
+            funasr_mode="sensevoice",
+            funasr_punc_model=None,
+            funasr_vad_model=None,
+            funasr_final_model="model/funasr/SenseVoiceSmall",
+            funasr_final_device=None,
+            funasr_final_refine=True,
             funasr_device="auto",
             trt_multilingual=False,
             trt_py_session=False,
@@ -1116,6 +1154,12 @@ class TranscriptionServer:
                 faster_whisper_custom_model_path=faster_whisper_custom_model_path,
                 whisper_tensorrt_path=whisper_tensorrt_path,
                 funasr_model=funasr_model,
+                funasr_mode=funasr_mode,
+                funasr_punc_model=funasr_punc_model,
+                funasr_vad_model=funasr_vad_model,
+                funasr_final_model=funasr_final_model,
+                funasr_final_device=funasr_final_device,
+                funasr_final_refine=funasr_final_refine,
                 funasr_device=funasr_device,
                 trt_multilingual=trt_multilingual,
                 trt_py_session=trt_py_session,

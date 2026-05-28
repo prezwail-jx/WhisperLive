@@ -29,8 +29,33 @@ if __name__ == "__main__":
                         help='Whisper TensorRT model path')
     parser.add_argument('--funasr_model',
                         type=str,
-                        default='iic/SenseVoiceSmall',
-                        help='FunASR model ID or local path.')
+                        default=None,
+                        help='FunASR model ID or local path. Defaults to iic/SenseVoiceSmall for sensevoice and model/funasr/paraformer-zh-streaming for paraformer_streaming.')
+    parser.add_argument('--funasr_mode',
+                        type=str,
+                        default='sensevoice',
+                        choices=['sensevoice', 'paraformer_streaming'],
+                        help='FunASR recognition mode. sensevoice uses VAD-based chunking; paraformer_streaming uses FunASR streaming cache.')
+    parser.add_argument('--funasr_punc_model',
+                        type=str,
+                        default=None,
+                        help='Optional FunASR punctuation model ID or local path for finalized Paraformer streaming text.')
+    parser.add_argument('--funasr_vad_model',
+                        type=str,
+                        default=None,
+                        help='Reserved optional FunASR VAD model ID or local path. Current server-side endpointing uses Silero VAD.')
+    parser.add_argument('--funasr_final_model',
+                        type=str,
+                        default='model/funasr/SenseVoiceSmall',
+                        help='Optional offline FunASR model used to refine completed Paraformer streaming segments.')
+    parser.add_argument('--funasr_final_device',
+                        type=str,
+                        default=None,
+                        choices=['auto', 'cpu', 'cuda'],
+                        help='Device for FunASR final refinement model. Defaults to --funasr_device.')
+    parser.add_argument('--disable_funasr_final_refine',
+                        action='store_true',
+                        help='Disable offline final refinement for Paraformer streaming.')
     parser.add_argument('--funasr_device',
                         type=str,
                         default='auto',
@@ -142,6 +167,12 @@ if __name__ == "__main__":
         faster_whisper_custom_model_path=args.faster_whisper_custom_model_path,
         whisper_tensorrt_path=args.trt_model_path,
         funasr_model=args.funasr_model,
+        funasr_mode=args.funasr_mode,
+        funasr_punc_model=args.funasr_punc_model,
+        funasr_vad_model=args.funasr_vad_model,
+        funasr_final_model=args.funasr_final_model,
+        funasr_final_device=args.funasr_final_device,
+        funasr_final_refine=not args.disable_funasr_final_refine,
         funasr_device=args.funasr_device,
         trt_multilingual=args.trt_multilingual,
         trt_py_session=args.trt_py_session,

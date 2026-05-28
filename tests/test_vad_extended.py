@@ -71,19 +71,18 @@ class TestVoiceActivityDetectionDownload(unittest.TestCase):
         self.assertTrue(path.endswith("silero_vad.onnx"))
 
     @patch("os.path.exists", return_value=False)
-    @patch("subprocess.run")
+    @patch("urllib.request.urlretrieve")
     @patch("os.makedirs")
-    def test_downloads_if_missing(self, mock_makedirs, mock_run, mock_exists):
+    def test_downloads_if_missing(self, mock_makedirs, mock_urlretrieve, mock_exists):
         path = VoiceActivityDetection.download()
-        mock_run.assert_called_once()
+        mock_urlretrieve.assert_called_once()
         self.assertIn("silero_vad.onnx", path)
 
     @patch("os.path.exists", return_value=False)
-    @patch("subprocess.run", side_effect=Exception("wget not found"))
+    @patch("urllib.request.urlretrieve", side_effect=Exception("download failed"))
     @patch("os.makedirs")
-    def test_handles_download_failure(self, mock_makedirs, mock_run, mock_exists):
-        # should not raise, just prints an error
-        with self.assertRaises(Exception):
+    def test_handles_download_failure(self, mock_makedirs, mock_urlretrieve, mock_exists):
+        with self.assertRaises(RuntimeError):
             VoiceActivityDetection.download()
 
 
