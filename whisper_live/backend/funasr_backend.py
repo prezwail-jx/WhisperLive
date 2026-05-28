@@ -38,9 +38,27 @@ class ServeClientFunASR(ServeClientBase):
     VAD_WINDOW_SECONDS = 0.5
     STREAMING_WINDOW_SECONDS = 0.8
     MIN_SPEECH_SECONDS = 0.6
-    END_SILENCE_SECONDS = 0.8
+    END_SILENCE_SECONDS = 0.5
     PARTIAL_INTERVAL_SECONDS = 1.5
-    STREAMING_SENTENCE_ENDPOINT_MIN_SECONDS = 1.2
+    STREAMING_SENTENCE_ENDPOINT_MIN_SECONDS = 2.5
+    STREAMING_SOFT_MAX_SPEECH_SECONDS = 8.0
+    STREAMING_SOFT_MAX_MIN_CHARS = 8
+    FINAL_SPLIT_TARGET_CHARS = 70
+    FINAL_SPLIT_MAX_CHARS = 110
+    FINAL_SPLIT_MIN_CHARS = 18
+    FINAL_SPLIT_WEAK_BOUNDARIES = (
+        "但是",
+        "所以",
+        "因此",
+        "因为",
+        "不过",
+        "另外",
+        "也就是说",
+        "换句话说",
+        "举个例子",
+        "具体来说",
+        "在这种情况下",
+    )
     MAX_SPEECH_SECONDS = 12.0
     SPEECH_PAD_SECONDS = 0.3
     SENTENCE_END_RE = re.compile(r'[。！？!?；;]+[\s\)\]\}）】》’”"]*$')
@@ -302,6 +320,8 @@ class ServeClientFunASR(ServeClientBase):
             self._emit_streaming_partial(window, window_start)
             if self._should_endpoint_on_sentence():
                 self._emit_streaming_final(np.empty(0, dtype=np.float32), reason="sentence_punctuation")
+            elif self._should_endpoint_on_soft_max():
+                self._emit_streaming_final(np.empty(0, dtype=np.float32), reason="soft_max_speech")
             elif self._speech_duration() >= self.MAX_SPEECH_SECONDS:
                 self._emit_streaming_final(np.empty(0, dtype=np.float32), reason="max_speech")
             return
@@ -398,6 +418,12 @@ class ServeClientFunASR(ServeClientBase):
     def _has_sentence_endpoint(self, text):
         return bool(self.SENTENCE_END_RE.search(str(text or "").strip()))
 
+    def _should_endpoint_on_soft_max(self):
+        if self._speech_duration() < self.STREAMING_SOFT_MAX_SPEECH_SECONDS:
+            return False
+        text = re.sub(r"[\s。！？!?,，、.；;：:\-—…]+", "", str(self.streaming_partial_text or ""))
+        return len(text) >= self.STREAMING_SOFT_MAX_MIN_CHARS
+
     def _emit_streaming_final(self, final_audio, reason):
         if self.speech_buffer.size == 0 or self.speech_start_time is None:
             return
@@ -417,8 +443,9 @@ class ServeClientFunASR(ServeClientBase):
 
         start = self.speech_start_time
         end = start + duration
-        segment = self.format_segment(start, end, text, completed=True)
-        self._commit_completed_segment(segment, text, reason, duration)
+        text_parts = self._split_final_text(text)
+        segments = self._segments_from_text_parts(start, end, text_parts)
+        self._commit_completed_segments(segments, reason, duration)
         self._reset_speech_state()
 
     def _streaming_final_text(self, final_audio):
@@ -445,6 +472,209 @@ class ServeClientFunASR(ServeClientBase):
         except Exception as exc:
             logging.warning("FunASR final refinement failed; using streaming text: %s", exc)
             return ""
+
+    def _normalize_final_text(self, text):
+        text = str(text or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"[，,、]+([。！？!?；;])", r"\1", text)
+        text = re.sub(r"([。！？!?；;])[，,、]+", r"\1", text)
+        text = re.sub(r"[，,]{2,}", "，", text)
+        text = re.sub(r"、{2,}", "、", text)
+        text = re.sub(r"。{2,}", "。", text)
+        text = re.sub(r"！{2,}", "！", text)
+        text = re.sub(r"？{2,}", "？", text)
+        text = re.sub(r"；{2,}", "；", text)
+        text = re.sub(r"!{2,}", "!", text)
+        text = re.sub(r"\?{2,}", "?", text)
+        text = re.sub(r"(?<!\.)\.{2,}(?!\.)", ".", text)
+        return text.strip()
+
+    def _repair_fragmented_punctuation(self, text):
+        text = str(text or "").strip()
+        if not text:
+            return ""
+
+        cjk = r"\u4e00-\u9fff"
+        text = re.sub(rf"([{cjk}]{{1,3}})。\s*\1(?=[{cjk}])", r"\1", text)
+
+        standalone_fragments = {
+            "是",
+            "对",
+            "好",
+            "嗯",
+            "啊",
+            "哦",
+            "行",
+            "可以",
+            "不是",
+            "没有",
+            "谢谢",
+        }
+        followers = r"(?:这|那)(?:个|种|些|样)?|而|就|再|继续"
+
+        def repair_match(match):
+            prefix = match.group("prefix")
+            follower = match.group("follower")
+            if prefix in standalone_fragments:
+                return match.group(0)
+            return prefix + follower
+
+        return re.sub(
+            rf"(?P<prefix>[{cjk}]{{1,3}})。\s*(?P<follower>{followers})(?=[{cjk}])",
+            repair_match,
+            text,
+        ).strip()
+
+    def _effective_text_length(self, text):
+        return len(re.sub(r"[\s。！？!?,，、.；;：:\-—…]+", "", str(text or "")))
+
+    def _split_final_text(self, text):
+        text = self._normalize_final_text(text)
+        text = self._repair_fragmented_punctuation(text)
+        if not text:
+            return []
+
+        sentences = self._split_final_sentences(text)
+        merged = self._merge_final_sentences(sentences)
+        parts = []
+        for segment_text in merged:
+            parts.extend(self._split_long_clause(segment_text))
+        return [part for part in parts if self._is_meaningful_text(part)] or [text]
+
+    def _split_final_sentences(self, text):
+        sentences = []
+        current = []
+        strong_endings = set("。！？!?；;")
+        for char in text:
+            current.append(char)
+            if char in strong_endings:
+                part = "".join(current).strip()
+                if part:
+                    sentences.append(part)
+                current = []
+        tail = "".join(current).strip()
+        if tail:
+            sentences.append(tail)
+        return sentences or [text]
+
+    def _merge_final_sentences(self, sentences):
+        merged = []
+        current = ""
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if not current:
+                current = sentence
+                continue
+            candidate = current + sentence
+            if self._effective_text_length(candidate) <= self.FINAL_SPLIT_MAX_CHARS:
+                current = candidate
+                continue
+            if self._effective_text_length(current) < self.FINAL_SPLIT_MIN_CHARS:
+                current = candidate
+                continue
+            merged.append(current)
+            current = sentence
+        if current:
+            merged.append(current)
+        return merged
+
+    def _split_long_clause(self, text):
+        text = text.strip()
+        if self._effective_text_length(text) <= self.FINAL_SPLIT_MAX_CHARS:
+            return [text]
+
+        parts = []
+        remaining = text
+        while self._effective_text_length(remaining) > self.FINAL_SPLIT_MAX_CHARS:
+            split_at = self._find_weak_split_index(remaining)
+            if split_at is None:
+                break
+            head = remaining[:split_at].strip()
+            tail = remaining[split_at:].strip()
+            if not head or not tail:
+                break
+            parts.append(head)
+            remaining = tail
+        if remaining:
+            parts.append(remaining.strip())
+        return parts or [text]
+
+    def _find_weak_split_index(self, text):
+        target_chars = self.FINAL_SPLIT_TARGET_CHARS
+        max_chars = self.FINAL_SPLIT_MAX_CHARS
+        min_chars = self.FINAL_SPLIT_MIN_CHARS
+        candidates = []
+        for phrase in self.FINAL_SPLIT_WEAK_BOUNDARIES:
+            start = 0
+            while True:
+                index = text.find(phrase, start)
+                if index < 0:
+                    break
+                if index > 0:
+                    prefix_len = self._effective_text_length(text[:index])
+                    suffix_len = self._effective_text_length(text[index:])
+                    if min_chars <= prefix_len <= max_chars and suffix_len >= min_chars:
+                        candidates.append((abs(target_chars - prefix_len), index))
+                start = index + len(phrase)
+        if candidates:
+            return sorted(candidates)[0][1]
+
+        punctuation_candidates = []
+        for match in re.finditer(r"[，,、：:]", text):
+            index = match.end()
+            prefix_len = self._effective_text_length(text[:index])
+            suffix_len = self._effective_text_length(text[index:])
+            if min_chars <= prefix_len <= max_chars and suffix_len >= min_chars:
+                punctuation_candidates.append((abs(target_chars - prefix_len), index))
+        if punctuation_candidates:
+            return sorted(punctuation_candidates)[0][1]
+        return None
+
+    def _segments_from_text_parts(self, start, end, parts):
+        parts = [part.strip() for part in parts if self._is_meaningful_text(part)]
+        if not parts:
+            return []
+        duration = max(0.001, end - start)
+        lengths = [max(1, self._effective_text_length(part)) for part in parts]
+        total = sum(lengths) or len(parts)
+        segments = []
+        cursor = start
+        for index, part in enumerate(parts):
+            if index == len(parts) - 1:
+                part_end = end
+            else:
+                part_end = start + duration * (sum(lengths[:index + 1]) / total)
+                part_end = max(cursor + 0.001, min(part_end, end))
+            segments.append(self.format_segment(cursor, part_end, part, completed=True))
+            cursor = part_end
+        return segments
+
+    def _commit_completed_segments(self, segments, reason, duration):
+        if not segments:
+            return
+        for segment in segments:
+            text = str(segment.get("text") or "").strip()
+            if not text:
+                continue
+            self.text.append(text)
+            self.transcript.append(segment)
+            if self.translation_queue:
+                try:
+                    self.translation_queue.put(segment.copy(), timeout=0.1)
+                except queue.Full:
+                    logging.warning("Translation queue is full, skipping segment")
+            logging.info(
+                "[FUNASR_SEGMENT_COMPLETE] uid=%s mode=%s reason=%s duration=%.2fs text=%r",
+                self.client_uid,
+                self.mode,
+                reason,
+                duration,
+                text[:80],
+            )
+        self._trim_transcript()
+        self.send_transcription_to_client(self.prepare_segments())
 
     def _commit_completed_segment(self, segment, text, reason, duration):
         self.text.append(text)

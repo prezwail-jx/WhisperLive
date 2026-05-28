@@ -8,7 +8,7 @@ import logging
 import shutil
 import tempfile
 from typing import Optional, List
-from fastapi import FastAPI, UploadFile, Form
+from fastapi import FastAPI, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import PlainTextResponse, JSONResponse
 import uvicorn
@@ -49,6 +49,44 @@ def hotword_text_to_prompt(text):
 def count_hotwords(text):
     normalized = normalize_hotword_text(text)
     return len(normalized.splitlines()) if normalized else 0
+
+
+class MeetingLogStore:
+    UNSAFE_FILENAME_CHARS = set('/\\:*?"<>|')
+
+    def __init__(self, directory="logs"):
+        self.directory = directory or "logs"
+        self.lock = threading.Lock()
+        os.makedirs(self.directory, exist_ok=True)
+
+    @classmethod
+    def safe_name(cls, value):
+        name = str(value or "").strip() or "meeting"
+        cleaned = "".join("_" if char in cls.UNSAFE_FILENAME_CHARS or ord(char) < 32 else char for char in name)
+        cleaned = cleaned.strip(" ._") or "meeting"
+        return cleaned[:80]
+
+    @staticmethod
+    def timestamp_for_filename():
+        return time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime())
+
+    def save(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("meeting log payload must be a JSON object")
+        meeting_name = payload.get("meeting_name") or payload.get("client_name") or "meeting"
+        filename_stem = f"{self.safe_name(meeting_name)}-{self.timestamp_for_filename()}"
+        with self.lock:
+            filename = f"{filename_stem}.json"
+            path = os.path.join(self.directory, filename)
+            suffix = 1
+            while os.path.exists(path):
+                filename = f"{filename_stem}-{suffix}.json"
+                path = os.path.join(self.directory, filename)
+                suffix += 1
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump(payload, file, ensure_ascii=False, indent=2)
+                file.write("\n")
+        return {"saved": True, "filename": filename, "path": path}
 
 
 class MeetingHotwordStore:
@@ -914,6 +952,7 @@ class TranscriptionServer:
             hotwords_file=None,
             translation_device="cpu",
             meeting_hotwords_dir="config/hotwords.d",
+            meeting_logs_dir="logs",
             segment_post_processor=None):
         """
         Run the transcription server.
@@ -940,6 +979,7 @@ class TranscriptionServer:
         self.raw_pcm_input = raw_pcm_input
         self.translation_device = translation_device
         self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
+        self.meeting_logs = MeetingLogStore(meeting_logs_dir)
         self.default_hotwords = self.load_hotwords_file(hotwords_file)
         if self.default_hotwords:
             logging.info(
@@ -1031,6 +1071,19 @@ class TranscriptionServer:
                 return self.meeting_hotwords.get(meeting_name)
             except ValueError as exc:
                 return JSONResponse(status_code=400, content={"error": str(exc)})
+
+        @app.post("/admin/meeting-logs")
+        async def save_admin_meeting_log(request: Request):
+            try:
+                payload = await request.json()
+                return self.meeting_logs.save(payload)
+            except json.JSONDecodeError:
+                return JSONResponse(status_code=400, content={"saved": False, "error": "request body must be valid JSON"})
+            except ValueError as exc:
+                return JSONResponse(status_code=400, content={"saved": False, "error": str(exc)})
+            except Exception as exc:
+                logging.error("Failed to save meeting log: %s", exc)
+                return JSONResponse(status_code=500, content={"saved": False, "error": str(exc)})
 
         if enable_rest:
             @app.post("/v1/audio/transcriptions")

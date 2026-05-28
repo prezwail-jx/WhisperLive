@@ -80,6 +80,7 @@ python run_server.py \
   --translation_device cpu \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
+  --meeting_logs_dir logs \
   --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093 \
   -fw model/asr/whisper-small-zh_tw-ct2/
 ```
@@ -90,6 +91,7 @@ python run_server.py \
 - `--translation_device cpu` 表示翻译模型走 CPU，GPU 优先留给 ASR。
 - `--rest_port 8000` 是容器内 Admin API 端口，通过 `-p 9094:8000` 暴露到宿主机。
 - `--meeting_hotwords_dir` 指定服务端会议热词目录，目录内 `会议号.txt` 会自动出现在 Client 和中控下拉列表。
+- `--meeting_logs_dir` 指定浏览器点击“导出日志”时服务端保存 JSON 的目录；不传时默认是 `logs/`。
 - Web client 默认发送 `min_segment_rms=0.0015`，用于过滤极低音量静音段里的热词幻觉；需要关闭时可在 client payload 中设为 `0`。
 - 浏览器推荐只访问 `9093`；`9093` 会把 `/ws` 转到 `9090`，把 `/admin/` 转到 `9094`。
 - `--cors-origins` 必须包含中控页面地址，否则浏览器会显示连接错误。
@@ -135,6 +137,7 @@ python run_server.py \
   --translation_device cpu \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
+  --meeting_logs_dir logs \
   --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093
 ```
 
@@ -174,6 +177,7 @@ python run_server.py \
   --translation_device cpu \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
+  --meeting_logs_dir logs \
   --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093 \
   -fw model/asr/whisper-small-zh_tw-ct2/
 ```
@@ -256,7 +260,32 @@ faster-whisper
 
 新增或修改热词文件后，不需要重启 ASR 服务；在 Client 或 Admin 页面点击刷新即可看到最新列表。
 
-## 7. 备用：client 端 Docker 拉 Web 页面
+## 7. 服务端会议日志
+
+浏览器页面点击“导出日志”时，会同时执行两件事：
+
+- 浏览器本地下载一份 `会议号-*.json`；没有会议号时使用 `meeting-log-*.json`。
+- 通过 Admin API 保存同一份 JSON 到服务端目录。
+
+默认服务端保存目录是：
+
+```text
+logs/
+```
+
+也可以在启动服务时指定：
+
+```bash
+--meeting_logs_dir logs
+```
+
+如果后端容器使用了 `-v "$PWD:/app"`，日志会落在宿主机项目目录的 `logs/` 下。文件名会使用会议号和服务端时间，例如：
+
+```text
+logs/产品周会-2026-05-28T10-30-15.json
+```
+
+## 8. 备用：client 端 Docker 拉 Web 页面
 
 如果暂时没有统一入口或 HTTPS，可以让 client 机器自己拉起静态 Web 页面容器。client 机器只负责页面，不跑 ASR、不跑翻译，也不需要 GPU。
 
@@ -281,7 +310,7 @@ ws://192.168.1.100:9090
 
 这种方式仍然支持多路并发：每台 client 的浏览器都会建立独立 WebSocket 连接到 server。
 
-## 8. 命令行 client 使用
+## 9. 命令行 client 使用
 
 推荐在后端容器内执行，依赖最完整。
 
@@ -321,7 +350,7 @@ python run_client.py \
 
 注意：如果服务端启动时已经用了 `-fw`，实际 ASR 模型由服务端 `-fw` 决定，client 传的 `--model` 不会覆盖服务端固定模型。
 
-## 9. 压测脚本
+## 10. 压测脚本
 
 压测脚本用于模拟多路 WebSocket client 实时推流。
 
@@ -374,7 +403,7 @@ scripts/stress_logs/
 - `translations`：翻译消息数。
 - `errors` / `timeout`：连接错误或等待超时。
 
-## 10. 常见问题
+## 11. 常见问题
 
 ### 改了代码后是否需要重新 build 镜像
 
@@ -467,7 +496,7 @@ Admin API：http://192.168.1.100:9093
 
 `9090/9094` 是后端真实端口，通常不直接填到浏览器页面里。
 
-## 11. 停止服务
+## 12. 停止服务
 
 停止前端容器：
 
@@ -481,7 +510,7 @@ docker stop whisperlive-web-gateway
 docker stop whisperlive-server
 ```
 
-## 12. 原始项目地址
+## 13. 原始项目地址
 
 原 fork / 上游 README 可参考：
 

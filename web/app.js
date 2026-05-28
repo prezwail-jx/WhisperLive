@@ -140,6 +140,10 @@ function hotwordApiUrl(meetingName) {
   return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/hotwords/${encodeURIComponent(meetingName)}`;
 }
 
+function meetingLogApiUrl() {
+  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/meeting-logs`;
+}
+
 
 async function loadMeetingOptions() {
   if (!elements.meetingSelect) return;
@@ -205,6 +209,43 @@ function updateMeetingLog(segments, log) {
   segments.forEach((segment) => upsertCompletedSegment(log, segment));
 }
 
+function cleanExportSegmentText(text) {
+  let cleaned = String(text || "").trim();
+  if (!cleaned) return "";
+
+  cleaned = cleaned.replace(/\s+/g, " ");
+  cleaned = cleaned.replace(/[，,、]+([。！？!?；;])/g, "$1");
+  cleaned = cleaned.replace(/([。！？!?；;])[，,、]+/g, "$1");
+  cleaned = cleaned.replace(/[，,]{2,}/g, "，");
+  cleaned = cleaned.replace(/、{2,}/g, "、");
+  cleaned = cleaned.replace(/。{2,}/g, "。");
+  cleaned = cleaned.replace(/！{2,}/g, "！");
+  cleaned = cleaned.replace(/？{2,}/g, "？");
+  cleaned = cleaned.replace(/；{2,}/g, "；");
+  cleaned = cleaned.replace(/!{2,}/g, "!");
+  cleaned = cleaned.replace(/\?{2,}/g, "?");
+  cleaned = cleaned.replace(/(?<!\.)\.{2,}(?!\.)/g, ".");
+
+  const han = "[\u4e00-\u9fff]";
+  cleaned = cleaned.replace(new RegExp(`(${han}{1,3})。\\s*\\1(?=${han})`, "g"), "$1");
+  const standalone = new Set(["是", "对", "好", "嗯", "啊", "哦", "行", "可以", "不是", "没有", "谢谢"]);
+  const fragmentedPattern = new RegExp(`(?<prefix>${han}{1,3})。\\s*(?<follower>(?:这|那)(?:个|种|些|样)?|而|就|再|继续)(?=${han})`, "g");
+  cleaned = cleaned.replace(fragmentedPattern, (match, _prefix, _follower, _offset, _source, groups) => {
+    const prefix = groups && groups.prefix ? groups.prefix : _prefix;
+    const follower = groups && groups.follower ? groups.follower : _follower;
+    return standalone.has(prefix) ? match : `${prefix}${follower}`;
+  });
+
+  return cleaned.trim();
+}
+
+function cleanExportSegments(segments) {
+  return segments.map((segment) => ({
+    ...segment,
+    text: cleanExportSegmentText(segment.text),
+  })).filter((segment) => segment.text);
+}
+
 function buildMeetingLog() {
   return {
     meeting_id: meetingId,
@@ -219,9 +260,17 @@ function buildMeetingLog() {
     model: currentConfig ? currentConfig.model : elements.model.value,
     source_language: elements.language.value || null,
     translation_mode: "auto",
-    source_segments: fullSourceLog,
-    translation_segments: fullTranslationLog,
+    source_segments: cleanExportSegments(fullSourceLog),
+    translation_segments: cleanExportSegments(fullTranslationLog),
   };
+}
+
+function safeExportFilenamePrefix(value) {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/[\/\\:*?"<>|\x00-\x1F]/g, "_")
+    .replace(/^[ ._]+|[ ._]+$/g, "");
+  return cleaned || "meeting-log";
 }
 
 function downloadJson(filename, data) {
@@ -236,9 +285,31 @@ function downloadJson(filename, data) {
   URL.revokeObjectURL(url);
 }
 
-function exportMeetingLog() {
+async function saveMeetingLogToServer(data) {
+  const response = await fetch(meetingLogApiUrl(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.saved) {
+    throw new Error(result.error || `HTTP ${response.status}`);
+  }
+  return result;
+}
+
+async function exportMeetingLog() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  downloadJson(`meeting-log-${timestamp}.json`, buildMeetingLog());
+  const data = buildMeetingLog();
+  const filenamePrefix = safeExportFilenamePrefix(data.meeting_name || data.client_name);
+  downloadJson(`${filenamePrefix}-${timestamp}.json`, data);
+  try {
+    const result = await saveMeetingLogToServer(data);
+    setStatus(`日志已保存：${result.filename}`, "ready");
+  } catch (error) {
+    console.warn("Failed to save meeting log to server", error);
+    setStatus("日志本地已导出，服务器保存失败", "error");
+  }
 }
 
 function clearMeetingLog() {
@@ -549,7 +620,12 @@ elements.stop.addEventListener("click", () => {
   stopCapture(true);
 });
 
-elements.exportLog.addEventListener("click", exportMeetingLog);
+elements.exportLog.addEventListener("click", () => {
+  exportMeetingLog().catch((error) => {
+    console.error(error);
+    setStatus("日志导出失败", "error");
+  });
+});
 elements.clearLog.addEventListener("click", clearMeetingLog);
 
 elements.meetingName.addEventListener("change", () => {

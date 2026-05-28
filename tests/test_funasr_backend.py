@@ -305,6 +305,179 @@ class TestServeClientFunASR(unittest.TestCase):
         translation_queue = queue.Queue()
         transcriber = mock.Mock()
         transcriber.generate.side_effect = [[{"text": "你好"}], [{"text": "你好。"}]]
+        with mock.patch.object(ServeClientFunASR, "STREAMING_SENTENCE_ENDPOINT_MIN_SECONDS", 1.0):
+            with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+                create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+                client = ServeClientFunASR(
+                    websocket=websocket,
+                    client_uid="client",
+                    mode="paraformer_streaming",
+                    final_refine=False,
+                    translation_queue=translation_queue,
+                    use_vad=False,
+                    min_segment_rms=0.0,
+                )
+
+            voice = np.ones(client.vad_window_samples, dtype=np.float32) * 0.1
+            client._process_vad_window(voice, 0.0, True)
+            self.assertTrue(translation_queue.empty())
+            client._process_vad_window(voice, 0.6, True)
+
+        item = translation_queue.get_nowait()
+        self.assertEqual(item["text"], "你好。")
+        self.assertTrue(item["completed"])
+        self.assertFalse(transcriber.generate.call_args.kwargs["is_final"])
+
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_soft_max_finalizes_before_hard_max(self, mock_cuda_available):
+        websocket = mock.Mock()
+        translation_queue = queue.Queue()
+        transcriber = mock.Mock()
+        transcriber.generate.return_value = [{"text": "这是一个较长的流式文本"}]
+        with mock.patch.object(ServeClientFunASR, "STREAMING_SOFT_MAX_SPEECH_SECONDS", 1.6):
+            with mock.patch.object(ServeClientFunASR, "STREAMING_SOFT_MAX_MIN_CHARS", 8):
+                with mock.patch.object(ServeClientFunASR, "MAX_SPEECH_SECONDS", 8.0):
+                    with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+                        create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+                        client = ServeClientFunASR(
+                            websocket=websocket,
+                            client_uid="client",
+                            mode="paraformer_streaming",
+                            final_refine=False,
+                            translation_queue=translation_queue,
+                            use_vad=False,
+                            min_segment_rms=0.0,
+                        )
+
+                    reasons = []
+                    original_commit = client._commit_completed_segments
+                    def record_commit(segments, reason, duration):
+                        reasons.append(reason)
+                        return original_commit(segments, reason, duration)
+                    client._commit_completed_segments = record_commit
+
+                    voice = np.ones(client.vad_window_samples, dtype=np.float32) * 0.1
+                    client._process_vad_window(voice, 0.0, True)
+                    client._process_vad_window(voice, 0.8, True)
+
+        item = translation_queue.get_nowait()
+        self.assertEqual(item["text"], "这是一个较长的流式文本")
+        self.assertEqual(reasons, ["soft_max_speech"])
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_soft_max_requires_enough_text(self, mock_cuda_available):
+        websocket = mock.Mock()
+        translation_queue = queue.Queue()
+        transcriber = mock.Mock()
+        transcriber.generate.return_value = [{"text": "你好"}]
+        with mock.patch.object(ServeClientFunASR, "STREAMING_SOFT_MAX_SPEECH_SECONDS", 1.6):
+            with mock.patch.object(ServeClientFunASR, "STREAMING_SOFT_MAX_MIN_CHARS", 8):
+                with mock.patch.object(ServeClientFunASR, "MAX_SPEECH_SECONDS", 8.0):
+                    with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+                        create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+                        client = ServeClientFunASR(
+                            websocket=websocket,
+                            client_uid="client",
+                            mode="paraformer_streaming",
+                            final_refine=False,
+                            translation_queue=translation_queue,
+                            use_vad=False,
+                            min_segment_rms=0.0,
+                        )
+
+                    voice = np.ones(client.vad_window_samples, dtype=np.float32) * 0.1
+                    client._process_vad_window(voice, 0.0, True)
+                    client._process_vad_window(voice, 0.8, True)
+
+        self.assertTrue(translation_queue.empty())
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_hard_max_still_fallback_when_soft_max_does_not_trigger(self, mock_cuda_available):
+        websocket = mock.Mock()
+        translation_queue = queue.Queue()
+        transcriber = mock.Mock()
+        transcriber.generate.return_value = [{"text": "你好"}]
+        with mock.patch.object(ServeClientFunASR, "STREAMING_SOFT_MAX_SPEECH_SECONDS", 1.6):
+            with mock.patch.object(ServeClientFunASR, "STREAMING_SOFT_MAX_MIN_CHARS", 8):
+                with mock.patch.object(ServeClientFunASR, "MAX_SPEECH_SECONDS", 2.4):
+                    with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+                        create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+                        client = ServeClientFunASR(
+                            websocket=websocket,
+                            client_uid="client",
+                            mode="paraformer_streaming",
+                            final_refine=False,
+                            translation_queue=translation_queue,
+                            use_vad=False,
+                            min_segment_rms=0.0,
+                        )
+
+                    reasons = []
+                    original_commit = client._commit_completed_segments
+                    def record_commit(segments, reason, duration):
+                        reasons.append(reason)
+                        return original_commit(segments, reason, duration)
+                    client._commit_completed_segments = record_commit
+
+                    voice = np.ones(client.vad_window_samples, dtype=np.float32) * 0.1
+                    client._process_vad_window(voice, 0.0, True)
+                    client._process_vad_window(voice, 0.8, True)
+                    client._process_vad_window(voice, 1.6, True)
+
+        item = translation_queue.get_nowait()
+        self.assertEqual(item["text"], "你好")
+        self.assertEqual(reasons, ["max_speech"])
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_sentence_punctuation_takes_priority_over_soft_max(self, mock_cuda_available):
+        websocket = mock.Mock()
+        translation_queue = queue.Queue()
+        transcriber = mock.Mock()
+        transcriber.generate.return_value = [{"text": "这是一个完整句子。"}]
+        with mock.patch.object(ServeClientFunASR, "STREAMING_SENTENCE_ENDPOINT_MIN_SECONDS", 1.6):
+            with mock.patch.object(ServeClientFunASR, "STREAMING_SOFT_MAX_SPEECH_SECONDS", 1.6):
+                with mock.patch.object(ServeClientFunASR, "STREAMING_SOFT_MAX_MIN_CHARS", 8):
+                    with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+                        create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+                        client = ServeClientFunASR(
+                            websocket=websocket,
+                            client_uid="client",
+                            mode="paraformer_streaming",
+                            final_refine=False,
+                            translation_queue=translation_queue,
+                            use_vad=False,
+                            min_segment_rms=0.0,
+                        )
+
+                    reasons = []
+                    original_commit = client._commit_completed_segments
+
+                    def record_commit(segments, reason, duration):
+                        reasons.append(reason)
+                        return original_commit(segments, reason, duration)
+
+                    client._commit_completed_segments = record_commit
+
+                    voice = np.ones(client.vad_window_samples, dtype=np.float32) * 0.1
+                    client._process_vad_window(voice, 0.0, True)
+                    client._process_vad_window(voice, 0.8, True)
+
+        item = translation_queue.get_nowait()
+        self.assertEqual(item["text"], "这是一个完整句子。")
+        self.assertEqual(reasons, ["sentence_punctuation"])
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_final_short_sentences_are_merged_before_commit(self, mock_cuda_available):
+        websocket = mock.Mock()
+        translation_queue = queue.Queue()
+        transcriber = mock.Mock()
+        transcriber.generate.side_effect = [[{"text": "第一句。第二句。"}], [{"text": ""}]]
         with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
             create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
             client = ServeClientFunASR(
@@ -318,15 +491,128 @@ class TestServeClientFunASR(unittest.TestCase):
             )
 
         voice = np.ones(client.vad_window_samples, dtype=np.float32) * 0.1
+        silence = np.zeros(client.vad_window_samples, dtype=np.float32)
         client._process_vad_window(voice, 0.0, True)
-        self.assertTrue(translation_queue.empty())
-        client._process_vad_window(voice, 0.6, True)
+        client._process_vad_window(silence, 0.8, False)
 
         item = translation_queue.get_nowait()
-        self.assertEqual(item["text"], "你好。")
-        self.assertTrue(item["completed"])
-        self.assertFalse(transcriber.generate.call_args.kwargs["is_final"])
+        self.assertEqual(item["text"], "第一句。第二句。")
+        self.assertTrue(translation_queue.empty())
+        self.assertLess(float(item["start"]), float(item["end"]))
 
+        final_messages = [json.loads(call.args[0]) for call in websocket.send.call_args_list if "segments" in json.loads(call.args[0])]
+        final_segments = final_messages[-1]["segments"]
+        self.assertEqual(final_segments[-1]["text"], "第一句。第二句。")
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_final_long_clause_splits_on_weak_boundary(self, mock_cuda_available):
+        websocket = mock.Mock()
+        transcriber = mock.Mock()
+        with mock.patch.object(ServeClientFunASR, "FINAL_SPLIT_TARGET_CHARS", 14):
+            with mock.patch.object(ServeClientFunASR, "FINAL_SPLIT_MAX_CHARS", 20):
+                with mock.patch.object(ServeClientFunASR, "FINAL_SPLIT_MIN_CHARS", 4):
+                    with mock.patch.object(ServeClientFunASR, "FINAL_SPLIT_WEAK_BOUNDARIES", ("但是", "所以")):
+                        with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+                            create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+                            client = ServeClientFunASR(
+                                websocket=websocket,
+                                client_uid="client",
+                                mode="paraformer_streaming",
+                                final_refine=False,
+                                use_vad=False,
+                                min_segment_rms=0.0,
+                            )
+
+                        parts = client._split_final_text("前面是一段比较长的内容但是后面还有另一段需要保留下来")
+
+        self.assertGreaterEqual(len(parts), 2)
+        self.assertEqual("".join(parts), "前面是一段比较长的内容但是后面还有另一段需要保留下来")
+        self.assertTrue(any(part.startswith("但是") for part in parts[1:]))
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_final_weak_boundary_list_is_conservative(self, mock_cuda_available):
+        websocket = mock.Mock()
+        transcriber = mock.Mock()
+        with mock.patch.object(ServeClientFunASR, "FINAL_SPLIT_TARGET_CHARS", 18):
+            with mock.patch.object(ServeClientFunASR, "FINAL_SPLIT_MAX_CHARS", 28):
+                with mock.patch.object(ServeClientFunASR, "FINAL_SPLIT_MIN_CHARS", 4):
+                    with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+                        create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+                        client = ServeClientFunASR(
+                            websocket=websocket,
+                            client_uid="client",
+                            mode="paraformer_streaming",
+                            final_refine=False,
+                            use_vad=False,
+                            min_segment_rms=0.0,
+                        )
+
+                    parts = client._split_final_text("前面是一段比较长的内容其实后面比如说还有然后继续说")
+
+        self.assertEqual(parts, ["前面是一段比较长的内容其实后面比如说还有然后继续说"])
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_final_text_normalizes_redundant_punctuation(self, mock_cuda_available):
+        websocket = mock.Mock()
+        transcriber = mock.Mock()
+        with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+            create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+            client = ServeClientFunASR(
+                websocket=websocket,
+                client_uid="client",
+                mode="paraformer_streaming",
+                final_refine=False,
+                use_vad=False,
+                min_segment_rms=0.0,
+            )
+
+        self.assertEqual(client._normalize_final_text("第一句。，  第二句。。"), "第一句。 第二句。")
+        self.assertEqual(client._normalize_final_text("你好，，世界，。继续！！"), "你好，世界。继续！")
+        self.assertEqual(client._normalize_final_text("I want to be normal.."), "I want to be normal.")
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_final_text_repairs_fragmented_punctuation(self, mock_cuda_available):
+        websocket = mock.Mock()
+        transcriber = mock.Mock()
+        with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+            create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+            client = ServeClientFunASR(
+                websocket=websocket,
+                client_uid="client",
+                mode="paraformer_streaming",
+                final_refine=False,
+                use_vad=False,
+                min_segment_rms=0.0,
+            )
+
+        self.assertEqual(client._repair_fragmented_punctuation("我觉得我的选。选择无比的友谊"), "我觉得我的选择无比的友谊")
+        self.assertEqual(client._repair_fragmented_punctuation("后来那些遇到。这种问题"), "后来那些遇到这种问题")
+        self.assertEqual(client._repair_fragmented_punctuation("你长。你长什么样子"), "你长什么样子")
+        self.assertEqual(client._split_final_text("我觉得我的选。选择无比的友谊"), ["我觉得我的选择无比的友谊"])
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_streaming_final_text_keeps_standalone_short_sentences(self, mock_cuda_available):
+        websocket = mock.Mock()
+        transcriber = mock.Mock()
+        with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+            create_model.side_effect = lambda client: setattr(client, "transcriber", transcriber)
+            client = ServeClientFunASR(
+                websocket=websocket,
+                client_uid="client",
+                mode="paraformer_streaming",
+                final_refine=False,
+                use_vad=False,
+                min_segment_rms=0.0,
+            )
+
+        self.assertEqual(client._repair_fragmented_punctuation("是。他说哪有。"), "是。他说哪有。")
+        self.assertEqual(client._repair_fragmented_punctuation("好。这个我们继续。"), "好。这个我们继续。")
+        self.assertEqual(client._repair_fragmented_punctuation("我很开心。我们继续。"), "我很开心。我们继续。")
 
     @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
     @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)

@@ -149,6 +149,12 @@ if __name__ == "__main__":
         default='config/hotwords.d',
         help='Directory containing meeting hotword txt files. Filename without .txt is the meeting name.'
     )
+    parser.add_argument(
+        '--meeting_logs_dir',
+        type=str,
+        default='logs',
+        help='Directory where exported meeting log JSON files are saved. Defaults to logs/.'
+    )
     args = parser.parse_args()
 
     if args.backend == "tensorrt":
@@ -191,4 +197,5 @@ if __name__ == "__main__":
         hotwords_file=args.hotwords_file,
         translation_device=args.translation_device,
         meeting_hotwords_dir=args.meeting_hotwords_dir,
+        meeting_logs_dir=args.meeting_logs_dir,
     )
