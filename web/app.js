@@ -7,19 +7,13 @@ const elements = {
   meetingSelect: document.getElementById("meetingSelectInput"),
   refreshMeetings: document.getElementById("refreshMeetingsButton"),
   hotwordStatus: document.getElementById("hotwordStatus"),
-  backend: document.getElementById("backendInput"),
-  model: document.getElementById("modelInput"),
-  customModel: document.getElementById("customModelInput"),
   language: document.getElementById("languageInput"),
-  segments: document.getElementById("segmentsInput"),
   start: document.getElementById("startButton"),
   stop: document.getElementById("stopButton"),
   exportLog: document.getElementById("exportLogButton"),
   clearLog: document.getElementById("clearLogButton"),
   status: document.getElementById("connectionStatus"),
   languageStatus: document.getElementById("languageStatus"),
-  sampleRateStatus: document.getElementById("sampleRateStatus"),
-  directionStatus: document.getElementById("directionStatus"),
   sourceText: document.getElementById("sourceText"),
   translationText: document.getElementById("translationText"),
   clearSource: document.getElementById("clearSourceButton"),
@@ -43,26 +37,12 @@ let currentConfig = null;
 let lockedHotwords = { hotwords: "", filename: "", count: 0 };
 let clientInstanceId = null;
 
-const MODEL_OPTIONS = {
-  faster_whisper: [
-    "tiny",
-    "tiny.en",
-    "base",
-    "base.en",
-    "small",
-    "small.en",
-    "medium",
-    "medium.en",
-    "large-v3-turbo",
-    "large-v3",
-  ],
-  mlx_whisper: ["model/whisper-medium-mlx"],
-  funasr: ["model/funasr/SenseVoiceSmall", "model/funasr/paraformer-zh-streaming"],
-};
+const DEFAULT_BACKEND = "faster_whisper";
+const DEFAULT_MODEL = "model/asr/small";
+const DEFAULT_DISPLAY_SEGMENTS = 8;
 
 function getDisplayLimit() {
-  const limit = Number(elements.segments.value || 8);
-  return Number.isFinite(limit) ? Math.max(1, Math.min(limit, 20)) : 8;
+  return DEFAULT_DISPLAY_SEGMENTS;
 }
 
 function createUid() {
@@ -256,9 +236,9 @@ function buildMeetingLog() {
     created_at: meetingStartedAt,
     exported_at: new Date().toISOString(),
     server: elements.server.value.trim(),
-    backend: currentConfig ? currentConfig.backend : elements.backend.value,
-    model: currentConfig ? currentConfig.model : elements.model.value,
-    source_language: elements.language.value || null,
+    backend: currentConfig ? currentConfig.backend : DEFAULT_BACKEND,
+    model: currentConfig ? currentConfig.model : DEFAULT_MODEL,
+    source_language: currentConfig ? currentConfig.language : (elements.language.value || null),
     translation_mode: "auto",
     source_segments: cleanExportSegments(fullSourceLog),
     translation_segments: cleanExportSegments(fullTranslationLog),
@@ -341,53 +321,6 @@ function renderSegments(target, segments, emptyText) {
   target.scrollTop = target.scrollHeight;
 }
 
-function updateDirection(segment) {
-  if (!segment) {
-    elements.directionStatus.textContent = "自动";
-    return;
-  }
-  const source = segment.source_language || segment.language || "?";
-  const target = segment.target_language || "?";
-  elements.directionStatus.textContent = `${source} -> ${target}`;
-}
-
-function renderModelOptions() {
-  const backend = elements.backend.value;
-  const selectedModel = elements.model.value;
-  const models = MODEL_OPTIONS[backend] || MODEL_OPTIONS.faster_whisper;
-
-  elements.model.innerHTML = "";
-  models.forEach((model) => {
-    const option = document.createElement("option");
-    option.value = model;
-    option.textContent = model;
-    elements.model.appendChild(option);
-  });
-
-  elements.model.value = models.includes(selectedModel) ? selectedModel : models[0];
-}
-
-function resolveSelectedModel() {
-  const backend = elements.backend.value;
-  const customModel = elements.customModel.value.trim();
-  const selectedModel = customModel || elements.model.value;
-
-  if (backend === "mlx_whisper" || backend === "funasr") {
-    return selectedModel;
-  }
-
-  if (
-    selectedModel.startsWith("model/") ||
-    selectedModel.startsWith("/") ||
-    selectedModel.startsWith("~") ||
-    selectedModel.includes("/")
-  ) {
-    return selectedModel;
-  }
-
-  return `model/asr/${selectedModel}`;
-}
-
 function handleMessage(event) {
   const message = JSON.parse(event.data);
   if (message.uid !== uid) {
@@ -424,7 +357,6 @@ function handleMessage(event) {
   if (message.translated_segments) {
     translatedSegments = message.translated_segments.slice();
     updateMeetingLog(message.translated_segments, fullTranslationLog);
-    updateDirection(translatedSegments[translatedSegments.length - 1]);
     renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
   }
 }
@@ -471,12 +403,12 @@ function sendConfig(event) {
     hotwords_count: lockedHotwords.count || 0,
     hotwords_file: lockedHotwords.filename || "",
     hotwords_locked: true,
-    backend: elements.backend.value,
+    backend: DEFAULT_BACKEND,
     language: selectedLanguage,
     task: "transcribe",
-    model: resolveSelectedModel(),
+    model: DEFAULT_MODEL,
     use_vad: true,
-    send_last_n_segments: Number(elements.segments.value || 8),
+    send_last_n_segments: DEFAULT_DISPLAY_SEGMENTS,
     no_speech_thresh: 0.45,
     clip_audio: false,
     same_output_threshold: 2,
@@ -512,8 +444,6 @@ async function startCapture() {
   translatedSegments = [];
   renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
   renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
-  updateDirection(null);
-
   const meetingName = elements.meetingName.value.trim();
   if (meetingName) {
     window.localStorage.setItem("whisperlive_meeting_name", meetingName);
@@ -545,7 +475,6 @@ async function startCapture() {
   });
 
   audioContext = new AudioContext();
-  elements.sampleRateStatus.textContent = `${audioContext.sampleRate} -> 16 kHz`;
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
   processor = audioContext.createScriptProcessor(4096, 1, 1);
 
@@ -655,7 +584,6 @@ if (elements.refreshMeetings) {
   });
 }
 
-elements.backend.addEventListener("change", renderModelOptions);
 
 elements.clearSource.addEventListener("click", () => {
   sourceSegments = [];
@@ -665,8 +593,6 @@ elements.clearSource.addEventListener("click", () => {
 elements.clearTranslation.addEventListener("click", () => {
   translatedSegments = [];
   renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
-  updateDirection(null);
 });
 
 initializeDefaults();
-renderModelOptions();

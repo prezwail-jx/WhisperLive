@@ -27,44 +27,12 @@
             <input id="meetingNameInput" type="text" maxlength="80" placeholder="如 2026产品会" autocomplete="off">
           </label>
           <label>
-            后端
-            <select id="backendInput">
-              <option value="faster_whisper" selected>faster_whisper</option>
-              <option value="mlx_whisper">mlx_whisper</option>
-              <option value="funasr">funasr</option>
-            </select>
-            <span class="field-hint">funasr 适合中文会议；mlx_whisper 适合 Apple Silicon Mac</span>
-          </label>
-          <label>
-            模型
-            <select id="modelInput">
-              <option value="tiny">tiny</option>
-              <option value="tiny.en">tiny.en</option>
-              <option value="base">base</option>
-              <option value="base.en">base.en</option>
-              <option value="small" selected>small</option>
-              <option value="small.en">small.en</option>
-              <option value="medium">medium</option>
-              <option value="medium.en">medium.en</option>
-              <option value="large-v3-turbo">large-v3-turbo</option>
-              <option value="large-v3">large-v3</option>
-            </select>
-          </label>
-          <label>
-            自定义模型路径/ID
-            <input id="customModelInput" type="text" placeholder="可选，如 model/whisper-medium-mlx" autocomplete="off">
-          </label>
-          <label>
             源语言
             <select id="languageInput">
               <option value="" selected>自动识别</option>
               <option value="zh">中文</option>
               <option value="en">English</option>
             </select>
-          </label>
-          <label>
-            最近段数
-            <input id="segmentsInput" type="number" min="1" max="20" value="8">
           </label>
         </form>
 
@@ -95,14 +63,6 @@
           <div>
             <span>识别语言</span>
             <strong id="languageStatus">等待中</strong>
-          </div>
-          <div>
-            <span>音频采样</span>
-            <strong id="sampleRateStatus">16 kHz</strong>
-          </div>
-          <div>
-            <span>翻译方向</span>
-            <strong id="directionStatus">自动</strong>
           </div>
         </div>
       </section>
