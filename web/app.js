@@ -33,6 +33,8 @@ let fullSourceLog = [];
 let fullTranslationLog = [];
 let meetingId = createUid();
 let meetingStartedAt = new Date().toISOString();
+let currentSessionId = null;
+let currentSessionStartedAt = null;
 let currentConfig = null;
 let lockedHotwords = { hotwords: "", filename: "", count: 0 };
 let clientInstanceId = null;
@@ -167,22 +169,33 @@ function setStatus(text, state = "idle") {
 }
 
 function segmentKey(segment) {
-  return `${segment.start || ""}|${segment.end || ""}`;
+  return `${segment.session_id || ""}|${segment.start || ""}|${segment.end || ""}`;
 }
 
 function upsertCompletedSegment(log, segment) {
   if (!segment.completed || !segment.text || !segment.text.trim()) {
     return;
   }
-  const key = segmentKey(segment);
-  const normalized = { ...segment, text: segment.text.trim() };
+  const normalized = {
+    ...segment,
+    session_id: segment.session_id || currentSessionId || meetingId,
+    session_started_at: segment.session_started_at || currentSessionStartedAt || meetingStartedAt,
+    text: segment.text.trim(),
+  };
+  const key = segmentKey(normalized);
   const index = log.findIndex((item) => segmentKey(item) === key);
   if (index >= 0) {
     log[index] = normalized;
   } else {
     log.push(normalized);
   }
-  log.sort((a, b) => Number(a.start) - Number(b.start));
+  log.sort((a, b) => {
+    const sessionOrder = String(a.session_started_at || "").localeCompare(String(b.session_started_at || ""));
+    if (sessionOrder !== 0) {
+      return sessionOrder;
+    }
+    return Number(a.start) - Number(b.start);
+  });
 }
 
 function updateMeetingLog(segments, log) {
@@ -297,6 +310,8 @@ function clearMeetingLog() {
   fullTranslationLog = [];
   meetingId = createUid();
   meetingStartedAt = new Date().toISOString();
+  currentSessionId = null;
+  currentSessionStartedAt = null;
 }
 
 function renderSegments(target, segments, emptyText) {
@@ -396,6 +411,8 @@ function sendConfig(event) {
   const meetingName = elements.meetingName.value.trim();
   const payload = {
     uid,
+    session_id: currentSessionId,
+    session_started_at: currentSessionStartedAt,
     client_instance_id: clientInstanceId || getClientInstanceId(),
     client_name: meetingName || `Client-${uid.slice(0, 8)}`,
     meeting_name: meetingName,
@@ -440,6 +457,8 @@ async function requestMicrophoneStream() {
 
 async function startCapture() {
   setStatus("连接中", "busy");
+  currentSessionId = createUid();
+  currentSessionStartedAt = new Date().toISOString();
   sourceSegments = [];
   translatedSegments = [];
   renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
