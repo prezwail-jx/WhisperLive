@@ -71,3 +71,5 @@ docs/site/
 .vscode/
 *.swp
 *.swo
+/deploy/
+

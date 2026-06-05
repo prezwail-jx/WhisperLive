@@ -436,6 +436,65 @@ class TestUpdateSegments(unittest.TestCase):
         self.client.update_segments(segs, duration=3.0)
         self.assertGreater(self.client.timestamp_offset, 0.0)
 
+    def test_boundary_duplicate_words_are_trimmed(self):
+        self.client.text = ["This is the end of the first sentence"]
+        segs = [
+            self._make_segment(0.0, 1.0, " the first sentence starts cleanly now"),
+            self._make_segment(1.0, 2.0, " next"),
+        ]
+        self.client.update_segments(segs, duration=3.0)
+        self.assertEqual(
+            self.client.transcript[0]["text"].strip(),
+            "starts cleanly now",
+        )
+
+    def test_low_energy_thank_you_is_dropped_with_stricter_threshold(self):
+        self.client.frames_np = np.full(16000 * 5, 0.003, dtype=np.float32)
+        segs = [
+            self._make_segment(0.0, 1.0, " Thank you."),
+            self._make_segment(1.0, 2.0, " next"),
+        ]
+        self.client.update_segments(segs, duration=3.0)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_short_thank_you_is_dropped_even_with_normal_energy(self):
+        q = queue.Queue()
+        self.client.translation_queue = q
+        self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
+        segs = [
+            self._make_segment(0.0, 0.2, " Thank you."),
+            self._make_segment(0.2, 1.0, " next"),
+        ]
+        self.client.update_segments(segs, duration=2.0)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertTrue(q.empty())
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_middle_thank_you_is_dropped(self):
+        q = queue.Queue()
+        self.client.translation_queue = q
+        self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
+        segs = [
+            self._make_segment(0.0, 1.0, " The second thing you want to do"),
+            self._make_segment(1.0, 2.0, " Thank you."),
+            self._make_segment(2.0, 3.0, " build relationships"),
+        ]
+        last = self.client.update_segments(segs, duration=4.0)
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertIn("second thing", self.client.transcript[0]["text"])
+        self.assertNotIn("Thank you", [item.get("text", "") for item in list(q.queue)])
+        self.assertIsNotNone(last)
+        self.assertIn("build relationships", last["text"])
+
+    def test_trailing_normal_thank_you_is_kept_as_incomplete(self):
+        self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
+        segs = [self._make_segment(0.0, 1.0, " Thank you.")]
+        last = self.client.update_segments(segs, duration=2.0)
+        self.assertIsNotNone(last)
+        self.assertIn("Thank you", last["text"])
+        self.assertEqual(len(self.client.transcript), 0)
+
 
 class TestGetSegmentHelpers(unittest.TestCase):
     def setUp(self):

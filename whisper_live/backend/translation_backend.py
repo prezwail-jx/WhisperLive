@@ -350,6 +350,7 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_buffer = []
         self.translation_buffer_started_at = None
         self.translated_segments = []
+        self.last_translated_source_text = ""
         self.translator = None
         self.translator_lock = None
         self.model_loaded = False
@@ -450,11 +451,48 @@ class ServeClientTranslation(ServeClientBase):
             return True
         return False
 
+    @staticmethod
+    def _word_spans(text):
+        return list(re.finditer(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", str(text or "")))
+
+    @classmethod
+    def _dedupe_leading_word_overlap(cls, previous_text, current_text, max_words=8):
+        current = str(current_text or "")
+        previous_words = [m.group(0).lower() for m in cls._word_spans(previous_text)]
+        current_matches = cls._word_spans(current)
+        current_words = [m.group(0).lower() for m in current_matches]
+        max_overlap = min(max_words, len(previous_words), len(current_words))
+        for size in range(max_overlap, 0, -1):
+            if previous_words[-size:] == current_words[:size]:
+                cut_at = current_matches[size - 1].end()
+                deduped = current[:current_matches[0].start()] + current[cut_at:].lstrip()
+                logging.info(
+                    "[TRANSLATION_BUFFER_DEDUPE] overlap_words=%d previous=%r current=%r deduped=%r",
+                    size,
+                    str(previous_text or "").strip()[-80:],
+                    current.strip()[:80],
+                    deduped.strip()[:80],
+                )
+                return deduped
+        return current
+
+    def _previous_source_text_for_dedupe(self):
+        if self.translation_buffer:
+            return self.translation_buffer[-1].get("text", "")
+        return self.last_translated_source_text
+
     def add_segment_to_translation_buffer(self, segment):
         incoming_language = self.get_segment_source_language(segment)
         current_language = self.get_buffer_source_language()
         if self.translation_buffer and incoming_language and current_language and incoming_language != current_language:
             self.flush_translation_buffer(force=True)
+
+        segment = segment.copy()
+        previous_text = self._previous_source_text_for_dedupe()
+        if previous_text and incoming_language == "en":
+            segment["text"] = self._dedupe_leading_word_overlap(previous_text, segment.get("text", ""))
+            if not segment["text"].strip():
+                return
 
         if not self.translation_buffer:
             self.translation_buffer_started_at = time.monotonic()
@@ -477,6 +515,7 @@ class ServeClientTranslation(ServeClientBase):
             original_text,
             source_language,
         )
+        self.last_translated_source_text = original_text
 
         translated_segment = {
             "start": buffered_segments[0]["start"],
@@ -596,5 +635,6 @@ class ServeClientTranslation(ServeClientBase):
         self.translated_segments.clear()
         self.translation_buffer.clear()
         self.translation_buffer_started_at = None
+        self.last_translated_source_text = ""
         self.translator = None
         self.translator_lock = None

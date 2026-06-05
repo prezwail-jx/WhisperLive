@@ -436,3 +436,50 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         payload = self.get_last_payload(client)
         segment = payload["translated_segments"][0]
         self.assertEqual(segment["text"], "translated:hello world")
+
+    def test_english_translation_buffer_trims_boundary_overlap(self):
+        client = self.make_client(translation_max_chars=80)
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "this is the end of the first sentence",
+            "completed": True,
+            "language": "en",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "1.000",
+            "end": "2.000",
+            "text": "the first sentence starts cleanly now.",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer(force=True)
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(
+            segment["text"],
+            "translated:this is the end of the first sentence starts cleanly now.",
+        )
+
+    def test_english_translation_buffer_skips_fully_overlapped_segment(self):
+        client = self.make_client(translation_max_chars=80)
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "thank you",
+            "completed": True,
+            "language": "en",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "1.000",
+            "end": "2.000",
+            "text": "thank you",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer(force=True)
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "translated:thank you")

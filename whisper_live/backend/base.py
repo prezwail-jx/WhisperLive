@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import threading
 import time
 import queue
@@ -40,6 +41,27 @@ class ServeClientBase(object):
     MAX_PENDING_AUDIO_SECONDS = 8.0
     OPENCC_CONFIG = "t2s"
     OPENCC_UNAVAILABLE_LOGGED = False
+    SILENCE_HALLUCINATION_PHRASES = {
+        "thank you",
+        "thank you very much",
+        "thanks",
+        "thanks very much",
+        "thanks for watching",
+        "thank you for watching",
+        "bye",
+        "bye bye",
+        "you",
+    }
+    GRATITUDE_HALLUCINATION_PHRASES = {
+        "thank you",
+        "thank you very much",
+        "thanks",
+        "thanks very much",
+        "thanks for watching",
+        "thank you for watching",
+    }
+    MAX_BOUNDARY_DEDUPE_WORDS = 6
+    MAX_SHORT_GRATITUDE_SECONDS = 0.5
 
     def __init__(
         self,
@@ -424,15 +446,87 @@ class ServeClientBase(object):
             return 0.0
         return float(np.sqrt(np.mean(np.square(audio_slice, dtype=np.float64))))
 
+    @classmethod
+    def _normalized_phrase(cls, text):
+        return re.sub(r"\s+", " ", re.sub(r"[^\w\s']+", " ", str(text or "").lower())).strip()
+
+    @classmethod
+    def _is_silence_hallucination_phrase(cls, text):
+        normalized = cls._normalized_phrase(text)
+        return normalized in cls.SILENCE_HALLUCINATION_PHRASES
+
+    @classmethod
+    def _is_gratitude_hallucination_phrase(cls, text):
+        normalized = cls._normalized_phrase(text)
+        return normalized in cls.GRATITUDE_HALLUCINATION_PHRASES
+
+    def _is_probable_gratitude_hallucination(self, text, rel_start, rel_end, has_following_segment):
+        if not self._is_gratitude_hallucination_phrase(text):
+            return False
+
+        duration = max(0.0, float(rel_end or 0.0) - float(rel_start or 0.0))
+        if duration < self.MAX_SHORT_GRATITUDE_SECONDS:
+            reason = "short"
+        elif has_following_segment:
+            reason = "middle"
+        else:
+            return False
+
+        logging.info(
+            "[GRATITUDE_HALLUCINATION_DROP] uid=%s reason=%s duration=%.3fs text=%r",
+            self.client_uid,
+            reason,
+            duration,
+            str(text or "").strip()[:80],
+        )
+        return True
+
+    @staticmethod
+    def _word_spans(text):
+        return list(re.finditer(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", str(text or "")))
+
+    @classmethod
+    def _dedupe_leading_word_overlap(cls, previous_text, current_text):
+        current = str(current_text or "")
+        previous_words = [m.group(0).lower() for m in cls._word_spans(previous_text)]
+        current_matches = cls._word_spans(current)
+        current_words = [m.group(0).lower() for m in current_matches]
+        max_overlap = min(cls.MAX_BOUNDARY_DEDUPE_WORDS, len(previous_words), len(current_words))
+        for size in range(max_overlap, 0, -1):
+            if previous_words[-size:] == current_words[:size]:
+                cut_at = current_matches[size - 1].end()
+                deduped = current[:current_matches[0].start()] + current[cut_at:].lstrip()
+                logging.info(
+                    "[BOUNDARY_DEDUPE] overlap_words=%d previous=%r current=%r deduped=%r",
+                    size,
+                    str(previous_text or "").strip()[-80:],
+                    current.strip()[:80],
+                    deduped.strip()[:80],
+                )
+                return deduped
+        return current
+
+    def _dedupe_completed_text(self, text):
+        if not self.text:
+            return text
+        return self._dedupe_leading_word_overlap(self.text[-1], text)
+
     def _is_low_energy_range(self, start, end, duration, text):
         rms = self._audio_rms_for_relative_range(start, end, duration)
-        if rms is None or rms >= self.min_segment_rms:
+        if rms is None:
+            return False
+
+        threshold = self.min_segment_rms
+        if self._is_silence_hallucination_phrase(text):
+            threshold = max(threshold, self.min_segment_rms * 2.5)
+
+        if rms >= threshold:
             return False
         logging.info(
             "[LOW_ENERGY_SEGMENT_DROP] uid=%s rms=%.6f threshold=%.6f text=%r",
             self.client_uid,
             rms,
-            self.min_segment_rms,
+            threshold,
             str(text or "").strip()[:80],
         )
         return True
@@ -495,10 +589,12 @@ class ServeClientBase(object):
         # Process complete segments only if there are more than one
         # and if the last segment's no_speech_prob is below the threshold.
         if len(segments) > 1 and self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
-            for s in segments[:-1]:
+            completed_candidates = segments[:-1]
+            for index, s in enumerate(completed_candidates):
                 text_ = s.text
                 rel_start = self.get_segment_start(s)
                 rel_end = min(duration, self.get_segment_end(s))
+                has_following_segment = index < len(completed_candidates) - 1 or len(segments) > 1
                 with self.lock:
                     start = self.timestamp_offset + rel_start
                     end = self.timestamp_offset + rel_end
@@ -506,7 +602,14 @@ class ServeClientBase(object):
                     continue
                 if self.get_segment_no_speech_prob(s) > self.no_speech_thresh:
                     continue
+                if self._is_probable_gratitude_hallucination(text_, rel_start, rel_end, has_following_segment):
+                    offset = rel_end
+                    continue
                 if self._is_low_energy_range(rel_start, rel_end, duration, text_):
+                    offset = rel_end
+                    continue
+                text_ = self._dedupe_completed_text(text_)
+                if not text_.strip():
                     offset = rel_end
                     continue
                 self.text.append(text_)
@@ -526,7 +629,9 @@ class ServeClientBase(object):
         if self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
             rel_start = self.get_segment_start(segments[-1])
             rel_end = min(duration, self.get_segment_end(segments[-1]))
-            if self._is_low_energy_range(rel_start, rel_end, duration, segments[-1].text):
+            if self._is_probable_gratitude_hallucination(segments[-1].text, rel_start, rel_end, False):
+                offset = rel_end
+            elif self._is_low_energy_range(rel_start, rel_end, duration, segments[-1].text):
                 offset = rel_end
             else:
                 self.current_out += segments[-1].text
@@ -559,21 +664,25 @@ class ServeClientBase(object):
             repeated_end = min(duration, self.end_time_for_same_output)
             low_energy_repeated = self._is_low_energy_range(0.0, repeated_end, duration, self.current_out)
             if not low_energy_repeated and (not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower()):
-                self.text.append(self.current_out)
-                with self.lock:
-                    completed_segment = self.format_segment(
-                        self.timestamp_offset,
-                        self.timestamp_offset + repeated_end,
-                        self.current_out,
-                        completed=True
-                    )
-                    self.transcript.append(completed_segment)
+                completed_text = self._dedupe_completed_text(self.current_out)
+                if not completed_text.strip():
+                    completed_text = ""
+                if completed_text:
+                    self.text.append(completed_text)
+                    with self.lock:
+                        completed_segment = self.format_segment(
+                            self.timestamp_offset,
+                            self.timestamp_offset + repeated_end,
+                            completed_text,
+                            completed=True
+                        )
+                        self.transcript.append(completed_segment)
 
-                    if self.translation_queue:
-                        try:
-                            self.translation_queue.put(completed_segment.copy(), timeout=0.1)
-                        except queue.Full:
-                            logging.warning("Translation queue is full, skipping segment")
+                        if self.translation_queue:
+                            try:
+                                self.translation_queue.put(completed_segment.copy(), timeout=0.1)
+                            except queue.Full:
+                                logging.warning("Translation queue is full, skipping segment")
 
             self.current_out = ''
             offset = repeated_end
@@ -599,22 +708,24 @@ class ServeClientBase(object):
                     self.max_incomplete_segment_seconds,
                     self.current_out.strip()[:80],
                 )
-                with self.lock:
-                    completed_segment = self.format_segment(
-                        self.timestamp_offset,
-                        self.timestamp_offset + repeated_end,
-                        self.current_out,
-                        completed=True
-                    )
-                    self.transcript.append(completed_segment)
+                completed_text = self._dedupe_completed_text(self.current_out)
+                if completed_text.strip():
+                    with self.lock:
+                        completed_segment = self.format_segment(
+                            self.timestamp_offset,
+                            self.timestamp_offset + repeated_end,
+                            completed_text,
+                            completed=True
+                        )
+                        self.transcript.append(completed_segment)
 
-                    if self.translation_queue:
-                        try:
-                            self.translation_queue.put(completed_segment.copy(), timeout=0.1)
-                        except queue.Full:
-                            logging.warning("Translation queue is full, skipping segment")
+                        if self.translation_queue:
+                            try:
+                                self.translation_queue.put(completed_segment.copy(), timeout=0.1)
+                            except queue.Full:
+                                logging.warning("Translation queue is full, skipping segment")
 
-                self.text.append(self.current_out)
+                    self.text.append(completed_text)
                 self.current_out = ''
                 offset = repeated_end
                 self.same_output_count = 0
