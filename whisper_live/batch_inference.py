@@ -63,6 +63,7 @@ class BatchRequest:
         initial_prompt: Optional prompt for Whisper conditioning.
         use_vad: Whether to apply Voice Activity Detection.
         vad_parameters: Parameters forwarded to ``VadOptions``.
+        word_timestamps: Whether to extract word-level timestamps.
         future: Event signaled when the result is ready.
         result: List of ``Segment`` objects (filled by worker).
         info: ``TranscriptionInfo`` metadata (filled by worker).
@@ -74,6 +75,7 @@ class BatchRequest:
     initial_prompt: Optional[str] = None
     use_vad: bool = True
     vad_parameters: Optional[Dict] = None
+    word_timestamps: bool = False
     # Signaling
     future: threading.Event = field(default_factory=threading.Event)
     # Results (filled by batch worker)
@@ -211,6 +213,7 @@ class BatchInferenceWorker:
                 initial_prompt=req.initial_prompt,
                 vad_filter=req.use_vad,
                 vad_parameters=req.vad_parameters if req.use_vad else None,
+                word_timestamps=req.word_timestamps,
             )
             # Materialize the generator into a list
             req.result = list(result) if result is not None else []
