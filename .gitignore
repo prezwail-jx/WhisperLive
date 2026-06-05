@@ -72,4 +72,5 @@ docs/site/
 *.swp
 *.swo
 /deploy/
-
+/scripts/start_funasr_service.sh
+/scripts/start_whisper_service.sh
