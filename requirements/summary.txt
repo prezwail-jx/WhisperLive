@@ -1,0 +1,3 @@
+# Local LLM summary service dependencies.
+# Installed after requirements/server.txt in docker/Dockerfile.server.
+vllm

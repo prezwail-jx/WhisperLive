@@ -7,10 +7,15 @@ import functools
 import logging
 import shutil
 import tempfile
+import subprocess
+import shlex
+import urllib.error
+import urllib.request
+from datetime import datetime
 from typing import Optional, List
 from fastapi import FastAPI, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import PlainTextResponse, JSONResponse
+from starlette.responses import PlainTextResponse, JSONResponse, FileResponse
 import uvicorn
 from faster_whisper import WhisperModel
 import torch
@@ -51,12 +56,227 @@ def count_hotwords(text):
     return len(normalized.splitlines()) if normalized else 0
 
 
+class MeetingSummaryService:
+    DEFAULT_PROMPT = """你是专业会议纪要助手。请只根据输入的会议记录生成中文会议总结，不要编造没有出现的信息。
+输出必须是严格 JSON，不要 Markdown，不要代码块。JSON 字段固定为：
+overview: 字符串；topics: 字符串数组；decisions: 字符串数组；
+action_items: 对象数组，每项包含 task、owner、deadline、status；
+risks: 字符串数组；follow_ups: 字符串数组。
+如果负责人、时间或状态不明确，写“未明确”。"""
+
+    def __init__(self, base_url="http://127.0.0.1:8001/v1", model="qwen3-8b-awq",
+                 startup_command="bash scripts/start_summary_llm_service.sh", timeout=600,
+                 ready_timeout=300, max_chars_per_chunk=16000, idle_shutdown_seconds=600):
+        self.base_url = str(base_url or "").rstrip("/")
+        self.model = model or "qwen3-8b-awq"
+        self.startup_command = startup_command or ""
+        self.timeout = int(timeout or 600)
+        self.ready_timeout = int(ready_timeout or 300)
+        self.max_chars_per_chunk = int(max_chars_per_chunk or 16000)
+        self.idle_shutdown_seconds = int(idle_shutdown_seconds or 600)
+        self.lock = threading.Lock()
+        self.process = None
+        self.started_by_us = False
+        self.shutdown_timer = None
+
+    def is_ready(self):
+        if not self.base_url:
+            return False
+        try:
+            req = urllib.request.Request(f"{self.base_url}/models", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return 200 <= resp.status < 300
+        except Exception:
+            return False
+
+    def ensure_ready(self):
+        if self.is_ready():
+            return
+        with self.lock:
+            if self.is_ready():
+                return
+            if not (self.process and self.process.poll() is None):
+                if not self.startup_command:
+                    raise RuntimeError("summary LLM service is not running and no startup command is configured")
+                logging.info("Starting summary LLM service: %s", self.startup_command)
+                self.process = subprocess.Popen(shlex.split(self.startup_command), cwd=os.getcwd())
+                self.started_by_us = True
+        deadline = time.time() + self.ready_timeout
+        while time.time() < deadline:
+            if self.is_ready():
+                return
+            if self.process and self.process.poll() is not None:
+                raise RuntimeError(f"summary LLM service exited with code {self.process.returncode}")
+            time.sleep(2)
+        raise TimeoutError("summary LLM service did not become ready in time")
+
+    def schedule_idle_shutdown(self):
+        if not self.started_by_us or self.idle_shutdown_seconds <= 0:
+            return
+        with self.lock:
+            if self.shutdown_timer:
+                self.shutdown_timer.cancel()
+            self.shutdown_timer = threading.Timer(self.idle_shutdown_seconds, self.shutdown_if_idle)
+            self.shutdown_timer.daemon = True
+            self.shutdown_timer.start()
+
+    def shutdown_if_idle(self):
+        with self.lock:
+            process = self.process
+            self.process = None
+            self.shutdown_timer = None
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+    def call_chat(self, messages):
+        payload = {"model": self.model, "messages": messages, "temperature": 0.1, "max_tokens": 4096}
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"summary LLM request failed: HTTP {exc.code}: {detail}") from exc
+        return data["choices"][0]["message"]["content"]
+
+    @staticmethod
+    def _parse_json(text):
+        content = str(text or "").strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            start, end = content.find("{"), content.rfind("}")
+            if start >= 0 and end > start:
+                return json.loads(content[start:end + 1])
+            raise
+
+    @staticmethod
+    def _list(value):
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    @staticmethod
+    def _actions(value):
+        out = []
+        if not isinstance(value, list):
+            return out
+        for item in value:
+            if isinstance(item, dict):
+                task = str(item.get("task") or "").strip()
+                if task:
+                    out.append({
+                        "task": task,
+                        "owner": str(item.get("owner") or "未明确").strip() or "未明确",
+                        "deadline": str(item.get("deadline") or "未明确").strip() or "未明确",
+                        "status": str(item.get("status") or "未明确").strip() or "未明确",
+                    })
+            else:
+                task = str(item or "").strip()
+                if task:
+                    out.append({"task": task, "owner": "未明确", "deadline": "未明确", "status": "未明确"})
+        return out
+
+    def normalize_summary(self, data, payload, raw_text=None):
+        if not isinstance(data, dict):
+            data = {"overview": str(raw_text or data or "").strip()}
+        return {
+            "session_id": payload.get("session_id") or "",
+            "meeting_name": payload.get("meeting_name") or payload.get("client_name") or "",
+            "generated_at": MeetingLogStore.now_iso(),
+            "model": self.model,
+            "overview": str(data.get("overview") or "").strip(),
+            "topics": self._list(data.get("topics")),
+            "decisions": self._list(data.get("decisions")),
+            "action_items": self._actions(data.get("action_items")),
+            "risks": self._list(data.get("risks")),
+            "follow_ups": self._list(data.get("follow_ups")),
+        }
+
+    def extract_meeting_text(self, payload):
+        segments = payload.get("source_segments") or payload.get("translation_segments") or []
+        lines = []
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            body = str(seg.get("text") or "").strip()
+            if body:
+                lines.append(f"[{seg.get('start', '')} - {seg.get('end', '')}] {body}")
+        return "\n".join(lines).strip()
+
+    def split_text(self, text):
+        max_chars = max(2000, self.max_chars_per_chunk)
+        chunks, current, size = [], [], 0
+        for line in text.splitlines():
+            line_size = len(line) + 1
+            if current and size + line_size > max_chars:
+                chunks.append("\n".join(current)); current, size = [], 0
+            if line_size > max_chars:
+                chunks.extend(line[i:i + max_chars] for i in range(0, len(line), max_chars))
+                continue
+            current.append(line); size += line_size
+        if current:
+            chunks.append("\n".join(current))
+        return chunks
+
+    def summarize_text(self, text, payload):
+        raw = self.call_chat([
+            {"role": "system", "content": self.DEFAULT_PROMPT},
+            {"role": "user", "content": f"会议名称：{payload.get('meeting_name') or payload.get('client_name') or '未命名会议'}\n\n会议记录：\n{text}"},
+        ])
+        try:
+            data = self._parse_json(raw)
+        except Exception:
+            data = {"overview": raw}
+        return self.normalize_summary(data, payload, raw_text=raw)
+
+    def merge_summaries(self, summaries, payload):
+        raw = self.call_chat([
+            {"role": "system", "content": self.DEFAULT_PROMPT},
+            {"role": "user", "content": "下面是同一场会议的分段总结，请合并为一份最终会议总结。\n" + json.dumps(summaries, ensure_ascii=False, indent=2)},
+        ])
+        try:
+            data = self._parse_json(raw)
+        except Exception:
+            data = {"overview": raw}
+        return self.normalize_summary(data, payload, raw_text=raw)
+
+    def generate(self, payload):
+        text = self.extract_meeting_text(payload)
+        if not text:
+            raise ValueError("meeting log has no completed source or translation segments")
+        self.ensure_ready()
+        chunks = self.split_text(text)
+        summary = self.summarize_text(chunks[0], payload) if len(chunks) == 1 else self.merge_summaries([self.summarize_text(c, payload) for c in chunks], payload)
+        self.schedule_idle_shutdown()
+        return summary
+
+
 class MeetingLogStore:
     UNSAFE_FILENAME_CHARS = set('/\\:*?"<>|')
 
     def __init__(self, directory="logs"):
         self.directory = directory or "logs"
         self.lock = threading.Lock()
+        self.sessions = {}
         os.makedirs(self.directory, exist_ok=True)
 
     @classmethod
@@ -66,9 +286,57 @@ class MeetingLogStore:
         cleaned = cleaned.strip(" ._") or "meeting"
         return cleaned[:80]
 
+    @classmethod
+    def safe_timestamp(cls, value):
+        raw = str(value or "").strip() or cls.timestamp_for_filename()
+        cleaned = "".join("_" if char in cls.UNSAFE_FILENAME_CHARS or ord(char) < 32 else char for char in raw)
+        cleaned = cleaned.replace(":", "-").replace(".", "-").strip(" ._")
+        return cleaned[:80] or cls.timestamp_for_filename()
+
     @staticmethod
     def timestamp_for_filename():
         return time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime())
+
+    @staticmethod
+    def now_iso():
+        return datetime.now().isoformat(timespec="seconds")
+
+    @staticmethod
+    def segment_key(segment):
+        return f"{segment.get('session_id', '')}|{segment.get('start', '')}|{segment.get('end', '')}|{segment.get('text', '')}"
+
+    def session_paths(self, payload):
+        meeting_dir = self.safe_name(payload.get("meeting_name") or payload.get("client_name") or "meeting")
+        session_id = self.safe_name(payload.get("session_id") or payload.get("uid") or "session")
+        started_at = self.safe_timestamp(payload.get("session_started_at") or payload.get("created_at"))
+        directory = os.path.join(self.directory, meeting_dir)
+        stem = f"{started_at}-{session_id}"
+        return directory, stem, os.path.join(directory, f"{stem}.json"), os.path.join(directory, f"{stem}.md")
+
+    def build_payload_from_options(self, options, backend=None):
+        session_id = options.get("session_id") or options.get("uid")
+        created_at = options.get("session_started_at") or self.now_iso()
+        return {
+            "meeting_id": options.get("meeting_id") or session_id,
+            "session_id": session_id,
+            "uid": options.get("uid"),
+            "client_instance_id": options.get("client_instance_id") or "",
+            "client_name": options.get("client_name") or options.get("meeting_name") or f"Client-{str(options.get('uid', ''))[:8]}",
+            "meeting_name": options.get("meeting_name") or "",
+            "hotwords_count": int(options.get("hotwords_count") or count_hotwords(options.get("hotwords"))),
+            "hotwords_file": options.get("hotwords_file") or "",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "exported_at": None,
+            "server": options.get("server") or "",
+            "backend": backend.value if isinstance(backend, BackendType) else str(backend or options.get("backend") or ""),
+            "model": options.get("model"),
+            "source_language": options.get("language"),
+            "translation_mode": options.get("target_language", "auto"),
+            "status": "active",
+            "source_segments": [],
+            "translation_segments": [],
+        }
 
     def save(self, payload):
         if not isinstance(payload, dict):
@@ -80,13 +348,175 @@ class MeetingLogStore:
             path = os.path.join(self.directory, filename)
             suffix = 1
             while os.path.exists(path):
-                filename = f"{filename_stem}-{suffix}.json"
-                path = os.path.join(self.directory, filename)
-                suffix += 1
+                filename = f"{filename_stem}-{suffix}.json"; path = os.path.join(self.directory, filename); suffix += 1
             with open(path, "w", encoding="utf-8") as file:
-                json.dump(payload, file, ensure_ascii=False, indent=2)
-                file.write("\n")
+                json.dump(payload, file, ensure_ascii=False, indent=2); file.write("\n")
         return {"saved": True, "filename": filename, "path": path}
+
+    def start_session(self, options, backend=None):
+        payload = self.build_payload_from_options(options, backend=backend)
+        session_id = payload.get("session_id")
+        if not session_id:
+            raise ValueError("session_id is required")
+        directory, _stem, json_path, md_path = self.session_paths(payload)
+        with self.lock:
+            os.makedirs(directory, exist_ok=True)
+            record = {"payload": payload, "source_keys": set(), "translation_keys": set(), "json_path": json_path, "md_path": md_path,
+                      "json_filename": os.path.basename(json_path), "md_filename": os.path.basename(md_path)}
+            self.sessions[session_id] = record
+            self._write_record(record)
+        return self.session_info(session_id)
+
+    def append_segments(self, session_id, kind, segments):
+        if not session_id or kind not in ("source", "translation"):
+            return None
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                return None
+            target = "source_segments" if kind == "source" else "translation_segments"
+            key_name = "source_keys" if kind == "source" else "translation_keys"
+            changed = False
+            for segment in segments or []:
+                if not isinstance(segment, dict) or not segment.get("completed"):
+                    continue
+                text = str(segment.get("text") or "").strip()
+                if not text:
+                    continue
+                normalized = dict(segment); normalized["text"] = text; normalized.setdefault("session_id", session_id)
+                key = self.segment_key(normalized)
+                if key in record[key_name]:
+                    continue
+                record[key_name].add(key); record["payload"][target].append(normalized); changed = True
+            if changed:
+                record["payload"]["updated_at"] = self.now_iso()
+                self._sort_segments(record["payload"][target])
+                self._write_record(record)
+            return self.session_info(session_id)
+
+    def finish_session(self, session_id):
+        if not session_id:
+            return None
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                return None
+            record["payload"]["status"] = "finished"
+            record["payload"]["exported_at"] = self.now_iso()
+            record["payload"]["updated_at"] = record["payload"]["exported_at"]
+            self._write_record(record)
+            return self.session_info(session_id)
+
+    @staticmethod
+    def _clone_payload(payload):
+        return json.loads(json.dumps(payload, ensure_ascii=False))
+
+    def get_session_payload(self, session_id):
+        with self.lock:
+            record = self.sessions.get(session_id)
+            return self._clone_payload(record["payload"]) if record else None
+
+    @staticmethod
+    def summary_paths_for_record(record):
+        stem, _ext = os.path.splitext(record["json_path"])
+        return f"{stem}-summary.json", f"{stem}-summary.md"
+
+    def session_info(self, session_id):
+        record = self.sessions.get(session_id)
+        if not record:
+            return None
+        sj, sm = self.summary_paths_for_record(record)
+        return {"session_id": session_id, "json_path": record["json_path"], "md_path": record["md_path"],
+                "json_filename": record["json_filename"], "md_filename": record["md_filename"],
+                "summary_json_path": sj, "summary_md_path": sm,
+                "summary_json_filename": os.path.basename(sj), "summary_md_filename": os.path.basename(sm),
+                "has_summary": os.path.isfile(sj) and os.path.isfile(sm),
+                "source_count": len(record["payload"].get("source_segments", [])),
+                "translation_count": len(record["payload"].get("translation_segments", [])),
+                "status": record["payload"].get("status")}
+
+    def get_session_file(self, session_id, file_format="md"):
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                return None
+            if file_format == "json":
+                return record["json_path"], "application/json", record["json_filename"]
+            return record["md_path"], "text/markdown; charset=utf-8", record["md_filename"]
+
+    def write_summary(self, session_id, summary):
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                return None
+            sj, sm = self.summary_paths_for_record(record)
+            with open(sj, "w", encoding="utf-8") as file:
+                json.dump(summary, file, ensure_ascii=False, indent=2); file.write("\n")
+            with open(sm, "w", encoding="utf-8") as file:
+                file.write(self.render_summary_markdown(summary))
+            return self.summary_info(session_id)
+
+    def summary_info(self, session_id):
+        record = self.sessions.get(session_id)
+        if not record:
+            return None
+        sj, sm = self.summary_paths_for_record(record)
+        return {"session_id": session_id, "json_path": sj, "md_path": sm, "json_filename": os.path.basename(sj),
+                "md_filename": os.path.basename(sm), "has_summary": os.path.isfile(sj) and os.path.isfile(sm)}
+
+    def get_summary_file(self, session_id, file_format="md"):
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                return None
+            sj, sm = self.summary_paths_for_record(record)
+            if file_format == "json":
+                return sj, "application/json", os.path.basename(sj)
+            return sm, "text/markdown; charset=utf-8", os.path.basename(sm)
+
+    @staticmethod
+    def _sort_segments(segments):
+        segments.sort(key=lambda item: (str(item.get("session_started_at") or ""), float(item.get("start") or 0)))
+
+    def _write_record(self, record):
+        payload = record["payload"]
+        with open(record["json_path"], "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2); file.write("\n")
+        with open(record["md_path"], "w", encoding="utf-8") as file:
+            file.write(self.render_markdown(payload))
+
+    @staticmethod
+    def render_markdown(payload):
+        lines = [f"# {payload.get('meeting_name') or payload.get('client_name') or 'Meeting Log'}", "", "## 会议信息",
+                 f"- Session ID: {payload.get('session_id') or ''}", f"- Client: {payload.get('client_name') or ''}",
+                 f"- Started: {payload.get('created_at') or ''}", f"- Updated: {payload.get('updated_at') or ''}",
+                 f"- Backend: {payload.get('backend') or ''}", f"- Model: {payload.get('model') or ''}",
+                 f"- Source language: {payload.get('source_language') or 'auto'}", "", "## 原文记录"]
+        for segment in payload.get("source_segments", []):
+            lines.append(f"- [{segment.get('start', '')} - {segment.get('end', '')}] {segment.get('text', '')}")
+        lines.extend(["", "## 翻译记录"])
+        for segment in payload.get("translation_segments", []):
+            lines.append(f"- [{segment.get('start', '')} - {segment.get('end', '')}] {segment.get('text', '')}")
+        lines.extend(["", "## AI 总结", "", "_待生成_", ""])
+        return "\n".join(lines)
+
+    @staticmethod
+    def render_summary_markdown(summary):
+        lines = [f"# {summary.get('meeting_name') or '会议总结'}", "", "## 会议信息",
+                 f"- Session ID: {summary.get('session_id') or ''}", f"- Generated: {summary.get('generated_at') or ''}",
+                 f"- Model: {summary.get('model') or ''}", "", "## 会议概述", summary.get("overview") or "未明确", "", "## 核心议题"]
+        for item in summary.get("topics") or []: lines.append(f"- {item}")
+        lines.extend(["", "## 关键结论"])
+        for item in summary.get("decisions") or []: lines.append(f"- {item}")
+        lines.extend(["", "## 待办事项"])
+        for item in summary.get("action_items") or []:
+            lines.append(f"- {item.get('task') or '未明确'}（负责人：{item.get('owner') or '未明确'}；时间：{item.get('deadline') or '未明确'}；状态：{item.get('status') or '未明确'}）")
+        lines.extend(["", "## 风险与问题"])
+        for item in summary.get("risks") or []: lines.append(f"- {item}")
+        lines.extend(["", "## 后续建议"])
+        for item in summary.get("follow_ups") or []: lines.append(f"- {item}")
+        lines.append("")
+        return "\n".join(lines)
 
 
 class MeetingHotwordStore:
@@ -429,6 +859,8 @@ class TranscriptionServer:
         self.default_hotwords = None
         self.translation_device = "cpu"
         self.meeting_hotwords = MeetingHotwordStore()
+        self.meeting_logs = MeetingLogStore()
+        self.meeting_summary = MeetingSummaryService()
 
     @staticmethod
     def load_hotwords_file(path):
@@ -476,6 +908,37 @@ class TranscriptionServer:
         if not self.client_manager:
             return {"server_time": time.time(), "clients": []}
         return self.client_manager.get_client_status_snapshot()
+
+    def handle_client_segments(self, websocket, message_type, segments):
+        if self.client_manager:
+            self.client_manager.update_client_message(websocket, message_type, segments)
+        client = self.client_manager.get_client(websocket) if self.client_manager else None
+        session_id = getattr(client, "meeting_log_session_id", None)
+        kind = "translation" if message_type == "translated_segments" else "source"
+        try:
+            self.meeting_logs.append_segments(session_id, kind, segments)
+        except Exception as exc:
+            logging.error("Failed to append meeting log segments: %s", exc)
+
+    def finalize_client_meeting_log(self, websocket):
+        client = self.client_manager.get_client(websocket) if self.client_manager else None
+        session_id = getattr(client, "meeting_log_session_id", None)
+        try:
+            return self.meeting_logs.finish_session(session_id)
+        except Exception as exc:
+            logging.error("Failed to finalize meeting log: %s", exc)
+            return None
+
+    def generate_meeting_summary(self, session_id):
+        info = self.meeting_logs.session_info(session_id)
+        if not info:
+            raise KeyError("meeting log session not found")
+        if info.get("status") != "finished":
+            raise RuntimeError("请停止会议后再生成总结")
+        payload = self.meeting_logs.get_session_payload(session_id)
+        summary = self.meeting_summary.generate(payload)
+        result = self.meeting_logs.write_summary(session_id, summary)
+        return {"generated": True, "summary": result, "data": summary}
 
     def _default_cors_origins(self, websocket_port):
         return [
@@ -747,15 +1210,17 @@ class TranscriptionServer:
 
         if translation_client:
             translation_client.admin_status_callback = functools.partial(
-                self.client_manager.update_client_message,
-                websocket,
-                "translated_segments",
+                self.handle_client_segments, websocket, "translated_segments"
             )
         client.admin_status_callback = functools.partial(
-            self.client_manager.update_client_message,
-            websocket,
-            "segments",
+            self.handle_client_segments, websocket, "segments"
         )
+        try:
+            log_info = self.meeting_logs.start_session(options, backend=self.backend)
+            client.meeting_log_session_id = log_info.get("session_id") if log_info else options.get("session_id") or options.get("uid")
+        except Exception as exc:
+            logging.error("Failed to start meeting log session: %s", exc)
+            client.meeting_log_session_id = options.get("session_id") or options.get("uid")
         self.client_manager.add_client(websocket, client)
         self.client_manager.register_client_status(websocket, client, options, self.backend)
 
@@ -953,6 +1418,13 @@ class TranscriptionServer:
             translation_device="cpu",
             meeting_hotwords_dir="config/hotwords.d",
             meeting_logs_dir="logs",
+            summary_base_url="http://127.0.0.1:8001/v1",
+            summary_model="qwen3-8b-awq",
+            summary_startup_command="bash scripts/start_summary_llm_service.sh",
+            summary_timeout=600,
+            summary_ready_timeout=300,
+            summary_max_chars_per_chunk=16000,
+            summary_idle_shutdown_seconds=600,
             segment_post_processor=None):
         """
         Run the transcription server.
@@ -980,6 +1452,11 @@ class TranscriptionServer:
         self.translation_device = translation_device
         self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
         self.meeting_logs = MeetingLogStore(meeting_logs_dir)
+        self.meeting_summary = MeetingSummaryService(
+            base_url=summary_base_url, model=summary_model, startup_command=summary_startup_command,
+            timeout=summary_timeout, ready_timeout=summary_ready_timeout,
+            max_chars_per_chunk=summary_max_chars_per_chunk, idle_shutdown_seconds=summary_idle_shutdown_seconds,
+        )
         self.default_hotwords = self.load_hotwords_file(hotwords_file)
         if self.default_hotwords:
             logging.info(
@@ -1084,6 +1561,44 @@ class TranscriptionServer:
             except Exception as exc:
                 logging.error("Failed to save meeting log: %s", exc)
                 return JSONResponse(status_code=500, content={"saved": False, "error": str(exc)})
+
+        @app.get("/admin/meeting-logs/{session_id}")
+        async def download_admin_meeting_log(session_id: str, format: str = "md"):
+            result = self.meeting_logs.get_session_file(session_id, "json" if format.lower() == "json" else "md")
+            if not result or not os.path.isfile(result[0]):
+                return JSONResponse(status_code=404, content={"error": "meeting log not found"})
+            return FileResponse(result[0], media_type=result[1], filename=result[2])
+
+        @app.get("/admin/meeting-logs/{session_id}/info")
+        async def get_admin_meeting_log_info(session_id: str):
+            info = self.meeting_logs.session_info(session_id)
+            return info if info else JSONResponse(status_code=404, content={"error": "meeting log session not found"})
+
+        @app.post("/admin/meeting-logs/{session_id}/summary")
+        async def generate_admin_meeting_summary(session_id: str):
+            try:
+                return self.generate_meeting_summary(session_id)
+            except KeyError as exc:
+                return JSONResponse(status_code=404, content={"generated": False, "error": str(exc)})
+            except RuntimeError as exc:
+                return JSONResponse(status_code=409, content={"generated": False, "error": str(exc)})
+            except ValueError as exc:
+                return JSONResponse(status_code=400, content={"generated": False, "error": str(exc)})
+            except Exception as exc:
+                logging.error("Failed to generate meeting summary: %s", exc)
+                return JSONResponse(status_code=500, content={"generated": False, "error": str(exc)})
+
+        @app.get("/admin/meeting-logs/{session_id}/summary")
+        async def download_admin_meeting_summary(session_id: str, format: str = "md"):
+            result = self.meeting_logs.get_summary_file(session_id, "json" if format.lower() == "json" else "md")
+            if not result or not os.path.isfile(result[0]):
+                return JSONResponse(status_code=404, content={"error": "meeting summary not found"})
+            return FileResponse(result[0], media_type=result[1], filename=result[2])
+
+        @app.get("/admin/meeting-logs/{session_id}/summary/info")
+        async def get_admin_meeting_summary_info(session_id: str):
+            info = self.meeting_logs.summary_info(session_id)
+            return info if info else JSONResponse(status_code=404, content={"error": "meeting log session not found"})
 
         if enable_rest:
             @app.post("/v1/audio/transcriptions")
@@ -1267,5 +1782,6 @@ class TranscriptionServer:
             # Wait for translation thread to finish
             if hasattr(client, 'translation_thread') and client.translation_thread:
                 client.translation_thread.join(timeout=2.0)
+            self.finalize_client_meeting_log(websocket)
             self.client_manager.mark_client_disconnected(websocket)
             self.client_manager.remove_client(websocket)

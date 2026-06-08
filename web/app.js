@@ -11,6 +11,8 @@ const elements = {
   start: document.getElementById("startButton"),
   stop: document.getElementById("stopButton"),
   exportLog: document.getElementById("exportLogButton"),
+  generateSummary: document.getElementById("generateSummaryButton"),
+  downloadSummary: document.getElementById("downloadSummaryButton"),
   clearLog: document.getElementById("clearLogButton"),
   status: document.getElementById("connectionStatus"),
   languageStatus: document.getElementById("languageStatus"),
@@ -29,13 +31,12 @@ let uid = null;
 let isServerReady = false;
 let sourceSegments = [];
 let translatedSegments = [];
-let fullSourceLog = [];
-let fullTranslationLog = [];
-let meetingId = createUid();
-let meetingStartedAt = new Date().toISOString();
 let currentSessionId = null;
 let currentSessionStartedAt = null;
 let currentConfig = null;
+let hasStoppedCurrentSession = false;
+let summaryGenerated = false;
+let summaryGenerating = false;
 let lockedHotwords = { hotwords: "", filename: "", count: 0 };
 let clientInstanceId = null;
 
@@ -126,6 +127,18 @@ function meetingLogApiUrl() {
   return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/meeting-logs`;
 }
 
+function meetingLogDownloadUrl(sessionId, format = "md") {
+  return `${meetingLogApiUrl()}/${encodeURIComponent(sessionId)}?format=${encodeURIComponent(format)}`;
+}
+
+function summaryApiUrl(sessionId) {
+  return `${meetingLogApiUrl()}/${encodeURIComponent(sessionId)}/summary`;
+}
+
+function summaryDownloadUrl(sessionId, format = "md") {
+  return `${summaryApiUrl(sessionId)}?format=${encodeURIComponent(format)}`;
+}
+
 
 async function loadMeetingOptions() {
   if (!elements.meetingSelect) return;
@@ -168,96 +181,6 @@ function setStatus(text, state = "idle") {
   elements.status.className = `status ${state}`;
 }
 
-function segmentKey(segment) {
-  return `${segment.session_id || ""}|${segment.start || ""}|${segment.end || ""}`;
-}
-
-function upsertCompletedSegment(log, segment) {
-  if (!segment.completed || !segment.text || !segment.text.trim()) {
-    return;
-  }
-  const normalized = {
-    ...segment,
-    session_id: segment.session_id || currentSessionId || meetingId,
-    session_started_at: segment.session_started_at || currentSessionStartedAt || meetingStartedAt,
-    text: segment.text.trim(),
-  };
-  const key = segmentKey(normalized);
-  const index = log.findIndex((item) => segmentKey(item) === key);
-  if (index >= 0) {
-    log[index] = normalized;
-  } else {
-    log.push(normalized);
-  }
-  log.sort((a, b) => {
-    const sessionOrder = String(a.session_started_at || "").localeCompare(String(b.session_started_at || ""));
-    if (sessionOrder !== 0) {
-      return sessionOrder;
-    }
-    return Number(a.start) - Number(b.start);
-  });
-}
-
-function updateMeetingLog(segments, log) {
-  segments.forEach((segment) => upsertCompletedSegment(log, segment));
-}
-
-function cleanExportSegmentText(text) {
-  let cleaned = String(text || "").trim();
-  if (!cleaned) return "";
-
-  cleaned = cleaned.replace(/\s+/g, " ");
-  cleaned = cleaned.replace(/[，,、]+([。！？!?；;])/g, "$1");
-  cleaned = cleaned.replace(/([。！？!?；;])[，,、]+/g, "$1");
-  cleaned = cleaned.replace(/[，,]{2,}/g, "，");
-  cleaned = cleaned.replace(/、{2,}/g, "、");
-  cleaned = cleaned.replace(/。{2,}/g, "。");
-  cleaned = cleaned.replace(/！{2,}/g, "！");
-  cleaned = cleaned.replace(/？{2,}/g, "？");
-  cleaned = cleaned.replace(/；{2,}/g, "；");
-  cleaned = cleaned.replace(/!{2,}/g, "!");
-  cleaned = cleaned.replace(/\?{2,}/g, "?");
-  cleaned = cleaned.replace(/(?<!\.)\.{2,}(?!\.)/g, ".");
-
-  const han = "[\u4e00-\u9fff]";
-  cleaned = cleaned.replace(new RegExp(`(${han}{1,3})。\\s*\\1(?=${han})`, "g"), "$1");
-  const standalone = new Set(["是", "对", "好", "嗯", "啊", "哦", "行", "可以", "不是", "没有", "谢谢"]);
-  const fragmentedPattern = new RegExp(`(?<prefix>${han}{1,3})。\\s*(?<follower>(?:这|那)(?:个|种|些|样)?|而|就|再|继续)(?=${han})`, "g");
-  cleaned = cleaned.replace(fragmentedPattern, (match, _prefix, _follower, _offset, _source, groups) => {
-    const prefix = groups && groups.prefix ? groups.prefix : _prefix;
-    const follower = groups && groups.follower ? groups.follower : _follower;
-    return standalone.has(prefix) ? match : `${prefix}${follower}`;
-  });
-
-  return cleaned.trim();
-}
-
-function cleanExportSegments(segments) {
-  return segments.map((segment) => ({
-    ...segment,
-    text: cleanExportSegmentText(segment.text),
-  })).filter((segment) => segment.text);
-}
-
-function buildMeetingLog() {
-  return {
-    meeting_id: meetingId,
-    client_name: currentConfig ? currentConfig.client_name : elements.meetingName.value.trim(),
-    meeting_name: currentConfig ? currentConfig.meeting_name : elements.meetingName.value.trim(),
-    hotwords_count: currentConfig ? currentConfig.hotwords_count : 0,
-    hotwords_file: currentConfig ? currentConfig.hotwords_file : "",
-    created_at: meetingStartedAt,
-    exported_at: new Date().toISOString(),
-    server: elements.server.value.trim(),
-    backend: currentConfig ? currentConfig.backend : DEFAULT_BACKEND,
-    model: currentConfig ? currentConfig.model : DEFAULT_MODEL,
-    source_language: currentConfig ? currentConfig.language : (elements.language.value || null),
-    translation_mode: "auto",
-    source_segments: cleanExportSegments(fullSourceLog),
-    translation_segments: cleanExportSegments(fullTranslationLog),
-  };
-}
-
 function safeExportFilenamePrefix(value) {
   const cleaned = String(value || "")
     .trim()
@@ -266,8 +189,7 @@ function safeExportFilenamePrefix(value) {
   return cleaned || "meeting-log";
 }
 
-function downloadJson(filename, data) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -278,40 +200,66 @@ function downloadJson(filename, data) {
   URL.revokeObjectURL(url);
 }
 
-async function saveMeetingLogToServer(data) {
-  const response = await fetch(meetingLogApiUrl(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result.saved) {
-    throw new Error(result.error || `HTTP ${response.status}`);
-  }
-  return result;
+function filenameFromContentDisposition(value, fallback) {
+  const match = String(value || "").match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+  const encoded = match && (match[1] || match[2]);
+  if (!encoded) return fallback;
+  try { return decodeURIComponent(encoded); } catch (_error) { return encoded; }
 }
 
 async function exportMeetingLog() {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const data = buildMeetingLog();
-  const filenamePrefix = safeExportFilenamePrefix(data.meeting_name || data.client_name);
-  downloadJson(`${filenamePrefix}-${timestamp}.json`, data);
+  if (!currentSessionId) throw new Error("当前没有可导出的后端日志 session");
+  const response = await fetch(meetingLogDownloadUrl(currentSessionId, "md"), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const blob = await response.blob();
+  const filenamePrefix = safeExportFilenamePrefix((currentConfig && (currentConfig.meeting_name || currentConfig.client_name)) || elements.meetingName.value.trim());
+  const fallback = `${filenamePrefix || "meeting-log"}-${currentSessionStartedAt || new Date().toISOString()}.md`.replace(/[:.]/g, "-");
+  downloadBlob(filenameFromContentDisposition(response.headers.get("Content-Disposition"), fallback), blob);
+  setStatus("后端日志已下载", "ready");
+}
+
+async function generateSummary() {
+  if (!currentSessionId) throw new Error("当前没有可生成总结的会议 session");
+  if (!hasStoppedCurrentSession) throw new Error("请先停止会议后再生成总结");
+  summaryGenerating = true; updateSummaryButtons(); setStatus("总结生成中", "busy");
   try {
-    const result = await saveMeetingLogToServer(data);
-    setStatus(`日志已保存：${result.filename}`, "ready");
-  } catch (error) {
-    console.warn("Failed to save meeting log to server", error);
-    setStatus("日志本地已导出，服务器保存失败", "error");
+    const response = await fetch(summaryApiUrl(currentSessionId), { method: "POST" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.generated) throw new Error(result.error || `HTTP ${response.status}`);
+    summaryGenerated = true; setStatus("总结已生成", "ready"); return result;
+  } finally {
+    summaryGenerating = false; updateSummaryButtons();
+  }
+}
+
+async function downloadSummary() {
+  if (!currentSessionId) throw new Error("当前没有可下载总结的会议 session");
+  const response = await fetch(summaryDownloadUrl(currentSessionId, "md"), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const blob = await response.blob();
+  const filenamePrefix = safeExportFilenamePrefix((currentConfig && (currentConfig.meeting_name || currentConfig.client_name)) || elements.meetingName.value.trim());
+  const fallback = `${filenamePrefix || "meeting-summary"}-${currentSessionStartedAt || new Date().toISOString()}-summary.md`.replace(/[:.]/g, "-");
+  downloadBlob(filenameFromContentDisposition(response.headers.get("Content-Disposition"), fallback), blob);
+  setStatus("总结已下载", "ready");
+}
+
+function updateSummaryButtons() {
+  if (elements.generateSummary) {
+    elements.generateSummary.disabled = !currentSessionId || !hasStoppedCurrentSession || summaryGenerating;
+    elements.generateSummary.textContent = summaryGenerating ? "生成中" : "生成总结";
+  }
+  if (elements.downloadSummary) {
+    elements.downloadSummary.disabled = !currentSessionId || !summaryGenerated || summaryGenerating;
   }
 }
 
 function clearMeetingLog() {
-  fullSourceLog = [];
-  fullTranslationLog = [];
-  meetingId = createUid();
-  meetingStartedAt = new Date().toISOString();
   currentSessionId = null;
   currentSessionStartedAt = null;
+  hasStoppedCurrentSession = false;
+  summaryGenerated = false;
+  summaryGenerating = false;
+  updateSummaryButtons();
 }
 
 function renderSegments(target, segments, emptyText) {
@@ -365,13 +313,11 @@ function handleMessage(event) {
 
   if (message.segments) {
     sourceSegments = message.segments.slice();
-    updateMeetingLog(message.segments, fullSourceLog);
     renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
   }
 
   if (message.translated_segments) {
     translatedSegments = message.translated_segments.slice();
-    updateMeetingLog(message.translated_segments, fullTranslationLog);
     renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
   }
 }
@@ -413,6 +359,7 @@ function sendConfig(event) {
     uid,
     session_id: currentSessionId,
     session_started_at: currentSessionStartedAt,
+    server: elements.server.value.trim(),
     client_instance_id: clientInstanceId || getClientInstanceId(),
     client_name: meetingName || `Client-${uid.slice(0, 8)}`,
     meeting_name: meetingName,
@@ -459,6 +406,10 @@ async function startCapture() {
   setStatus("连接中", "busy");
   currentSessionId = createUid();
   currentSessionStartedAt = new Date().toISOString();
+  hasStoppedCurrentSession = false;
+  summaryGenerated = false;
+  summaryGenerating = false;
+  updateSummaryButtons();
   sourceSegments = [];
   translatedSegments = [];
   renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
@@ -520,6 +471,10 @@ async function startCapture() {
 }
 
 function stopCapture(sendEnd = true) {
+  if (sendEnd && currentSessionId) {
+    hasStoppedCurrentSession = true;
+    updateSummaryButtons();
+  }
   if (processor) {
     processor.disconnect();
     processor = null;
@@ -574,6 +529,22 @@ elements.exportLog.addEventListener("click", () => {
     setStatus("日志导出失败", "error");
   });
 });
+if (elements.generateSummary) {
+  elements.generateSummary.addEventListener("click", () => {
+    generateSummary().catch((error) => {
+      console.error(error);
+      setStatus("总结生成失败", "error");
+    });
+  });
+}
+if (elements.downloadSummary) {
+  elements.downloadSummary.addEventListener("click", () => {
+    downloadSummary().catch((error) => {
+      console.error(error);
+      setStatus("总结下载失败", "error");
+    });
+  });
+}
 elements.clearLog.addEventListener("click", clearMeetingLog);
 
 elements.meetingName.addEventListener("change", () => {
@@ -614,4 +585,5 @@ elements.clearTranslation.addEventListener("click", () => {
   renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
 });
 
+updateSummaryButtons();
 initializeDefaults();

@@ -155,6 +155,13 @@ if __name__ == "__main__":
         default='logs',
         help='Directory where exported meeting log JSON files are saved. Defaults to logs/.'
     )
+    parser.add_argument('--summary_base_url', default='http://127.0.0.1:8001/v1')
+    parser.add_argument('--summary_model', default='qwen3-8b-awq')
+    parser.add_argument('--summary_startup_command', default='bash scripts/start_summary_llm_service.sh')
+    parser.add_argument('--summary_timeout', type=int, default=600)
+    parser.add_argument('--summary_ready_timeout', type=int, default=300)
+    parser.add_argument('--summary_max_chars_per_chunk', type=int, default=16000)
+    parser.add_argument('--summary_idle_shutdown_seconds', type=int, default=600)
     args = parser.parse_args()
 
     if args.backend == "tensorrt":
@@ -198,4 +205,11 @@ if __name__ == "__main__":
         translation_device=args.translation_device,
         meeting_hotwords_dir=args.meeting_hotwords_dir,
         meeting_logs_dir=args.meeting_logs_dir,
+        summary_base_url=args.summary_base_url,
+        summary_model=args.summary_model,
+        summary_startup_command=args.summary_startup_command,
+        summary_timeout=args.summary_timeout,
+        summary_ready_timeout=args.summary_ready_timeout,
+        summary_max_chars_per_chunk=args.summary_max_chars_per_chunk,
+        summary_idle_shutdown_seconds=args.summary_idle_shutdown_seconds,
     )

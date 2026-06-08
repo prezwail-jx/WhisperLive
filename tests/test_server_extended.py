@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-from whisper_live.server import TranscriptionServer, BackendType, ClientManager, MeetingHotwordStore, MeetingLogStore, count_hotwords
+from whisper_live.server import TranscriptionServer, BackendType, ClientManager, MeetingHotwordStore, MeetingLogStore, MeetingSummaryService, count_hotwords
 
 
 class TestClientManagerAddRemove(unittest.TestCase):
@@ -459,6 +459,41 @@ class TestMeetingLogStore(unittest.TestCase):
             store = MeetingLogStore(directory)
             with self.assertRaises(ValueError):
                 store.save([{"meeting_name": "会议"}])
+
+    def test_session_log_writes_json_and_markdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({"uid": "uid-1", "session_id": "session-1", "meeting_name": "会议"})
+            store.append_segments("session-1", "source", [{"start": "0", "end": "1", "text": "hello", "completed": True}])
+            info = store.finish_session("session-1")
+            self.assertEqual(info["source_count"], 1)
+            self.assertTrue(os.path.isfile(info["json_path"]))
+            self.assertTrue(os.path.isfile(info["md_path"]))
+
+    def test_write_summary_writes_json_and_markdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({"uid": "uid-1", "session_id": "session-1", "meeting_name": "会议"})
+            store.finish_session("session-1")
+            summary = {
+                "session_id": "session-1", "meeting_name": "会议", "generated_at": "2026-06-08T12:00:00", "model": "qwen3-8b-awq",
+                "overview": "讨论了项目进度。", "topics": ["项目进度"], "decisions": ["继续推进"],
+                "action_items": [{"task": "整理纪要", "owner": "未明确", "deadline": "未明确", "status": "未明确"}],
+                "risks": ["时间紧"], "follow_ups": ["下次复盘"],
+            }
+            info = store.write_summary("session-1", summary)
+            self.assertTrue(info["has_summary"])
+            self.assertTrue(os.path.isfile(info["json_path"]))
+            self.assertTrue(os.path.isfile(info["md_path"]))
+
+
+class TestMeetingSummaryService(unittest.TestCase):
+    def test_extract_meeting_text_prefers_source_segments(self):
+        service = MeetingSummaryService(startup_command="")
+        payload = {"source_segments": [{"start": "0", "end": "1", "text": "hello"}], "translation_segments": [{"text": "你好"}]}
+        text = service.extract_meeting_text(payload)
+        self.assertIn("hello", text)
+        self.assertNotIn("你好", text)
 
 
 class TestClientManagerAdminStatus(unittest.TestCase):
