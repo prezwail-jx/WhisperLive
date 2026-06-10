@@ -52,6 +52,35 @@
           </label>
         </section>
 
+        <section class="summary-panel" aria-label="会议总结">
+          <div class="summary-grid">
+            <label>
+              总结会议
+              <select id="summarySessionInput">
+                <option value="">暂无已结束会议</option>
+              </select>
+            </label>
+            <label>
+              总结模板
+              <select id="summaryTemplateInput">
+                <option value="auto" selected>自动判断</option>
+                <option value="project_meeting">项目会议</option>
+                <option value="customer_interview">客户访谈</option>
+                <option value="training_speech">培训 / 演讲</option>
+                <option value="discussion">讨论会</option>
+              </select>
+            </label>
+            <label>
+              下载版本
+              <select id="summaryVersionInput" disabled>
+                <option value="">最新版</option>
+              </select>
+            </label>
+            <button id="refreshSummarySessionsButton" type="button">刷新会议</button>
+          </div>
+          <p class="field-hint">每次生成都会保留新版本；决策和待办必须通过原文时间戳与引用校验。</p>
+        </section>
+
         <div class="actions">
           <button id="startButton" type="button">开始</button>
           <button id="stopButton" type="button" disabled>停止</button>
@@ -88,6 +117,6 @@
       </section>
     </main>
 
-    <script src="./app.js?v=low-energy-1"></script>
+    <script src="./app.js?v=trusted-summary-1"></script>
   </body>
 </html>

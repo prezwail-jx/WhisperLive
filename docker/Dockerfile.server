@@ -28,8 +28,8 @@ COPY requirements/summary.txt /tmp/summary.txt
 RUN pip install --no-cache-dir --timeout 120 --retries 10 -r /tmp/summary.txt \
     && rm /tmp/summary.txt
 
-ENV SUMMARY_MODEL_PATH="/app/model/LLM/Qwen3-8B-AWQ" \
-    SUMMARY_MODEL_NAME="qwen3-8b-awq" \
+ENV SUMMARY_MODEL_PATH="/app/model/LLM/Qwen3-4B-AWQ" \
+    SUMMARY_MODEL_NAME="qwen3-4b-awq" \
     SUMMARY_HOST="127.0.0.1" \
     SUMMARY_PORT="8001"
 

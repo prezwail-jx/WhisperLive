@@ -156,11 +156,11 @@ if __name__ == "__main__":
         help='Directory where exported meeting log JSON files are saved. Defaults to logs/.'
     )
     parser.add_argument('--summary_base_url', default='http://127.0.0.1:8001/v1')
-    parser.add_argument('--summary_model', default='qwen3-8b-awq')
+    parser.add_argument('--summary_model', default='qwen3-4b-awq')
     parser.add_argument('--summary_startup_command', default='bash scripts/start_summary_llm_service.sh')
     parser.add_argument('--summary_timeout', type=int, default=600)
     parser.add_argument('--summary_ready_timeout', type=int, default=300)
-    parser.add_argument('--summary_max_chars_per_chunk', type=int, default=16000)
+    parser.add_argument('--summary_max_chars_per_chunk', type=int, default=4000)
     parser.add_argument('--summary_idle_shutdown_seconds', type=int, default=600)
     args = parser.parse_args()
 

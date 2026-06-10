@@ -13,6 +13,10 @@ const elements = {
   exportLog: document.getElementById("exportLogButton"),
   generateSummary: document.getElementById("generateSummaryButton"),
   downloadSummary: document.getElementById("downloadSummaryButton"),
+  summarySession: document.getElementById("summarySessionInput"),
+  summaryTemplate: document.getElementById("summaryTemplateInput"),
+  summaryVersion: document.getElementById("summaryVersionInput"),
+  refreshSummarySessions: document.getElementById("refreshSummarySessionsButton"),
   clearLog: document.getElementById("clearLogButton"),
   status: document.getElementById("connectionStatus"),
   languageStatus: document.getElementById("languageStatus"),
@@ -37,6 +41,9 @@ let currentConfig = null;
 let hasStoppedCurrentSession = false;
 let summaryGenerated = false;
 let summaryGenerating = false;
+let selectedSummarySessionId = null;
+let selectedSummarySessionStatus = null;
+let summaryVersions = [];
 let lockedHotwords = { hotwords: "", filename: "", count: 0 };
 let clientInstanceId = null;
 
@@ -87,6 +94,7 @@ function initializeDefaults() {
   loadMeetingOptions().catch(() => {
     updateHotwordStatus("热词文件列表暂不可用，可手动填写会议号");
   });
+  loadSummarySessions().catch(() => {});
 }
 
 function countHotwordText(text) {
@@ -135,8 +143,86 @@ function summaryApiUrl(sessionId) {
   return `${meetingLogApiUrl()}/${encodeURIComponent(sessionId)}/summary`;
 }
 
-function summaryDownloadUrl(sessionId, format = "md") {
-  return `${summaryApiUrl(sessionId)}?format=${encodeURIComponent(format)}`;
+function summaryInfoUrl(sessionId) {
+  return `${summaryApiUrl(sessionId)}/info`;
+}
+
+function summaryDownloadUrl(sessionId, format = "md", version = "") {
+  const params = new URLSearchParams({ format });
+  if (version) params.set("version", version);
+  return `${summaryApiUrl(sessionId)}?${params.toString()}`;
+}
+
+
+function selectedSummaryTemplate() {
+  return (elements.summaryTemplate && elements.summaryTemplate.value) || "auto";
+}
+
+function renderSummaryVersions() {
+  if (!elements.summaryVersion) return;
+  const selected = elements.summaryVersion.value;
+  elements.summaryVersion.innerHTML = '<option value="">最新版</option>';
+  summaryVersions.slice().reverse().forEach((item) => {
+    const option = document.createElement("option");
+    option.value = String(item.version);
+    option.textContent = `v${item.version} · ${item.template || "legacy"} · ${item.generated_at || ""}`;
+    elements.summaryVersion.appendChild(option);
+  });
+  elements.summaryVersion.value = Array.from(elements.summaryVersion.options).some((option) => option.value === selected) ? selected : "";
+  elements.summaryVersion.disabled = !summaryVersions.length;
+}
+
+async function loadSummaryInfo(sessionId = selectedSummarySessionId) {
+  if (!sessionId) {
+    summaryGenerated = false;
+    summaryVersions = [];
+    renderSummaryVersions();
+    updateSummaryButtons();
+    return;
+  }
+  const response = await fetch(summaryInfoUrl(sessionId), { cache: "no-store" });
+  if (response.status === 404) {
+    summaryGenerated = false;
+    summaryVersions = [];
+  } else {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    summaryGenerated = Boolean(data.has_summary);
+    summaryVersions = data.versions || [];
+  }
+  renderSummaryVersions();
+  updateSummaryButtons();
+}
+
+async function loadSummarySessions(preferredSessionId = selectedSummarySessionId || currentSessionId) {
+  if (!elements.summarySession) return;
+  const response = await fetch(meetingLogApiUrl(), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  const sessions = (data.sessions || []).filter((item) => item.status === "finished");
+  elements.summarySession.innerHTML = '<option value="">暂无已结束会议</option>';
+  sessions.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.session_id;
+    option.textContent = `${item.meeting_name || "未命名会议"} · ${item.created_at || item.session_id}`;
+    option.dataset.status = item.status || "";
+    elements.summarySession.appendChild(option);
+  });
+  const hasPreferred = sessions.some((item) => item.session_id === preferredSessionId);
+  if (!hasPreferred && preferredSessionId && preferredSessionId === currentSessionId && hasStoppedCurrentSession) {
+    const option = document.createElement("option");
+    option.value = preferredSessionId;
+    option.textContent = "当前会议 · 等待后端完成记录";
+    option.dataset.status = "finished";
+    elements.summarySession.appendChild(option);
+  }
+  const nextId = (hasPreferred || (preferredSessionId === currentSessionId && hasStoppedCurrentSession))
+    ? preferredSessionId
+    : (sessions[0] && sessions[0].session_id) || null;
+  selectedSummarySessionId = nextId;
+  selectedSummarySessionStatus = nextId ? "finished" : null;
+  elements.summarySession.value = nextId || "";
+  await loadSummaryInfo(nextId);
 }
 
 
@@ -219,37 +305,45 @@ async function exportMeetingLog() {
 }
 
 async function generateSummary() {
-  if (!currentSessionId) throw new Error("当前没有可生成总结的会议 session");
-  if (!hasStoppedCurrentSession) throw new Error("请先停止会议后再生成总结");
+  if (!selectedSummarySessionId) throw new Error("请选择已结束的会议 session");
+  if (selectedSummarySessionStatus !== "finished") throw new Error("请先停止会议后再生成总结");
   summaryGenerating = true; updateSummaryButtons(); setStatus("总结生成中", "busy");
   try {
-    const response = await fetch(summaryApiUrl(currentSessionId), { method: "POST" });
+    const response = await fetch(summaryApiUrl(selectedSummarySessionId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ template: selectedSummaryTemplate() }),
+    });
     const result = await response.json().catch(() => ({}));
     if (!response.ok || !result.generated) throw new Error(result.error || `HTTP ${response.status}`);
-    summaryGenerated = true; setStatus("总结已生成", "ready"); return result;
+    summaryGenerated = true;
+    await loadSummaryInfo(selectedSummarySessionId);
+    setStatus(result.summary && result.summary.latest_version > 1 ? "总结已重新生成" : "总结已生成", "ready");
+    return result;
   } finally {
     summaryGenerating = false; updateSummaryButtons();
   }
 }
 
 async function downloadSummary() {
-  if (!currentSessionId) throw new Error("当前没有可下载总结的会议 session");
-  const response = await fetch(summaryDownloadUrl(currentSessionId, "md"), { cache: "no-store" });
+  if (!selectedSummarySessionId) throw new Error("请选择可下载总结的会议 session");
+  const version = elements.summaryVersion ? elements.summaryVersion.value : "";
+  const response = await fetch(summaryDownloadUrl(selectedSummarySessionId, "md", version), { cache: "no-store" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const blob = await response.blob();
-  const filenamePrefix = safeExportFilenamePrefix((currentConfig && (currentConfig.meeting_name || currentConfig.client_name)) || elements.meetingName.value.trim());
-  const fallback = `${filenamePrefix || "meeting-summary"}-${currentSessionStartedAt || new Date().toISOString()}-summary.md`.replace(/[:.]/g, "-");
+  const fallback = `meeting-summary-${selectedSummarySessionId}${version ? `-v${version}` : ""}.md`;
   downloadBlob(filenameFromContentDisposition(response.headers.get("Content-Disposition"), fallback), blob);
   setStatus("总结已下载", "ready");
 }
 
 function updateSummaryButtons() {
+  const canGenerate = Boolean(selectedSummarySessionId) && selectedSummarySessionStatus === "finished";
   if (elements.generateSummary) {
-    elements.generateSummary.disabled = !currentSessionId || !hasStoppedCurrentSession || summaryGenerating;
-    elements.generateSummary.textContent = summaryGenerating ? "生成中" : "生成总结";
+    elements.generateSummary.disabled = !canGenerate || summaryGenerating;
+    elements.generateSummary.textContent = summaryGenerating ? "生成中" : (summaryGenerated ? "重新生成" : "生成总结");
   }
   if (elements.downloadSummary) {
-    elements.downloadSummary.disabled = !currentSessionId || !summaryGenerated || summaryGenerating;
+    elements.downloadSummary.disabled = !selectedSummarySessionId || !summaryGenerated || summaryGenerating;
   }
 }
 
@@ -257,10 +351,10 @@ function clearMeetingLog() {
   currentSessionId = null;
   currentSessionStartedAt = null;
   hasStoppedCurrentSession = false;
-  summaryGenerated = false;
   summaryGenerating = false;
   updateSummaryButtons();
 }
+
 
 function renderSegments(target, segments, emptyText) {
   const displaySegments = segments.slice(-getDisplayLimit());
@@ -409,6 +503,11 @@ async function startCapture() {
   hasStoppedCurrentSession = false;
   summaryGenerated = false;
   summaryGenerating = false;
+  selectedSummarySessionId = currentSessionId;
+  selectedSummarySessionStatus = "active";
+  summaryVersions = [];
+  renderSummaryVersions();
+  if (elements.summarySession) elements.summarySession.value = "";
   updateSummaryButtons();
   sourceSegments = [];
   translatedSegments = [];
@@ -473,7 +572,12 @@ async function startCapture() {
 function stopCapture(sendEnd = true) {
   if (sendEnd && currentSessionId) {
     hasStoppedCurrentSession = true;
+    selectedSummarySessionId = currentSessionId;
+    selectedSummarySessionStatus = "finished";
     updateSummaryButtons();
+    window.setTimeout(() => {
+      loadSummarySessions(currentSessionId).catch(() => {});
+    }, 500);
   }
   if (processor) {
     processor.disconnect();
@@ -542,6 +646,25 @@ if (elements.downloadSummary) {
     downloadSummary().catch((error) => {
       console.error(error);
       setStatus("总结下载失败", "error");
+    });
+  });
+}
+if (elements.summarySession) {
+  elements.summarySession.addEventListener("change", () => {
+    selectedSummarySessionId = elements.summarySession.value || null;
+    const selected = elements.summarySession.selectedOptions[0];
+    selectedSummarySessionStatus = selectedSummarySessionId ? (selected.dataset.status || "finished") : null;
+    loadSummaryInfo(selectedSummarySessionId).catch((error) => {
+      console.error(error);
+      setStatus("总结信息加载失败", "error");
+    });
+  });
+}
+if (elements.refreshSummarySessions) {
+  elements.refreshSummarySessions.addEventListener("click", () => {
+    loadSummarySessions().catch((error) => {
+      console.error(error);
+      setStatus("会议列表刷新失败", "error");
     });
   });
 }

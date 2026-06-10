@@ -176,6 +176,29 @@ textarea:focus {
   padding: 7px;
 }
 
+.summary-panel {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+  padding: 14px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.5fr) repeat(2, minmax(150px, 1fr)) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.summary-grid button {
+  min-height: 42px;
+}
+
+.summary-panel .field-hint {
+  margin: 10px 0 0;
+}
+
 .actions {
   display: flex;
   gap: 10px;
@@ -297,6 +320,7 @@ button:disabled {
 
 @media (max-width: 820px) {
   .settings,
+  .summary-grid,
   .meta-grid,
   .transcript-grid {
     grid-template-columns: 1fr;
