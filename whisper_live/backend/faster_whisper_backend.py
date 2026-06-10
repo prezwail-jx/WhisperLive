@@ -74,6 +74,7 @@ class ServeClientFasterWhisper(ServeClientBase):
             word_timestamps,
             min_segment_rms=min_segment_rms,
             max_incomplete_segment_seconds=max_incomplete_segment_seconds,
+            stable_utterance_ids=True,
         )
         self.cache_path = cache_path
         self.model_sizes = [

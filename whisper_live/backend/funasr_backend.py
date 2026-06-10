@@ -124,6 +124,8 @@ class ServeClientFunASR(ServeClientBase):
         self.pre_speech_audio = np.empty(0, dtype=np.float32)
         self.speech_buffer = np.empty(0, dtype=np.float32)
         self.speech_start_time = None
+        self.utterance_sequence = 0
+        self.current_utterance_id = None
         self.silence_seconds = 0.0
         self.last_partial_seconds = 0.0
 
@@ -288,6 +290,7 @@ class ServeClientFunASR(ServeClientBase):
         if voice_active:
             if self.speech_buffer.size == 0:
                 self.speech_start_time = max(0.0, window_start - (self.pre_speech_audio.shape[0] / self.RATE))
+                self._begin_utterance()
                 self.speech_buffer = self._concat_audio(self.pre_speech_audio, window)
             else:
                 self.speech_buffer = self._concat_audio(self.speech_buffer, window)
@@ -313,6 +316,7 @@ class ServeClientFunASR(ServeClientBase):
                 self.streaming_cache = {}
                 self.streaming_partial_text = ""
                 self.speech_start_time = max(0.0, window_start - (self.pre_speech_audio.shape[0] / self.RATE))
+                self._begin_utterance()
                 self.speech_buffer = self._concat_audio(self.pre_speech_audio, window)
             else:
                 self.speech_buffer = self._concat_audio(self.speech_buffer, window)
@@ -349,6 +353,17 @@ class ServeClientFunASR(ServeClientBase):
     def _speech_duration(self):
         return self.speech_buffer.shape[0] / self.RATE
 
+    def _begin_utterance(self):
+        self.utterance_sequence += 1
+        start = float(self.speech_start_time or 0.0)
+        self.current_utterance_id = f"{self.client_uid}:{self.utterance_sequence}:{start:.3f}"
+
+    def _format_utterance_segment(self, start, end, text, completed):
+        segment = self.format_segment(start, end, text, completed=completed)
+        if self.current_utterance_id:
+            segment["utterance_id"] = self.current_utterance_id
+        return segment
+
     def _maybe_emit_partial(self):
         duration = self._speech_duration()
         if duration < self.MIN_SPEECH_SECONDS:
@@ -383,7 +398,7 @@ class ServeClientFunASR(ServeClientBase):
 
         start = self.speech_start_time
         end = start + duration
-        segment = self.format_segment(start, end, text, completed=completed)
+        segment = self._format_utterance_segment(start, end, text, completed=completed)
         if completed:
             self._commit_completed_segment(segment, text, reason, duration)
             self._reset_speech_state()
@@ -407,7 +422,7 @@ class ServeClientFunASR(ServeClientBase):
         self.streaming_partial_text = merged_text
         start = self.speech_start_time or 0.0
         end = max(start, window_start + (audio.shape[0] / self.RATE))
-        segment = self.format_segment(start, end, merged_text, completed=False)
+        segment = self._format_utterance_segment(start, end, merged_text, completed=False)
         self.send_transcription_to_client(self.prepare_segments(segment))
 
     def _should_endpoint_on_sentence(self):
@@ -647,7 +662,7 @@ class ServeClientFunASR(ServeClientBase):
             else:
                 part_end = start + duration * (sum(lengths[:index + 1]) / total)
                 part_end = max(cursor + 0.001, min(part_end, end))
-            segments.append(self.format_segment(cursor, part_end, part, completed=True))
+            segments.append(self._format_utterance_segment(cursor, part_end, part, completed=True))
             cursor = part_end
         return segments
 
@@ -745,6 +760,7 @@ class ServeClientFunASR(ServeClientBase):
         self.pre_speech_audio = tail
         self.speech_buffer = np.empty(0, dtype=np.float32)
         self.speech_start_time = None
+        self.current_utterance_id = None
         self.silence_seconds = 0.0
         self.last_partial_seconds = 0.0
         self.streaming_cache = {}

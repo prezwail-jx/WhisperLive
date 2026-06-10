@@ -384,6 +384,65 @@ class TestUpdateSegments(unittest.TestCase):
         item = q.get_nowait()
         self.assertIn("first", item["text"])
 
+    def test_stable_utterance_id_survives_partial_completion(self):
+        self.client.stable_utterance_ids = True
+        partial = self.client.update_segments(
+            [self._make_segment(0.0, 1.0, " first")],
+            duration=2.0,
+        )
+        partial_id = partial["utterance_id"]
+
+        latest = self.client.update_segments(
+            [
+                self._make_segment(0.0, 1.0, " first"),
+                self._make_segment(1.0, 2.0, " second"),
+            ],
+            duration=3.0,
+        )
+
+        self.assertEqual(self.client.transcript[0]["utterance_id"], partial_id)
+        self.assertNotEqual(latest["utterance_id"], partial_id)
+
+    def test_split_completed_segments_share_utterance_id(self):
+        self.client.stable_utterance_ids = True
+        partial = self.client.update_segments(
+            [self._make_segment(0.0, 2.0, " combined")],
+            duration=3.0,
+        )
+
+        self.client.update_segments(
+            [
+                self._make_segment(0.0, 1.0, " first"),
+                self._make_segment(1.0, 2.0, " second"),
+                self._make_segment(2.0, 2.5, " next"),
+            ],
+            duration=3.0,
+        )
+
+        completed_ids = [
+            segment["utterance_id"]
+            for segment in self.client.transcript[-2:]
+        ]
+        self.assertEqual(completed_ids, [partial["utterance_id"]] * 2)
+
+    def test_stable_utterance_id_reaches_translation_queue(self):
+        self.client.stable_utterance_ids = True
+        self.client.translation_queue = queue.Queue()
+        partial = self.client.update_segments(
+            [self._make_segment(0.0, 1.0, " first")],
+            duration=2.0,
+        )
+        self.client.update_segments(
+            [
+                self._make_segment(0.0, 1.0, " first"),
+                self._make_segment(1.0, 2.0, " second"),
+            ],
+            duration=3.0,
+        )
+
+        translated_source = self.client.translation_queue.get_nowait()
+        self.assertEqual(translated_source["utterance_id"], partial["utterance_id"])
+
     def test_translation_queue_receives_simplified_completed_text(self):
         q = queue.Queue()
         self.client.translation_queue = q

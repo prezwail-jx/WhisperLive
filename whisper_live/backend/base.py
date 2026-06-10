@@ -76,6 +76,7 @@ class ServeClientBase(object):
         word_timestamps=False,
         min_segment_rms=0.0015,
         max_incomplete_segment_seconds=0.0,
+        stable_utterance_ids=False,
     ):
         self.client_uid = client_uid
         self.websocket = websocket
@@ -106,6 +107,9 @@ class ServeClientBase(object):
         self.translation_queue = translation_queue
         self.admin_status_callback = None
         self.opencc_converter = self._create_opencc_converter()
+        self.stable_utterance_ids = bool(stable_utterance_ids)
+        self.utterance_sequence = 0
+        self.current_utterance_id = None
 
         # Optional post-processing callable for segments.
         # If set, called with a segment dict and must return a segment dict.
@@ -227,6 +231,26 @@ class ServeClientBase(object):
         if words is not None:
             seg['words'] = words
         return seg
+
+    def _ensure_utterance_id(self, start):
+        if not self.stable_utterance_ids:
+            return None
+        if self.current_utterance_id is None:
+            self.utterance_sequence += 1
+            self.current_utterance_id = (
+                f"{self.client_uid}:{self.utterance_sequence}:{float(start):.3f}"
+            )
+        return self.current_utterance_id
+
+    def _attach_utterance_id(self, segment, start, utterance_id=None):
+        if not self.stable_utterance_ids:
+            return segment
+        segment["utterance_id"] = utterance_id or self._ensure_utterance_id(start)
+        return segment
+
+    def _finish_utterance(self):
+        if self.stable_utterance_ids:
+            self.current_utterance_id = None
 
     def add_frames(self, frame_np):
         """
@@ -590,6 +614,11 @@ class ServeClientBase(object):
         # and if the last segment's no_speech_prob is below the threshold.
         if len(segments) > 1 and self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
             completed_candidates = segments[:-1]
+            completed_utterance_id = None
+            if self.stable_utterance_ids and completed_candidates:
+                with self.lock:
+                    completed_start = self.timestamp_offset + self.get_segment_start(completed_candidates[0])
+                completed_utterance_id = self._ensure_utterance_id(completed_start)
             for index, s in enumerate(completed_candidates):
                 text_ = s.text
                 rel_start = self.get_segment_start(s)
@@ -616,6 +645,11 @@ class ServeClientBase(object):
                 speaker = self._identify_speaker(s)
                 words = self._extract_words(s, self.timestamp_offset)
                 completed_segment = self.format_segment(start, end, text_, completed=True, speaker=speaker, words=words)
+                self._attach_utterance_id(
+                    completed_segment,
+                    start,
+                    utterance_id=completed_utterance_id,
+                )
                 self.transcript.append(completed_segment)
 
                 if self.translation_queue:
@@ -624,6 +658,7 @@ class ServeClientBase(object):
                     except queue.Full:
                         logging.warning("Translation queue is full, skipping segment")
                 offset = rel_end
+            self._finish_utterance()
 
         # Process the last segment if its no_speech_prob is acceptable.
         if self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
@@ -643,6 +678,10 @@ class ServeClientBase(object):
                         self.current_out,
                         completed=False,
                         words=words
+                    )
+                    self._attach_utterance_id(
+                        last_segment,
+                        self.timestamp_offset + rel_start,
                     )
 
         # Handle repeated output logic.
@@ -676,6 +715,10 @@ class ServeClientBase(object):
                             completed_text,
                             completed=True
                         )
+                        self._attach_utterance_id(
+                            completed_segment,
+                            self.timestamp_offset,
+                        )
                         self.transcript.append(completed_segment)
 
                         if self.translation_queue:
@@ -688,6 +731,7 @@ class ServeClientBase(object):
             offset = repeated_end
             self.same_output_count = 0
             last_segment = None
+            self._finish_utterance()
             self.end_time_for_same_output = None
         else:
             self.prev_out = self.current_out
@@ -717,6 +761,10 @@ class ServeClientBase(object):
                             completed_text,
                             completed=True
                         )
+                        self._attach_utterance_id(
+                            completed_segment,
+                            self.timestamp_offset,
+                        )
                         self.transcript.append(completed_segment)
 
                         if self.translation_queue:
@@ -730,11 +778,14 @@ class ServeClientBase(object):
                 offset = repeated_end
                 self.same_output_count = 0
                 last_segment = None
+                self._finish_utterance()
                 self.end_time_for_same_output = None
 
         if offset is not None:
             with self.lock:
                 self.timestamp_offset += offset
+            if last_segment is None:
+                self._finish_utterance()
 
         self._trim_transcript()
         return last_segment

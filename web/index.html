@@ -4,119 +4,101 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>WhisperLive 中英同传</title>
-    <link rel="stylesheet" href="./style.css">
+    <link rel="stylesheet" href="./style.css?v=immersive-dark-3">
   </head>
   <body>
-    <main class="shell">
-      <section class="control-panel" aria-label="连接控制">
+    <main class="app-shell">
+      <header class="topbar">
         <div class="brand">
-          <div>
-            <p class="eyebrow">WhisperLive</p>
-            <h1>中英同传面板</h1>
-          </div>
-          <span id="connectionStatus" class="status idle">未连接</span>
-        </div>
-
-        <form id="settingsForm" class="settings">
-          <label>
-            Server
-            <input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off">
-          </label>
-          <label>
-            会议号
-            <input id="meetingNameInput" type="text" maxlength="80" placeholder="如 2026产品会" autocomplete="off">
-          </label>
-          <label>
-            源语言
-            <select id="languageInput">
-              <option value="" selected>自动识别</option>
-              <option value="zh">中文</option>
-              <option value="en">English</option>
-            </select>
-          </label>
-        </form>
-
-        <section class="hotword-panel" aria-label="会议热词表">
-          <div class="hotword-head">
-            <div>
-              <h2>会议热词文件</h2>
-              <p id="hotwordStatus" class="field-hint">服务端按会议号匹配 txt；开始时自动加载并锁定。</p>
-            </div>
-            <button id="refreshMeetingsButton" type="button">刷新</button>
-          </div>
-          <label>
-            选择已有热词文件
-            <select id="meetingSelectInput">
-              <option value="">手动填写会议号</option>
-            </select>
-          </label>
-        </section>
-
-        <section class="summary-panel" aria-label="会议总结">
-          <div class="summary-grid">
-            <label>
-              总结会议
-              <select id="summarySessionInput">
-                <option value="">暂无已结束会议</option>
-              </select>
-            </label>
-            <label>
-              总结模板
-              <select id="summaryTemplateInput">
-                <option value="auto" selected>自动判断</option>
-                <option value="project_meeting">项目会议</option>
-                <option value="customer_interview">客户访谈</option>
-                <option value="training_speech">培训 / 演讲</option>
-                <option value="discussion">讨论会</option>
-              </select>
-            </label>
-            <label>
-              下载版本
-              <select id="summaryVersionInput" disabled>
-                <option value="">最新版</option>
-              </select>
-            </label>
-            <button id="refreshSummarySessionsButton" type="button">刷新会议</button>
-          </div>
-          <p class="field-hint">每次生成都会保留新版本；决策和待办必须通过原文时间戳与引用校验。</p>
-        </section>
-
-        <div class="actions">
-          <button id="startButton" type="button">开始</button>
-          <button id="stopButton" type="button" disabled>停止</button>
-          <button id="exportLogButton" type="button">导出日志</button>
-          <button id="generateSummaryButton" type="button" disabled>生成总结</button>
-          <button id="downloadSummaryButton" type="button" disabled>下载总结</button>
-          <button id="clearLogButton" type="button">清空日志</button>
-        </div>
-
-        <div class="meta-grid">
-          <div>
-            <span>识别语言</span>
-            <strong id="languageStatus">等待中</strong>
+          <p class="eyebrow">WhisperLive</p>
+          <div class="meeting-heading">
+            <h1 id="meetingTitle">实时同传</h1>
+            <span id="connectionStatus" class="status idle">未连接</span>
           </div>
         </div>
-      </section>
+        <div class="topbar-meta" aria-label="当前状态">
+          <div class="meta-item"><span>识别语言</span><strong id="languageStatus">等待中</strong></div>
+          <div class="meta-item hotword-meta"><span>会议热词</span><strong id="hotwordStatus">未加载</strong></div>
+        </div>
+        <div class="topbar-actions">
+          <div class="session-controls">
+            <button id="startButton" class="primary-action" type="button"><span class="control-dot"></span>开始会议</button>
+            <button id="stopButton" class="stop-action" type="button" disabled>停止会议</button>
+          </div>
+          <div class="view-switcher" aria-label="显示模式">
+            <button type="button" class="view-mode active" data-view-mode="split">双栏</button>
+            <button type="button" class="view-mode" data-view-mode="interleaved">交错</button>
+            <button type="button" class="view-mode" data-view-mode="single">单栏</button>
+          </div>
+          <button id="settingsButton" class="icon-button" type="button" aria-label="打开设置" aria-expanded="false"><span aria-hidden="true">⚙</span></button>
+        </div>
+      </header>
 
-      <section class="transcript-grid" aria-label="同传内容">
-        <article class="pane source-pane">
-          <header>
-            <span>原文</span>
-            <button id="clearSourceButton" type="button">清空</button>
-          </header>
+      <section id="transcriptWorkspace" class="transcript-workspace mode-split" aria-label="同传内容">
+        <article class="transcript-pane source-pane" data-language-pane="source">
+          <header><div><span class="pane-kicker">SOURCE</span><h2 id="sourcePaneTitle">原文</h2></div><button id="clearSourceButton" class="text-button" type="button">清空</button></header>
           <div id="sourceText" class="text-stream muted">等待语音输入...</div>
         </article>
-
-        <article class="pane translation-pane">
-          <header>
-            <span>翻译</span>
-            <button id="clearTranslationButton" type="button">清空</button>
-          </header>
+        <article class="transcript-pane translation-pane" data-language-pane="translation">
+          <header><div><span class="pane-kicker">TRANSLATION</span><h2 id="translationPaneTitle">翻译</h2></div><button id="clearTranslationButton" class="text-button" type="button">清空</button></header>
           <div id="translationText" class="text-stream muted">等待翻译结果...</div>
         </article>
+        <article class="transcript-pane interleaved-pane" aria-label="原文译文交错">
+          <header><div><span class="pane-kicker">BILINGUAL</span><h2>双语对照</h2></div></header>
+          <div id="interleavedText" class="text-stream muted">等待语音输入...</div>
+        </article>
       </section>
+
     </main>
 
-    <script src="./app.js?v=trusted-summary-1"></script>
+    <div id="settingsBackdrop" class="drawer-backdrop" hidden></div>
+    <aside id="settingsDrawer" class="settings-drawer" aria-label="设置与工具" aria-hidden="true">
+      <header class="drawer-header">
+        <div><p class="eyebrow">CONTROL CENTER</p><h2>设置与工具</h2></div>
+        <button id="closeSettingsButton" class="icon-button" type="button" aria-label="关闭设置">×</button>
+      </header>
+      <div class="drawer-content">
+        <form id="settingsForm">
+          <section class="settings-section">
+            <div class="section-heading"><span>01</span><div><h3>连接与语言</h3><p>会议开始后这些配置将锁定。</p></div></div>
+            <div class="field-stack">
+              <label>WebSocket 地址<input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off"></label>
+              <label>源语言<select id="languageInput"><option value="" selected>自动识别</option><option value="zh">中文</option><option value="en">English</option></select></label>
+              <label class="toggle-field"><span><strong>启用翻译</strong><small>关闭后仅显示和记录识别原文。</small></span><input id="translationEnabledInput" type="checkbox" checked><span class="toggle" aria-hidden="true"></span></label>
+              <label id="translationDirectionField">翻译方向<select id="translationDirectionInput"><option value="auto" selected>自动中英互译</option><option value="en">中文 → English</option><option value="zh">English → 中文</option></select></label>
+            </div>
+          </section>
+          <section class="settings-section">
+            <div class="section-heading"><span>02</span><div><h3>会议与热词</h3><p>开始时加载对应热词文件并锁定快照。</p></div></div>
+            <div class="field-stack">
+              <label>会议名称<input id="meetingNameInput" type="text" maxlength="80" placeholder="如 2026产品会" autocomplete="off"></label>
+              <label>会议热词文件<select id="meetingSelectInput"><option value="">手动填写会议名称</option></select></label>
+              <button id="refreshMeetingsButton" class="secondary-button" type="button">刷新热词列表</button>
+            </div>
+          </section>
+          <section class="settings-section">
+            <div class="section-heading"><span>03</span><div><h3>显示设置</h3><p>显示方式可以在会议过程中随时切换。</p></div></div>
+            <div class="field-stack">
+              <label>内容布局<select id="displayModeInput"><option value="split">原文与翻译双栏</option><option value="interleaved">一句原文一句译文</option><option value="single">单语言显示</option></select></label>
+              <label id="singleLanguageField" hidden>单栏内容<select id="singleLanguageInput"><option value="source">只显示原文</option><option value="zh">只显示中文</option><option value="en">只显示 English</option><option value="translation">只显示翻译</option></select></label>
+            </div>
+          </section>
+        </form>
+        <section class="settings-section tool-section">
+          <div class="section-heading"><span>04</span><div><h3>日志与总结</h3><p>会议停止后可以生成可信总结并下载历史版本。</p></div></div>
+          <div class="tool-actions"><button id="exportLogButton" class="secondary-button" type="button">导出当前日志</button><button id="clearLogButton" class="ghost-button" type="button">清空当前会话状态</button></div>
+          <div class="field-stack summary-fields">
+            <label>总结会议<select id="summarySessionInput"><option value="">暂无已结束会议</option></select></label>
+            <label>总结模板<select id="summaryTemplateInput"><option value="auto" selected>自动判断</option><option value="project_meeting">项目会议</option><option value="customer_interview">客户访谈</option><option value="training_speech">培训 / 演讲</option><option value="discussion">讨论会</option></select></label>
+            <button id="refreshSummarySessionsButton" class="secondary-button" type="button">刷新会议列表</button>
+            <button id="generateSummaryButton" class="primary-button" type="button" disabled>生成总结</button>
+            <label>下载版本<select id="summaryVersionInput" disabled><option value="">最新版</option></select></label>
+            <button id="downloadSummaryButton" class="secondary-button" type="button" disabled>下载总结</button>
+          </div>
+          <p id="toolStatus" class="tool-status">每次生成都会保留新版本。</p>
+        </section>
+      </div>
+    </aside>
+    <script src="./app.js?v=immersive-dark-5"></script>
   </body>
 </html>

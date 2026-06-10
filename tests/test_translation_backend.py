@@ -415,6 +415,68 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         segment = payload["translated_segments"][0]
         self.assertEqual(segment["text"], "translated:你好世界")
 
+    def test_short_translation_buffer_flushes_after_timeout(self):
+        client = self.make_client(
+            translation_min_chars=12,
+            translation_max_chars=100,
+            translation_max_wait_seconds=1.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "And",
+            "completed": True,
+            "language": "en",
+        })
+        client.translation_buffer_started_at -= 2.0
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "translated:And")
+        self.assertEqual(client.translation_buffer, [])
+
+    def test_translation_preserves_single_utterance_id(self):
+        client = self.make_client(translation_max_chars=4)
+        for start, end, text in (("0.000", "0.500", "你好"), ("0.500", "1.000", "世界")):
+            client.add_segment_to_translation_buffer({
+                "start": start,
+                "end": end,
+                "text": text,
+                "completed": True,
+                "language": "zh",
+                "utterance_id": "client:1:0.000",
+            })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["utterance_id"], "client:1:0.000")
+        self.assertEqual(segment["source_utterance_ids"], ["client:1:0.000"])
+
+    def test_translation_preserves_multiple_source_utterance_ids(self):
+        client = self.make_client(translation_max_chars=4)
+        for start, end, text, utterance_id in (
+            ("0.000", "0.500", "你好", "client:1:0.000"),
+            ("0.500", "1.000", "世界", "client:2:0.500"),
+        ):
+            client.add_segment_to_translation_buffer({
+                "start": start,
+                "end": end,
+                "text": text,
+                "completed": True,
+                "language": "zh",
+                "utterance_id": utterance_id,
+            })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(
+            segment["source_utterance_ids"],
+            ["client:1:0.000", "client:2:0.500"],
+        )
+        self.assertNotIn("utterance_id", segment)
+
     def test_english_segments_are_joined_with_spaces(self):
         client = self.make_client(translation_max_chars=10)
         client.add_segment_to_translation_buffer({

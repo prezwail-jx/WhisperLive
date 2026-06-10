@@ -445,7 +445,6 @@ class ServeClientTranslation(ServeClientBase):
             return True
         if (
             self.translation_buffer_started_at is not None
-            and len(text) >= self.translation_min_chars
             and time.monotonic() - self.translation_buffer_started_at >= self.translation_max_wait_seconds
         ):
             return True
@@ -526,6 +525,15 @@ class ServeClientTranslation(ServeClientBase):
             "target_language": target_language,
             "translation_model": self.model_name,
         }
+        utterance_ids = list(dict.fromkeys(
+            segment.get("utterance_id")
+            for segment in buffered_segments
+            if segment.get("utterance_id")
+        ))
+        if utterance_ids:
+            translated_segment["source_utterance_ids"] = utterance_ids
+        if len(utterance_ids) == 1:
+            translated_segment["utterance_id"] = utterance_ids[0]
 
         self.translated_segments.append(translated_segment)
         segments_to_send = self.prepare_translated_segments()

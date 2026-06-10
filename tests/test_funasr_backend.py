@@ -532,6 +532,31 @@ class TestServeClientFunASR(unittest.TestCase):
 
     @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
     @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
+    def test_split_final_segments_share_utterance_id(self, mock_cuda_available):
+        websocket = mock.Mock()
+        with mock.patch.object(ServeClientFunASR, "create_model", autospec=True) as create_model:
+            create_model.side_effect = lambda client: setattr(client, "transcriber", mock.Mock())
+            client = ServeClientFunASR(
+                websocket=websocket,
+                client_uid="client",
+                mode="paraformer_streaming",
+                final_refine=False,
+                use_vad=False,
+            )
+
+        client.speech_start_time = 1.25
+        client._begin_utterance()
+        partial = client._format_utterance_segment(1.25, 2.0, "临时字幕", completed=False)
+        final_segments = client._segments_from_text_parts(1.25, 3.25, ["第一段。", "第二段。"])
+
+        self.assertEqual(len(final_segments), 2)
+        self.assertEqual(partial["utterance_id"], final_segments[0]["utterance_id"])
+        self.assertEqual(final_segments[0]["utterance_id"], final_segments[1]["utterance_id"])
+        client._reset_speech_state()
+        self.assertIsNone(client.current_utterance_id)
+
+    @mock.patch("whisper_live.backend.funasr_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.funasr_backend.torch.cuda.is_available", return_value=False)
     def test_streaming_final_weak_boundary_list_is_conservative(self, mock_cuda_available):
         websocket = mock.Mock()
         transcriber = mock.Mock()

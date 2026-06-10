@@ -24,6 +24,23 @@ const elements = {
   translationText: document.getElementById("translationText"),
   clearSource: document.getElementById("clearSourceButton"),
   clearTranslation: document.getElementById("clearTranslationButton"),
+  settingsButton: document.getElementById("settingsButton"),
+  closeSettings: document.getElementById("closeSettingsButton"),
+  settingsDrawer: document.getElementById("settingsDrawer"),
+  settingsBackdrop: document.getElementById("settingsBackdrop"),
+  meetingTitle: document.getElementById("meetingTitle"),
+  transcriptWorkspace: document.getElementById("transcriptWorkspace"),
+  interleavedText: document.getElementById("interleavedText"),
+  sourcePaneTitle: document.getElementById("sourcePaneTitle"),
+  translationPaneTitle: document.getElementById("translationPaneTitle"),
+  translationEnabled: document.getElementById("translationEnabledInput"),
+  translationDirection: document.getElementById("translationDirectionInput"),
+  translationDirectionField: document.getElementById("translationDirectionField"),
+  displayMode: document.getElementById("displayModeInput"),
+  singleLanguage: document.getElementById("singleLanguageInput"),
+  singleLanguageField: document.getElementById("singleLanguageField"),
+  toolStatus: document.getElementById("toolStatus"),
+  viewModeButtons: Array.from(document.querySelectorAll("[data-view-mode]")),
 };
 
 let socket = null;
@@ -35,6 +52,9 @@ let uid = null;
 let isServerReady = false;
 let sourceSegments = [];
 let translatedSegments = [];
+const sourceSegmentStore = new Map();
+const translationSegmentStore = new Map();
+const translatedSourceIds = new Set();
 let currentSessionId = null;
 let currentSessionStartedAt = null;
 let currentConfig = null;
@@ -46,10 +66,14 @@ let selectedSummarySessionStatus = null;
 let summaryVersions = [];
 let lockedHotwords = { hotwords: "", filename: "", count: 0 };
 let clientInstanceId = null;
+let displayMode = "split";
+let singleLanguageMode = "source";
+let detectedSourceLanguage = null;
 
 const DEFAULT_BACKEND = "faster_whisper";
 const DEFAULT_MODEL = "model/asr/small";
-const DEFAULT_DISPLAY_SEGMENTS = 8;
+const DEFAULT_DISPLAY_SEGMENTS = 16;
+const MAX_SESSION_SEGMENTS = 500;
 
 function getDisplayLimit() {
   return DEFAULT_DISPLAY_SEGMENTS;
@@ -87,9 +111,22 @@ function initializeDefaults() {
   }
   clientInstanceId = getClientInstanceId();
   const savedMeeting = window.localStorage.getItem("whisperlive_meeting_name");
-  if (savedMeeting && !elements.meetingName.value) {
-    elements.meetingName.value = savedMeeting;
-  }
+  const savedServer = window.localStorage.getItem("whisperlive_server_url");
+  const savedLanguage = window.localStorage.getItem("whisperlive_source_language");
+  const savedTranslationEnabled = window.localStorage.getItem("whisperlive_translation_enabled");
+  const savedTranslationDirection = window.localStorage.getItem("whisperlive_translation_direction");
+  displayMode = window.localStorage.getItem("whisperlive_display_mode") || "split";
+  singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "source";
+  if (savedMeeting && !elements.meetingName.value) elements.meetingName.value = savedMeeting;
+  if (savedServer) elements.server.value = savedServer;
+  if (savedLanguage !== null) elements.language.value = savedLanguage;
+  if (savedTranslationEnabled !== null) elements.translationEnabled.checked = savedTranslationEnabled === "true";
+  if (savedTranslationDirection) elements.translationDirection.value = savedTranslationDirection;
+  elements.displayMode.value = displayMode;
+  elements.singleLanguage.value = singleLanguageMode;
+  updateTranslationControls();
+  setDisplayMode(displayMode);
+  updateMeetingTitle();
   updateHotwordStatus("等待开始时加载会议热词文件");
   loadMeetingOptions().catch(() => {
     updateHotwordStatus("热词文件列表暂不可用，可手动填写会议号");
@@ -113,7 +150,50 @@ function hotwordPromptFromText(text) {
 }
 
 function updateHotwordStatus(text = "") {
-  elements.hotwordStatus.textContent = text || "服务端按会议号匹配 txt；开始时自动加载并锁定。";
+  elements.hotwordStatus.textContent = text || "等待加载";
+}
+
+function updateMeetingTitle() {
+  elements.meetingTitle.textContent = elements.meetingName.value.trim() || "实时同传";
+}
+
+function setToolStatus(text, state = "") {
+  if (!elements.toolStatus) return;
+  elements.toolStatus.textContent = text;
+  elements.toolStatus.className = `tool-status ${state}`.trim();
+}
+
+function openSettings() {
+  elements.settingsBackdrop.hidden = false;
+  requestAnimationFrame(() => elements.settingsBackdrop.classList.add("visible"));
+  elements.settingsDrawer.classList.add("open");
+  elements.settingsDrawer.setAttribute("aria-hidden", "false");
+  elements.settingsButton.setAttribute("aria-expanded", "true");
+  document.body.classList.add("drawer-open");
+}
+
+function closeSettings() {
+  elements.settingsBackdrop.classList.remove("visible");
+  elements.settingsDrawer.classList.remove("open");
+  elements.settingsDrawer.setAttribute("aria-hidden", "true");
+  elements.settingsButton.setAttribute("aria-expanded", "false");
+  document.body.classList.remove("drawer-open");
+  window.setTimeout(() => {
+    if (!elements.settingsDrawer.classList.contains("open")) elements.settingsBackdrop.hidden = true;
+  }, 240);
+}
+
+function updateTranslationControls() {
+  const enabled = elements.translationEnabled.checked;
+  elements.translationDirection.disabled = !enabled;
+  elements.translationDirectionField.classList.toggle("disabled", !enabled);
+}
+
+function normalizeLanguage(value) {
+  const language = String(value || "").toLowerCase();
+  if (language === "zh" || language.startsWith("zh-")) return "zh";
+  if (language === "en" || language.startsWith("en-")) return "en";
+  return language || null;
 }
 
 function hotwordApiBaseUrl() {
@@ -302,6 +382,7 @@ async function exportMeetingLog() {
   const fallback = `${filenamePrefix || "meeting-log"}-${currentSessionStartedAt || new Date().toISOString()}.md`.replace(/[:.]/g, "-");
   downloadBlob(filenameFromContentDisposition(response.headers.get("Content-Disposition"), fallback), blob);
   setStatus("后端日志已下载", "ready");
+  setToolStatus("当前会议日志已下载。", "success");
 }
 
 async function generateSummary() {
@@ -319,6 +400,7 @@ async function generateSummary() {
     summaryGenerated = true;
     await loadSummaryInfo(selectedSummarySessionId);
     setStatus(result.summary && result.summary.latest_version > 1 ? "总结已重新生成" : "总结已生成", "ready");
+    setToolStatus(result.summary && result.summary.latest_version > 1 ? "总结新版本已生成。" : "总结已生成。", "success");
     return result;
   } finally {
     summaryGenerating = false; updateSummaryButtons();
@@ -334,6 +416,7 @@ async function downloadSummary() {
   const fallback = `meeting-summary-${selectedSummarySessionId}${version ? `-v${version}` : ""}.md`;
   downloadBlob(filenameFromContentDisposition(response.headers.get("Content-Disposition"), fallback), blob);
   setStatus("总结已下载", "ready");
+  setToolStatus("总结文件已下载。", "success");
 }
 
 function updateSummaryButtons() {
@@ -352,30 +435,386 @@ function clearMeetingLog() {
   currentSessionStartedAt = null;
   hasStoppedCurrentSession = false;
   summaryGenerating = false;
+  clearTranscriptState();
+  renderTranscriptViews();
   updateSummaryButtons();
 }
 
 
-function renderSegments(target, segments, emptyText) {
-  const displaySegments = segments.slice(-getDisplayLimit());
+function segmentTimeValue(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
 
+function sourceSegmentStoreKey(segment) {
+  const utteranceId = String(segment?.utterance_id || "").trim();
+  if (utteranceId) {
+    if (segment.completed === false) return `source-draft:${utteranceId}`;
+    return `source-final:${utteranceId}:${segmentTimeValue(segment.start).toFixed(3)}:${segmentTimeValue(segment.end).toFixed(3)}`;
+  }
+  if (segment.completed === false) return "source-draft:fallback";
+  return `source-final:${segmentTimeValue(segment.start).toFixed(3)}:${segmentTimeValue(segment.end).toFixed(3)}`;
+}
+
+function translationSegmentStoreKey(segment) {
+  const sourceIds = (segment?.source_utterance_ids || [segment?.utterance_id])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(",");
+  return `translation:${sourceIds}:${segmentTimeValue(segment?.start).toFixed(3)}:${segmentTimeValue(segment?.end).toFixed(3)}`;
+}
+
+function sortSegmentsByTime(segments) {
+  return segments.sort((left, right) => {
+    const startDelta = segmentTimeValue(left.start) - segmentTimeValue(right.start);
+    if (startDelta) return startDelta;
+    const endDelta = segmentTimeValue(left.end) - segmentTimeValue(right.end);
+    if (endDelta) return endDelta;
+    return Number(left.completed !== false) - Number(right.completed !== false);
+  });
+}
+
+function pruneSegmentStore(store) {
+  if (store.size <= MAX_SESSION_SEGMENTS) return;
+  const ordered = Array.from(store.entries()).sort(([, left], [, right]) => {
+    const startDelta = segmentTimeValue(left.start) - segmentTimeValue(right.start);
+    if (startDelta) return startDelta;
+    return segmentTimeValue(left.end) - segmentTimeValue(right.end);
+  });
+  ordered.slice(0, ordered.length - MAX_SESSION_SEGMENTS).forEach(([key]) => store.delete(key));
+}
+
+function rebuildTranslatedSourceIds() {
+  translatedSourceIds.clear();
+  translationSegmentStore.forEach((segment) => {
+    (segment.source_utterance_ids || [segment.utterance_id])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .forEach((utteranceId) => translatedSourceIds.add(utteranceId));
+  });
+}
+
+function syncSegmentArrays() {
+  sourceSegments = sortSegmentsByTime(Array.from(sourceSegmentStore.values()));
+  translatedSegments = sortSegmentsByTime(Array.from(translationSegmentStore.values()));
+  rebuildTranslatedSourceIds();
+}
+
+function mergeSourceSnapshot(segments) {
+  const incoming = Array.isArray(segments) ? segments : [];
+
+  // A server snapshot contains the current draft. Remove the previous draft,
+  // then add the new one while retaining all completed history.
+  sourceSegmentStore.forEach((segment, key) => {
+    if (segment.completed === false) sourceSegmentStore.delete(key);
+  });
+
+  incoming.forEach((segment) => {
+    const copy = { ...segment };
+    sourceSegmentStore.set(sourceSegmentStoreKey(copy), copy);
+  });
+  pruneSegmentStore(sourceSegmentStore);
+  syncSegmentArrays();
+}
+
+function mergeTranslationSnapshot(segments) {
+  const incoming = Array.isArray(segments) ? segments : [];
+  incoming.forEach((segment) => {
+    const copy = {
+      ...segment,
+      source_utterance_ids: Array.isArray(segment.source_utterance_ids)
+        ? segment.source_utterance_ids.slice()
+        : segment.source_utterance_ids,
+    };
+    translationSegmentStore.set(translationSegmentStoreKey(copy), copy);
+  });
+  pruneSegmentStore(translationSegmentStore);
+  syncSegmentArrays();
+}
+
+function clearSourceSegmentState() {
+  sourceSegmentStore.clear();
+  sourceSegments = [];
+}
+
+function clearTranslationSegmentState() {
+  translationSegmentStore.clear();
+  translatedSourceIds.clear();
+  translatedSegments = [];
+}
+
+function clearTranscriptState() {
+  clearSourceSegmentState();
+  clearTranslationSegmentState();
+}
+
+function segmentGroupKey(segment, index) {
+  const utteranceId = String(segment?.utterance_id || "").trim();
+  if (utteranceId) return `utterance:${utteranceId}`;
+  return `segment:${index}:${segment?.start ?? ""}:${segment?.end ?? ""}`;
+}
+
+function joinDisplayText(previous, current) {
+  const left = String(previous || "").trim();
+  const right = String(current || "").trim();
+  if (!left) return right;
+  if (!right) return left;
+  const needsSpace = /[A-Za-z0-9]$/.test(left) && /^[A-Za-z0-9]/.test(right);
+  return `${left}${needsSpace ? " " : ""}${right}`;
+}
+
+function groupSegmentsForDisplay(segments) {
+  const groups = [];
+  segments.forEach((segment, index) => {
+    const key = segmentGroupKey(segment, index);
+    const previous = groups.at(-1);
+    if (previous && previous.group_key === key && segment.utterance_id) {
+      previous.text = joinDisplayText(previous.text, segment.text);
+      previous.end = segment.end;
+      previous.completed = previous.completed !== false && segment.completed !== false;
+      return;
+    }
+    groups.push({ ...segment, group_key: key, text: String(segment.text || "").trim() });
+  });
+  return groups;
+}
+
+function renderSegments(target, segments, emptyText) {
+  const displaySegments = groupSegmentsForDisplay(segments).slice(-getDisplayLimit());
   if (!displaySegments.length) {
     target.textContent = emptyText;
     target.classList.add("muted");
+    target.dataset.lastGroupKey = "";
     return;
   }
-
+  const previousLastGroupKey = target.dataset.lastGroupKey || "";
+  const nextLastGroupKey = displaySegments.at(-1)?.group_key || "";
   target.classList.remove("muted");
   target.innerHTML = "";
   const fragment = document.createDocumentFragment();
   displaySegments.forEach((segment) => {
     const paragraph = document.createElement("p");
     paragraph.className = `segment${segment.completed ? "" : " incomplete"}`;
-    paragraph.textContent = segment.text.trim();
+    paragraph.textContent = String(segment.text || "").trim();
     fragment.appendChild(paragraph);
   });
   target.appendChild(fragment);
-  target.scrollTop = target.scrollHeight;
+  if (previousLastGroupKey !== nextLastGroupKey || target.scrollTop + target.clientHeight >= target.scrollHeight - 24) {
+    target.scrollTop = target.scrollHeight;
+  }
+  target.dataset.lastGroupKey = nextLastGroupKey;
+}
+
+function overlapDuration(left, right) {
+  const leftStart = Number(left.start);
+  const leftEnd = Number(left.end);
+  const rightStart = Number(right.start);
+  const rightEnd = Number(right.end);
+  if (![leftStart, leftEnd, rightStart, rightEnd].every(Number.isFinite)) return 0;
+  return Math.max(0, Math.min(leftEnd, rightEnd) - Math.max(leftStart, rightStart));
+}
+
+function interleavedSourceKey(source, index) {
+  const utteranceId = String(source?.utterance_id || "").trim();
+  if (utteranceId) return `source-utterance:${utteranceId}`;
+  return `source-start:${Number(source?.start || 0).toFixed(3)}:${Number(source?.end || 0).toFixed(3)}`;
+}
+
+function translationSourceIds(translation) {
+  return (translation.source_utterance_ids || [translation.utterance_id])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function matchedSourceIndexes(sources, translation) {
+  const sourceIds = new Set(translationSourceIds(translation));
+  if (sourceIds.size) {
+    const indexes = sources
+      .map((source, index) => sourceIds.has(String(source.utterance_id || "").trim()) ? index : -1)
+      .filter((index) => index >= 0);
+    if (indexes.length === sourceIds.size) return indexes;
+    return [];
+  }
+  return sources
+    .map((source, index) => overlapDuration(source, translation) > 0 ? index : -1)
+    .filter((index) => index >= 0);
+}
+
+function areIndexesContiguous(indexes) {
+  return indexes.every((value, index) => index === 0 || value === indexes[index - 1] + 1);
+}
+
+function interleavedTranslationKey(translation, sourceIndexes) {
+  const sourceIds = translationSourceIds(translation);
+  if (sourceIds.length) return `translation-group:${sourceIds.join(",")}`;
+  return `translation-range:${Number(translation.start || 0).toFixed(3)}:${Number(translation.end || 0).toFixed(3)}:${sourceIndexes.join(",")}`;
+}
+
+function buildInterleavedCompletedRows(sources, translations) {
+  const rows = [];
+  const consumedSourceIndexes = new Set();
+  const unmatchedTranslations = [];
+
+  translations.forEach((translation) => {
+    const indexes = matchedSourceIndexes(sources, translation)
+      .filter((index) => !consumedSourceIndexes.has(index));
+    if (!indexes.length || !areIndexesContiguous(indexes)) {
+      unmatchedTranslations.push(translation);
+      return;
+    }
+
+    const matchedSources = indexes.map((index) => sources[index]);
+    const sourceText = matchedSources
+      .map((source) => String(source.text || "").trim())
+      .filter(Boolean)
+      .reduce(joinDisplayText, "");
+    indexes.forEach((index) => consumedSourceIndexes.add(index));
+    rows.push({
+      key: interleavedTranslationKey(translation, indexes),
+      start: Number(matchedSources[0]?.start ?? translation.start) || 0,
+      source: sourceText,
+      translation: String(translation.text || "").trim(),
+      pending: false,
+    });
+  });
+
+  sources.forEach((source, index) => {
+    if (consumedSourceIndexes.has(index)) return;
+    rows.push({
+      key: interleavedSourceKey(source, index),
+      start: Number(source.start) || 0,
+      source: String(source.text || "").trim(),
+      translation: "翻译中...",
+      pending: true,
+    });
+  });
+
+  unmatchedTranslations.forEach((translation, index) => {
+    if (translationSourceIds(translation).length) return;
+    rows.push({
+      key: `translation:${translation.group_key || index}`,
+      start: Number(translation.start) || 0,
+      source: "（原文片段处理中）",
+      translation: String(translation.text || "").trim(),
+      pending: false,
+    });
+  });
+
+  return rows;
+}
+
+function updateInterleavedRow(container, row) {
+  let source = container.querySelector(".interleaved-source");
+  let translation = container.querySelector(".interleaved-translation");
+  if (!source || !translation) {
+    source = document.createElement("p");
+    source.className = "interleaved-source";
+    translation = document.createElement("p");
+    translation.className = "interleaved-translation";
+    container.replaceChildren(source, translation);
+  }
+  source.textContent = row.source || "（原文片段处理中）";
+  translation.className = `interleaved-translation${row.pending ? " pending" : ""}`;
+  translation.textContent = row.translation;
+}
+
+function renderInterleavedRows(rows) {
+  const target = elements.interleavedText;
+  const wasNearBottom = target.scrollTop + target.clientHeight >= target.scrollHeight - 24;
+  if (!target.querySelector(".interleaved-row")) {
+    target.replaceChildren();
+  }
+  const existing = new Map(
+    Array.from(target.querySelectorAll(".interleaved-row[data-row-key]"))
+      .map((node) => [node.dataset.rowKey, node])
+  );
+  const visibleKeys = new Set(rows.map((row) => row.key));
+
+  existing.forEach((node, key) => {
+    if (!visibleKeys.has(key)) node.remove();
+  });
+
+  rows.forEach((row) => {
+    let container = existing.get(row.key);
+    if (!container) {
+      container = document.createElement("section");
+      container.className = "interleaved-row";
+      container.dataset.rowKey = row.key;
+    }
+    updateInterleavedRow(container, row);
+    target.appendChild(container);
+  });
+
+  if (wasNearBottom) {
+    target.scrollTop = target.scrollHeight;
+  }
+}
+
+function renderInterleaved() {
+  const completedSources = groupSegmentsForDisplay(sourceSegments.filter((item) => item.completed !== false));
+  const displayTranslations = groupSegmentsForDisplay(translatedSegments);
+  const rows = buildInterleavedCompletedRows(completedSources, displayTranslations);
+  const latestIncomplete = groupSegmentsForDisplay(sourceSegments.filter((item) => item.completed === false)).slice(-1)[0];
+  if (latestIncomplete && latestIncomplete.text) {
+    rows.push({
+      key: String(latestIncomplete.utterance_id || "").trim()
+        ? interleavedSourceKey(latestIncomplete, completedSources.length)
+        : "source-draft",
+      start: Number(latestIncomplete.start) || Number.MAX_SAFE_INTEGER,
+      source: latestIncomplete.text.trim(),
+      translation: "识别中...",
+      pending: true,
+    });
+  }
+  rows.sort((left, right) => left.start - right.start);
+  const visibleRows = rows.slice(-getDisplayLimit());
+  if (!visibleRows.length) {
+    elements.interleavedText.textContent = "等待语音输入...";
+    elements.interleavedText.classList.add("muted");
+    return;
+  }
+  elements.interleavedText.classList.remove("muted");
+  renderInterleavedRows(visibleRows);
+}
+
+function resolveSingleLanguageStream() {
+  if (singleLanguageMode === "source") return { segments: sourceSegments, title: "原文", pane: "source" };
+  if (singleLanguageMode === "translation") return { segments: translatedSegments, title: "翻译", pane: "translation" };
+  const sourceLanguage = normalizeLanguage(detectedSourceLanguage || elements.language.value);
+  const translatedLanguage = normalizeLanguage(translatedSegments.at(-1)?.target_language);
+  if (singleLanguageMode === sourceLanguage) return { segments: sourceSegments, title: singleLanguageMode === "zh" ? "中文" : "English", pane: "source" };
+  if (singleLanguageMode === translatedLanguage) return { segments: translatedSegments, title: singleLanguageMode === "zh" ? "中文" : "English", pane: "translation" };
+  return { segments: [], title: singleLanguageMode === "zh" ? "中文" : "English", pane: "source" };
+}
+
+function renderTranscriptViews() {
+  elements.sourcePaneTitle.textContent = "原文";
+  elements.translationPaneTitle.textContent = "翻译";
+  renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
+  renderSegments(elements.translationText, translatedSegments, elements.translationEnabled.checked ? "等待翻译结果..." : "翻译已关闭");
+  renderInterleaved();
+  elements.transcriptWorkspace.classList.remove("show-translation");
+  if (displayMode === "single") {
+    const selected = resolveSingleLanguageStream();
+    if (selected.pane === "translation") {
+      elements.translationPaneTitle.textContent = selected.title;
+      elements.transcriptWorkspace.classList.add("show-translation");
+      renderSegments(elements.translationText, selected.segments, `等待${selected.title}内容...`);
+    } else {
+      elements.sourcePaneTitle.textContent = selected.title;
+      renderSegments(elements.sourceText, selected.segments, `等待${selected.title}内容...`);
+    }
+  }
+}
+
+function setDisplayMode(mode) {
+  displayMode = ["split", "interleaved", "single"].includes(mode) ? mode : "split";
+  window.localStorage.setItem("whisperlive_display_mode", displayMode);
+  elements.displayMode.value = displayMode;
+  elements.singleLanguageField.hidden = displayMode !== "single";
+  elements.transcriptWorkspace.className = `transcript-workspace mode-${displayMode}`;
+  elements.viewModeButtons.forEach((button) => button.classList.toggle("active", button.dataset.viewMode === displayMode));
+  renderTranscriptViews();
 }
 
 function handleMessage(event) {
@@ -402,17 +841,18 @@ function handleMessage(event) {
   }
 
   if (message.language) {
+    detectedSourceLanguage = message.language;
     elements.languageStatus.textContent = `${message.language} (${Number(message.language_prob || 0).toFixed(2)})`;
   }
 
   if (message.segments) {
-    sourceSegments = message.segments.slice();
-    renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
+    mergeSourceSnapshot(message.segments);
+    renderTranscriptViews();
   }
 
   if (message.translated_segments) {
-    translatedSegments = message.translated_segments.slice();
-    renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
+    mergeTranslationSnapshot(message.translated_segments);
+    renderTranscriptViews();
   }
 }
 
@@ -466,14 +906,19 @@ function sendConfig(event) {
     task: "transcribe",
     model: DEFAULT_MODEL,
     use_vad: true,
+    vad_parameters: {
+      threshold: 0.5,
+      min_silence_duration_ms: 600,
+      speech_pad_ms: 300,
+    },
     send_last_n_segments: DEFAULT_DISPLAY_SEGMENTS,
     no_speech_thresh: 0.45,
     clip_audio: false,
-    same_output_threshold: 2,
+    same_output_threshold: 5,
     min_segment_rms: 0.002,
     max_incomplete_segment_seconds: 0.0,
-    enable_translation: true,
-    target_language: "auto",
+    enable_translation: elements.translationEnabled.checked,
+    target_language: elements.translationDirection.value || "auto",
     translation_provider: "helsinki_zh_en",
     zh_en_model_path: "model/opus-mt-zh-en",
     en_zh_model_path: "model/opus-mt-en-zh",
@@ -509,20 +954,18 @@ async function startCapture() {
   renderSummaryVersions();
   if (elements.summarySession) elements.summarySession.value = "";
   updateSummaryButtons();
-  sourceSegments = [];
-  translatedSegments = [];
-  renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
-  renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
+  clearTranscriptState();
+  detectedSourceLanguage = null;
+  renderTranscriptViews();
   const meetingName = elements.meetingName.value.trim();
   if (meetingName) {
     window.localStorage.setItem("whisperlive_meeting_name", meetingName);
+  updateMeetingTitle();
   }
   try {
     lockedHotwords = await fetchMeetingHotwordSnapshot(meetingName);
     updateHotwordStatus(
-      lockedHotwords.filename
-        ? `已锁定热词文件 ${lockedHotwords.filename}，${lockedHotwords.count} 个热词`
-        : "未找到会议热词文件，本次使用默认热词"
+      lockedHotwords.filename ? `${lockedHotwords.filename} · ${lockedHotwords.count} 个` : "使用默认热词"
     );
   } catch (error) {
     lockedHotwords = { hotwords: "", filename: "", count: 0 };
@@ -561,11 +1004,14 @@ async function startCapture() {
 
   elements.start.disabled = true;
   elements.stop.disabled = false;
-  elements.form.querySelectorAll("input, select").forEach((item) => {
-    item.disabled = true;
-  });
-  elements.meetingName.disabled = true;
-  if (elements.meetingSelect) elements.meetingSelect.disabled = true;
+  [
+    elements.server,
+    elements.language,
+    elements.meetingName,
+    elements.translationEnabled,
+    elements.translationDirection,
+    elements.meetingSelect,
+  ].filter(Boolean).forEach((item) => { item.disabled = true; });
   if (elements.refreshMeetings) elements.refreshMeetings.disabled = true;
 }
 
@@ -606,13 +1052,42 @@ function stopCapture(sendEnd = true) {
   isServerReady = false;
   elements.start.disabled = false;
   elements.stop.disabled = true;
-  elements.form.querySelectorAll("input, select").forEach((item) => {
-    item.disabled = false;
-  });
-  elements.meetingName.disabled = false;
-  if (elements.meetingSelect) elements.meetingSelect.disabled = false;
+  [
+    elements.server,
+    elements.language,
+    elements.meetingName,
+    elements.translationEnabled,
+    elements.meetingSelect,
+  ].filter(Boolean).forEach((item) => { item.disabled = false; });
+  updateTranslationControls();
   if (elements.refreshMeetings) elements.refreshMeetings.disabled = false;
 }
+
+elements.settingsButton.addEventListener("click", openSettings);
+elements.closeSettings.addEventListener("click", closeSettings);
+elements.settingsBackdrop.addEventListener("click", closeSettings);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeSettings();
+});
+elements.viewModeButtons.forEach((button) => {
+  button.addEventListener("click", () => setDisplayMode(button.dataset.viewMode));
+});
+elements.displayMode.addEventListener("change", () => setDisplayMode(elements.displayMode.value));
+elements.singleLanguage.addEventListener("change", () => {
+  singleLanguageMode = elements.singleLanguage.value;
+  window.localStorage.setItem("whisperlive_single_language", singleLanguageMode);
+  renderTranscriptViews();
+});
+elements.translationEnabled.addEventListener("change", () => {
+  window.localStorage.setItem("whisperlive_translation_enabled", String(elements.translationEnabled.checked));
+  updateTranslationControls();
+  renderTranscriptViews();
+});
+elements.translationDirection.addEventListener("change", () => {
+  window.localStorage.setItem("whisperlive_translation_direction", elements.translationDirection.value);
+});
+elements.server.addEventListener("change", () => window.localStorage.setItem("whisperlive_server_url", elements.server.value.trim()));
+elements.language.addEventListener("change", () => window.localStorage.setItem("whisperlive_source_language", elements.language.value));
 
 elements.start.addEventListener("click", () => {
   startCapture().catch((error) => {
@@ -631,6 +1106,7 @@ elements.exportLog.addEventListener("click", () => {
   exportMeetingLog().catch((error) => {
     console.error(error);
     setStatus("日志导出失败", "error");
+    setToolStatus(`日志导出失败：${error.message}`, "error");
   });
 });
 if (elements.generateSummary) {
@@ -638,6 +1114,7 @@ if (elements.generateSummary) {
     generateSummary().catch((error) => {
       console.error(error);
       setStatus("总结生成失败", "error");
+      setToolStatus(`总结生成失败：${error.message}`, "error");
     });
   });
 }
@@ -646,6 +1123,7 @@ if (elements.downloadSummary) {
     downloadSummary().catch((error) => {
       console.error(error);
       setStatus("总结下载失败", "error");
+      setToolStatus(`总结下载失败：${error.message}`, "error");
     });
   });
 }
@@ -677,6 +1155,7 @@ elements.meetingName.addEventListener("change", () => {
     const exists = Array.from(elements.meetingSelect.options).some((option) => option.value === meetingName);
     elements.meetingSelect.value = meetingName && exists ? meetingName : "";
   }
+  updateMeetingTitle();
   updateHotwordStatus("等待开始时加载会议热词文件");
 });
 
@@ -685,6 +1164,7 @@ if (elements.meetingSelect) {
     if (!elements.meetingSelect.value) return;
     elements.meetingName.value = elements.meetingSelect.value;
     window.localStorage.setItem("whisperlive_meeting_name", elements.meetingName.value.trim());
+    updateMeetingTitle();
     updateHotwordStatus("等待开始时加载会议热词文件");
   });
 }
@@ -699,13 +1179,13 @@ if (elements.refreshMeetings) {
 
 
 elements.clearSource.addEventListener("click", () => {
-  sourceSegments = [];
-  renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
+  clearSourceSegmentState();
+  renderTranscriptViews();
 });
 
 elements.clearTranslation.addEventListener("click", () => {
-  translatedSegments = [];
-  renderSegments(elements.translationText, translatedSegments, "等待翻译结果...");
+  clearTranslationSegmentState();
+  renderTranscriptViews();
 });
 
 updateSummaryButtons();
