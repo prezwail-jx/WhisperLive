@@ -64,7 +64,7 @@ let summaryGenerating = false;
 let selectedSummarySessionId = null;
 let selectedSummarySessionStatus = null;
 let summaryVersions = [];
-let lockedHotwords = { hotwords: "", filename: "", count: 0 };
+let lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0 };
 let clientInstanceId = null;
 let displayMode = "split";
 let singleLanguageMode = "source";
@@ -134,19 +134,32 @@ function initializeDefaults() {
   loadSummarySessions().catch(() => {});
 }
 
+function parseHotwordText(text) {
+  const hotwords = [];
+  let translationCount = 0;
+  String(text || "").split(/\r?\n/).forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) return;
+    if (!line.includes("=>")) {
+      hotwords.push(line);
+      return;
+    }
+    const separator = line.indexOf("=>");
+    const source = line.slice(0, separator).trim();
+    const target = line.slice(separator + 2).trim();
+    if (!source || !target) return;
+    hotwords.push(source);
+    translationCount += 1;
+  });
+  return { hotwords, translationCount };
+}
+
 function countHotwordText(text) {
-  return String(text || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#")).length;
+  return parseHotwordText(text).hotwords.length;
 }
 
 function hotwordPromptFromText(text) {
-  return String(text || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"))
-    .join(" ");
+  return parseHotwordText(text).hotwords.join(" ");
 }
 
 function updateHotwordStatus(text = "") {
@@ -329,16 +342,18 @@ async function loadMeetingOptions() {
 
 async function fetchMeetingHotwordSnapshot(meetingName) {
   if (!meetingName) {
-    return { hotwords: "", filename: "", count: 0 };
+    return { hotwords: "", filename: "", count: 0, translationCount: 0 };
   }
   const response = await fetch(hotwordApiUrl(meetingName), { cache: "no-store" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const data = await response.json();
   const text = data.text || "";
+  const parsed = parseHotwordText(text);
   return {
-    hotwords: hotwordPromptFromText(text),
+    hotwords: parsed.hotwords.join(" "),
     filename: data.filename || "",
-    count: Number(data.count || countHotwordText(text)),
+    count: Number(data.count || parsed.hotwords.length),
+    translationCount: Number(data.translation_count || parsed.translationCount),
   };
 }
 
@@ -965,10 +980,12 @@ async function startCapture() {
   try {
     lockedHotwords = await fetchMeetingHotwordSnapshot(meetingName);
     updateHotwordStatus(
-      lockedHotwords.filename ? `${lockedHotwords.filename} · ${lockedHotwords.count} 个` : "使用默认热词"
+      lockedHotwords.filename
+        ? `${lockedHotwords.filename} · ${lockedHotwords.count} 个热词 · ${lockedHotwords.translationCount} 条固定翻译`
+        : "使用默认热词"
     );
   } catch (error) {
-    lockedHotwords = { hotwords: "", filename: "", count: 0 };
+    lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0 };
     updateHotwordStatus("热词预取不可用，将由服务端按会议号匹配");
   }
 

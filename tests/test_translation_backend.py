@@ -435,6 +435,159 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         self.assertEqual(payload["translated_segments"][0]["text"], "translated:And")
         self.assertEqual(client.translation_buffer, [])
 
+    def test_standalone_english_interjection_uses_stable_translation(self):
+        client = self.make_client()
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "OH!",
+            "completed": True,
+            "language": "en",
+            "utterance_id": "client:1:0.000",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "哦")
+        self.assertEqual(segment["source_language"], "en")
+        self.assertEqual(segment["target_language"], "zh")
+        self.assertEqual(segment["utterance_id"], "client:1:0.000")
+        client.translate_text.assert_not_called()
+
+    def test_standalone_english_fillers_use_stable_translations(self):
+        expected_translations = {
+            "uh": "呃",
+            "Um.": "呃",
+            "hmm...": "嗯",
+            "Ah!": "啊",
+        }
+        for source_text, expected_translation in expected_translations.items():
+            with self.subTest(source_text=source_text):
+                client = self.make_client()
+                client.add_segment_to_translation_buffer({
+                    "start": "0.000",
+                    "end": "0.500",
+                    "text": source_text,
+                    "completed": True,
+                    "language": "en",
+                })
+                client.flush_translation_buffer(force=True)
+
+                payload = self.get_last_payload(client)
+                self.assertEqual(
+                    payload["translated_segments"][0]["text"],
+                    expected_translation,
+                )
+                client.translate_text.assert_not_called()
+
+    def test_english_interjection_with_context_uses_translation_model(self):
+        client = self.make_client()
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "Oh, I see.",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "translated:Oh, I see.")
+        client.translate_text.assert_called_once_with("Oh, I see.", "en")
+
+    def test_meeting_glossary_overrides_builtin_interjection(self):
+        client = self.make_client(translation_glossary={"oh": "噢"})
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "OH!",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "噢")
+        client.translate_text.assert_not_called()
+
+    def test_glossary_uses_longest_phrase_and_restores_target(self):
+        client = self.make_client(translation_glossary={
+            "AI": "人工智能",
+            "AI model": "指定模型",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "Use AI model.",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(
+            payload["translated_segments"][0]["text"],
+            "translated:Use 指定模型.",
+        )
+        protected_text = client.translate_text.call_args[0][0]
+        self.assertIn("ZZGLOSSARY0ZZ", protected_text)
+        self.assertNotIn("AI model", protected_text)
+
+    def test_english_glossary_does_not_match_inside_word(self):
+        client = self.make_client(translation_glossary={"AI": "人工智能"})
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "The SAIL project.",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(
+            payload["translated_segments"][0]["text"],
+            "translated:The SAIL project.",
+        )
+        client.translate_text.assert_called_once_with("The SAIL project.", "en")
+
+    def test_glossary_marker_loss_falls_back_to_plain_translation(self):
+        client = self.make_client(translation_glossary={"OpenAI": "开放人工智能"})
+        client.translate_text = mock.Mock(side_effect=[
+            ("标记已经丢失", "en", "zh"),
+            ("普通整句翻译", "en", "zh"),
+        ])
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "Use OpenAI.",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "普通整句翻译")
+        self.assertEqual(client.translate_text.call_count, 2)
+        client.translate_text.assert_any_call("Use OpenAI.", "en")
+
+    def test_glossary_exact_match_preserves_cpp_symbols(self):
+        client = self.make_client(translation_glossary={"C++": "C Plus Plus"})
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "C++!",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "C Plus Plus")
+        client.translate_text.assert_not_called()
+
     def test_translation_preserves_single_utterance_id(self):
         client = self.make_client(translation_max_chars=4)
         for start, end, text in (("0.000", "0.500", "你好"), ("0.500", "1.000", "世界")):

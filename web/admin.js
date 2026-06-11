@@ -144,7 +144,7 @@ function renderHotwordList(meetings) {
     <button class="hotword-file-item" type="button" data-meeting="${escapeHtml(item.meeting_name)}">
       <strong>${escapeHtml(item.meeting_name)}</strong>
       <span>${escapeHtml(item.filename || "-")}</span>
-      <span>${Number(item.count || 0)} 个热词</span>
+      <span>${Number(item.count || 0)} 个热词 / ${Number(item.translation_count || 0)} 条固定翻译</span>
       <span>${escapeHtml(fmtTime(item.updated_at))}</span>
     </button>
   `).join("");
@@ -172,7 +172,9 @@ async function showMeetingHotwords(meetingName) {
   const data = await response.json();
   els.hotwordSelect.value = data.meeting_name || meetingName;
   els.hotwordPreview.textContent = data.text || "该会议暂无热词文件。";
-  els.hotwordStatus.textContent = data.filename ? `当前：${data.meeting_name} / ${data.filename} / ${data.count} 个热词` : `当前：${data.meeting_name} / 无文件`;
+  els.hotwordStatus.textContent = data.filename
+    ? `当前：${data.meeting_name} / ${data.filename} / ${data.count} 个热词 / ${Number(data.translation_count || 0)} 条固定翻译`
+    : `当前：${data.meeting_name} / 无文件`;
 }
 
 async function refresh() {

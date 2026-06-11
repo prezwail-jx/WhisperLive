@@ -309,6 +309,16 @@ class ServeClientTranslation(ServeClientBase):
     _TRANSLATOR_CACHE = {}
     _TRANSLATOR_INFERENCE_LOCKS = {}
     _TRANSLATOR_CACHE_LOCK = threading.Lock()
+    _STANDALONE_ENGLISH_INTERJECTIONS = {
+        "oh": "哦",
+        "uh": "呃",
+        "um": "呃",
+        "er": "呃",
+        "hm": "嗯",
+        "hmm": "嗯",
+        "mm": "嗯",
+        "ah": "啊",
+    }
 
     def __init__(
         self,
@@ -325,6 +335,7 @@ class ServeClientTranslation(ServeClientBase):
         translation_max_chars=130,
         translation_max_wait_seconds=2.0,
         translation_sentence_endings="。！？.!?",
+        translation_glossary=None,
     ):
         """
         Initialize the translation client.
@@ -347,6 +358,7 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_max_chars = translation_max_chars
         self.translation_max_wait_seconds = translation_max_wait_seconds
         self.translation_sentence_endings = translation_sentence_endings
+        self.translation_glossary = self.normalize_translation_glossary(translation_glossary)
         self.translation_buffer = []
         self.translation_buffer_started_at = None
         self.translated_segments = []
@@ -411,6 +423,130 @@ class ServeClientTranslation(ServeClientBase):
         except Exception as e:
             logging.error(f"Translation failed for text '{text}': {e}")
             return text, source_language, self.target_language
+
+    @staticmethod
+    def normalize_translation_glossary(glossary):
+        normalized = {}
+        for source, target in dict(glossary or {}).items():
+            source = str(source or "").strip()
+            target = str(target or "").strip()
+            if source and target:
+                normalized[source] = target
+        return normalized
+
+    @staticmethod
+    def _normalize_glossary_lookup_text(text):
+        punctuation = " \t\r\n.,!?;:，。！？；：\"'“”‘’()[]{}"
+        return str(text or "").strip(punctuation).casefold()
+
+    @staticmethod
+    def _glossary_term_pattern(source):
+        escaped = re.escape(source)
+        if source and source[0].isascii() and source[0].isalnum():
+            escaped = rf"(?<![A-Za-z0-9]){escaped}"
+        if source and source[-1].isascii() and source[-1].isalnum():
+            escaped = rf"{escaped}(?![A-Za-z0-9])"
+        return escaped
+
+    @classmethod
+    def _glossary_marker_pattern(cls, index):
+        marker = f"ZZGLOSSARY{index}ZZ"
+        return re.compile(r"\s*".join(re.escape(char) for char in marker), re.IGNORECASE)
+
+    def translate_with_glossary(self, text: str, source_language: Optional[str]):
+        if not self.translation_glossary:
+            return None
+
+        normalized_text = self._normalize_glossary_lookup_text(text)
+        for source, target in self.translation_glossary.items():
+            if self._normalize_glossary_lookup_text(source) == normalized_text:
+                logging.info("[TRANSLATION_GLOSSARY_EXACT] source=%r target=%r", text, target)
+                return (
+                    target,
+                    HelsinkiZhEnTranslator.normalize_language(source_language),
+                    self._resolved_target_language(source_language),
+                )
+
+        ordered_sources = sorted(self.translation_glossary, key=len, reverse=True)
+        if not ordered_sources:
+            return None
+        pattern = re.compile(
+            "|".join(self._glossary_term_pattern(source) for source in ordered_sources),
+            re.IGNORECASE,
+        )
+        replacements = []
+
+        def protect(match):
+            matched_source = match.group(0)
+            target = next(
+                self.translation_glossary[source]
+                for source in ordered_sources
+                if source.casefold() == matched_source.casefold()
+            )
+            marker = f"ZZGLOSSARY{len(replacements)}ZZ"
+            replacements.append((marker, target))
+            return marker
+
+        protected_text = pattern.sub(protect, text)
+        if not replacements:
+            return None
+
+        translated_text, normalized_source, target_language = self.translate_text(
+            protected_text,
+            source_language,
+        )
+        restored_text = translated_text
+        for index, (_, target) in enumerate(replacements):
+            marker_pattern = self._glossary_marker_pattern(index)
+            if not marker_pattern.search(restored_text):
+                logging.warning(
+                    "[TRANSLATION_GLOSSARY_FALLBACK] marker=%d source=%r",
+                    index,
+                    text,
+                )
+                return None
+            restored_text = marker_pattern.sub(lambda _: target, restored_text)
+
+        logging.info(
+            "[TRANSLATION_GLOSSARY] matches=%d source=%r",
+            len(replacements),
+            text,
+        )
+        return restored_text, normalized_source, target_language
+
+    def _resolved_target_language(self, source_language):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = HelsinkiZhEnTranslator.normalize_language(self.target_language) or "auto"
+        if target_language == "auto":
+            if source_language == "en":
+                return "zh"
+            if source_language == "zh":
+                return "en"
+        return target_language
+
+    @classmethod
+    def translate_standalone_interjection(
+        cls,
+        text: str,
+        source_language: Optional[str],
+        target_language: str,
+    ):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language) or "auto"
+        if source_language != "en" or target_language not in ("auto", "zh"):
+            return None
+
+        normalized_text = re.sub(r"^[\W_]+|[\W_]+$", "", str(text or "").strip().lower())
+        translated_text = cls._STANDALONE_ENGLISH_INTERJECTIONS.get(normalized_text)
+        if translated_text is None:
+            return None
+
+        logging.info(
+            "[TRANSLATION_INTERJECTION] source=%r translated=%r",
+            text,
+            translated_text,
+        )
+        return translated_text, source_language, "zh"
 
     def get_segment_source_language(self, segment):
         return HelsinkiZhEnTranslator.normalize_language(segment.get("language"))
@@ -510,10 +646,16 @@ class ServeClientTranslation(ServeClientBase):
         if not original_text:
             return
 
-        translated_text, source_language, target_language = self.translate_text(
-            original_text,
-            source_language,
-        )
+        translation_result = self.translate_with_glossary(original_text, source_language)
+        if translation_result is None:
+            translation_result = self.translate_standalone_interjection(
+                original_text,
+                source_language,
+                self.target_language,
+            )
+        if translation_result is None:
+            translation_result = self.translate_text(original_text, source_language)
+        translated_text, source_language, target_language = translation_result
         self.last_translated_source_text = original_text
 
         translated_segment = {

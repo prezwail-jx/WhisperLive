@@ -34,28 +34,50 @@ from whisper_live.backend.base import ServeClientBase
 
 logging.basicConfig(level=logging.INFO)
 
-def normalize_hotword_text(text):
-    if not text:
-        return ""
-    words = []
-    for line in str(text).splitlines():
-        word = line.strip()
-        if not word or word.startswith("#"):
+
+def parse_hotword_config(text):
+    hotwords = []
+    translation_glossary = {}
+    normalized_lines = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
             continue
-        words.append(word)
-    return "\n".join(words)
+        if "=>" not in line:
+            hotwords.append(line)
+            normalized_lines.append(line)
+            continue
+
+        source, target = (part.strip() for part in line.split("=>", 1))
+        if not source or not target:
+            logging.warning("Ignoring invalid hotword translation rule: %r", line)
+            continue
+        hotwords.append(source)
+        translation_glossary[source] = target
+        normalized_lines.append(f"{source} => {target}")
+
+    return {
+        "text": "\n".join(normalized_lines),
+        "hotwords": hotwords,
+        "translation_glossary": translation_glossary,
+        "count": len(hotwords),
+        "translation_count": len(translation_glossary),
+    }
+
+
+def normalize_hotword_text(text):
+    return parse_hotword_config(text)["text"]
 
 
 def hotword_text_to_prompt(text):
-    normalized = normalize_hotword_text(text)
-    if not normalized:
+    parsed = parse_hotword_config(text)
+    if not parsed["hotwords"]:
         return None
-    return " ".join(normalized.splitlines())
+    return " ".join(parsed["hotwords"])
 
 
 def count_hotwords(text):
-    normalized = normalize_hotword_text(text)
-    return len(normalized.splitlines()) if normalized else 0
+    return parse_hotword_config(text)["count"]
 
 
 class SummaryGenerationError(RuntimeError):
@@ -1414,7 +1436,15 @@ class MeetingHotwordStore:
 
     @staticmethod
     def _empty_record(meeting_name):
-        return {"meeting_name": meeting_name, "filename": "", "text": "", "count": 0, "updated_at": None}
+        return {
+            "meeting_name": meeting_name,
+            "filename": "",
+            "text": "",
+            "count": 0,
+            "translation_count": 0,
+            "translation_glossary": {},
+            "updated_at": None,
+        }
 
     def _safe_path(self, meeting_name):
         name = self.normalize_name(meeting_name)
@@ -1431,14 +1461,16 @@ class MeetingHotwordStore:
         except UnicodeDecodeError:
             with open(path, "r", encoding="utf-8-sig") as file:
                 text = file.read()
-        normalized = normalize_hotword_text(text)
+        parsed = parse_hotword_config(text)
         filename = os.path.basename(path)
         return {
             "meeting_name": meeting_name,
             "filename": filename,
             "path": path,
-            "text": normalized,
-            "count": count_hotwords(normalized),
+            "text": parsed["text"],
+            "count": parsed["count"],
+            "translation_count": parsed["translation_count"],
+            "translation_glossary": parsed["translation_glossary"],
             "updated_at": os.path.getmtime(path),
         }
 
@@ -1769,18 +1801,19 @@ class TranscriptionServer:
         return " ".join(hotwords)
 
     def apply_meeting_hotwords(self, options):
-        if options.get("hotwords"):
-            return
         meeting_name = options.get("meeting_name")
         if not meeting_name or not self.meeting_hotwords:
             return
         stored = self.meeting_hotwords.get(meeting_name)
         prompt = hotword_text_to_prompt(stored.get("text"))
-        if prompt:
+        if prompt and not options.get("hotwords"):
             options["hotwords"] = prompt
+        if prompt or stored.get("translation_glossary"):
             options["hotwords_count"] = stored.get("count") or count_hotwords(stored.get("text"))
             options["hotwords_file"] = stored.get("filename") or ""
             options["hotwords_locked"] = True
+            options["translation_glossary"] = dict(stored.get("translation_glossary") or {})
+            options["translation_glossary_count"] = int(stored.get("translation_count") or 0)
 
     def apply_default_hotwords(self, options):
         if options.get("hotwords"):
@@ -1891,6 +1924,7 @@ class TranscriptionServer:
                 zh_en_model_path=options.get("zh_en_model_path", "model/opus-mt-zh-en"),
                 translation_device=translation_device,
                 en_zh_model_path=options.get("en_zh_model_path", "model/opus-mt-en-zh"),
+                translation_glossary=options.get("translation_glossary"),
             )
             
             # Start translation thread

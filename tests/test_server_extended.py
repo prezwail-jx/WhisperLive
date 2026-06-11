@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-from whisper_live.server import TranscriptionServer, BackendType, ClientManager, MeetingHotwordStore, MeetingLogStore, MeetingSummaryService, SummaryGenerationError, count_hotwords
+from whisper_live.server import TranscriptionServer, BackendType, ClientManager, MeetingHotwordStore, MeetingLogStore, MeetingSummaryService, SummaryGenerationError, count_hotwords, hotword_text_to_prompt, parse_hotword_config
 
 
 class TestClientManagerAddRemove(unittest.TestCase):
@@ -338,6 +338,31 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
     @mock.patch("whisper_live.server.threading.Thread")
     @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
     @mock.patch("whisper_live.backend.translation_backend.ServeClientTranslation")
+    def test_initialize_client_passes_translation_glossary(
+        self, mock_translation_client, mock_faster_client, mock_thread
+    ):
+        mock_faster_client.return_value = MagicMock()
+        mock_translation_client.return_value = MagicMock()
+        glossary = {"OpenAI": "开放人工智能"}
+        options = {
+            "uid": "test",
+            "language": "en",
+            "task": "transcribe",
+            "model": "small",
+            "enable_translation": True,
+            "translation_glossary": glossary,
+        }
+
+        self.server.initialize_client(MagicMock(), options, None, None, False)
+
+        self.assertEqual(
+            mock_translation_client.call_args.kwargs["translation_glossary"],
+            glossary,
+        )
+
+    @mock.patch("whisper_live.server.threading.Thread")
+    @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    @mock.patch("whisper_live.backend.translation_backend.ServeClientTranslation")
     def test_initialize_client_client_translation_device_overrides_server_default(
         self, mock_translation_client, mock_faster_client, mock_thread
     ):
@@ -398,6 +423,26 @@ class TestMeetingHotwordStore(unittest.TestCase):
     def test_count_hotwords_ignores_blank_lines_and_comments(self):
         self.assertEqual(count_hotwords("# c\nACE\n\nDocker"), 2)
 
+    def test_translation_rules_add_only_source_to_hotword_prompt(self):
+        parsed = parse_hotword_config(
+            "# comment\nOpenAI => 开放人工智能\n普通热词\ninvalid =>\n=> invalid\n"
+        )
+
+        self.assertEqual(parsed["hotwords"], ["OpenAI", "普通热词"])
+        self.assertEqual(parsed["translation_glossary"], {"OpenAI": "开放人工智能"})
+        self.assertEqual(parsed["count"], 2)
+        self.assertEqual(parsed["translation_count"], 1)
+        self.assertEqual(
+            hotword_text_to_prompt(parsed["text"]),
+            "OpenAI 普通热词",
+        )
+
+    def test_duplicate_translation_rule_uses_last_target(self):
+        parsed = parse_hotword_config("OpenAI => 旧译名\nOpenAI => 新译名")
+
+        self.assertEqual(parsed["translation_glossary"], {"OpenAI": "新译名"})
+        self.assertEqual(parsed["translation_count"], 1)
+
     def test_apply_meeting_hotwords_before_default_hotwords(self):
         with tempfile.TemporaryDirectory() as directory:
             with open(os.path.join(directory, "会议A.txt"), "w", encoding="utf-8") as file:
@@ -419,6 +464,21 @@ class TestMeetingHotwordStore(unittest.TestCase):
             server.apply_meeting_hotwords(options)
             server.apply_default_hotwords(options)
             self.assertEqual(options["hotwords"], "Custom")
+
+    def test_meeting_translation_glossary_is_loaded_with_custom_hotwords(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "会议A.txt"), "w", encoding="utf-8") as file:
+                file.write("OpenAI => 开放人工智能\n普通热词")
+            server = TranscriptionServer()
+            server.meeting_hotwords = MeetingHotwordStore(directory)
+            options = {"uid": "client", "meeting_name": "会议A", "hotwords": "Custom"}
+
+            server.apply_meeting_hotwords(options)
+
+            self.assertEqual(options["hotwords"], "Custom")
+            self.assertEqual(options["translation_glossary"], {"OpenAI": "开放人工智能"})
+            self.assertEqual(options["translation_glossary_count"], 1)
+            self.assertEqual(options["hotwords_count"], 2)
 
 
 class TestMeetingLogStore(unittest.TestCase):

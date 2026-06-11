@@ -246,7 +246,13 @@ config/hotwords.d/meeting-a.txt -> 会议号：meeting-a
 faster-whisper
 张三
 # 这行是注释
+
+# 左侧同时作为 ASR 热词，右侧是固定译文
+OpenAI => 开放人工智能
+历史终极幻觉 => end-of-history illusion
 ```
+
+普通行只作为 ASR 热词；`source => target` 行同时加入 ASR 热词和固定翻译表。固定翻译是单向规则，需要反向翻译时应再增加一条反向规则。句中出现多个规则时优先匹配最长词组。
 
 使用规则：
 
