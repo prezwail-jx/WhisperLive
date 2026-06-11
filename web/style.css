@@ -14,6 +14,10 @@
   --red: #ff665f;
   --amber: #f4b557;
   --drawer-width: 440px;
+  --source-font-size: 20px;
+  --source-font-color: #f4f7f5;
+  --translation-font-size: 20px;
+  --translation-font-color: #36d98b;
 }
 
 * { box-sizing: border-box; }
@@ -87,7 +91,9 @@ h1 { margin: 0; overflow: hidden; font-size: clamp(17px, 1.8vw, 24px); line-heig
 .transcript-pane h2 { margin: 1px 0 0; font-size: 14px; }
 .pane-kicker { color: #59635d; font-size: 9px; font-weight: 900; letter-spacing: .16em; }
 .text-button { padding: 7px 9px; border-radius: 6px; color: #6f7b74; font-size: 12px; }
-.text-stream { min-height: 0; overflow: auto; padding: clamp(16px, 2vw, 28px); font-size: clamp(16px, 1.45vw, 22px); line-height: 1.5; scrollbar-color: #27322c transparent; }
+.text-stream { min-height: 0; overflow: auto; padding: clamp(16px, 2vw, 28px); line-height: 1.5; scrollbar-color: #27322c transparent; }
+.source-pane .text-stream { color: var(--source-font-color); font-size: var(--source-font-size); }
+.translation-pane .text-stream { color: var(--translation-font-color); font-size: var(--translation-font-size); }
 .text-stream.muted { display: grid; place-items: center; color: #3e4842; font-size: 17px; }
 .segment { margin: 0 0 .62em; }
 .segment.incomplete { color: #738078; }
@@ -98,8 +104,8 @@ h1 { margin: 0; overflow: hidden; font-size: clamp(17px, 1.8vw, 24px); line-heig
 .interleaved-row { margin: 0 0 20px; padding: 0 0 18px; border-bottom: 1px solid var(--line); }
 .interleaved-row:last-child { border-bottom: 0; }
 .interleaved-source, .interleaved-translation { margin: 0; }
-.interleaved-source { color: var(--text); }
-.interleaved-translation { margin-top: 7px; color: var(--green); font-size: 1em; line-height: 1.5; }
+.interleaved-source { color: var(--source-font-color); font-size: var(--source-font-size); }
+.interleaved-translation { margin-top: 7px; color: var(--translation-font-color); font-size: var(--translation-font-size); line-height: 1.5; }
 .interleaved-translation.pending { color: #536058; }
 .mode-single { grid-template-columns: 1fr; }
 .mode-single .translation-pane, .mode-single .interleaved-pane { display: none; }
@@ -130,6 +136,14 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 label { display: grid; gap: 7px; color: #9aa59e; font-size: 12px; font-weight: 750; }
 input, select { width: 100%; min-height: 43px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; outline: none; background: var(--surface-raised); color: var(--text); }
 input:focus, select:focus { border-color: var(--green-deep); box-shadow: 0 0 0 3px rgba(54, 217, 139, .1); }
+.caption-style-group { display: grid; gap: 10px; padding: 13px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); }
+.caption-style-heading { display: flex; align-items: center; justify-content: space-between; }
+.caption-style-heading strong { color: var(--text); font-size: 13px; }
+.caption-style-heading span { color: var(--green); font-size: 12px; font-variant-numeric: tabular-nums; }
+.style-control { grid-template-columns: 48px minmax(0, 1fr); align-items: center; }
+.style-control input[type="range"] { min-height: 28px; padding: 0; border: 0; background: transparent; box-shadow: none; accent-color: var(--green); cursor: pointer; }
+.color-control { grid-template-columns: 48px 1fr; }
+.style-control input[type="color"] { width: 100%; min-height: 38px; padding: 4px; cursor: pointer; }
 .toggle-field { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); cursor: pointer; }
 .toggle-field > span:first-child { display: grid; gap: 4px; }
 .toggle-field strong { color: var(--text); font-size: 13px; }
@@ -169,7 +183,7 @@ body.drawer-open { overflow: hidden; }
   h1 { font-size: 19px; }
   .view-switcher { display: none; }
   .transcript-workspace { margin-top: 12px; border-radius: 10px; }
-  .text-stream { min-height: 0; padding: 16px 14px; font-size: 16px; }
+  .text-stream { min-height: 0; padding: 16px 14px; }
   .settings-drawer { width: 100vw; }
   .drawer-content { padding-inline: 18px; }
 }

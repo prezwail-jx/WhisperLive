@@ -39,6 +39,13 @@ const elements = {
   displayMode: document.getElementById("displayModeInput"),
   singleLanguage: document.getElementById("singleLanguageInput"),
   singleLanguageField: document.getElementById("singleLanguageField"),
+  sourceFontSize: document.getElementById("sourceFontSizeInput"),
+  sourceFontSizeValue: document.getElementById("sourceFontSizeValue"),
+  sourceFontColor: document.getElementById("sourceFontColorInput"),
+  translationFontSize: document.getElementById("translationFontSizeInput"),
+  translationFontSizeValue: document.getElementById("translationFontSizeValue"),
+  translationFontColor: document.getElementById("translationFontColorInput"),
+  resetCaptionStyle: document.getElementById("resetCaptionStyleButton"),
   toolStatus: document.getElementById("toolStatus"),
   viewModeButtons: Array.from(document.querySelectorAll("[data-view-mode]")),
 };
@@ -74,6 +81,18 @@ const DEFAULT_BACKEND = "faster_whisper";
 const DEFAULT_MODEL = "model/asr/small";
 const DEFAULT_DISPLAY_SEGMENTS = 16;
 const MAX_SESSION_SEGMENTS = 500;
+const DEFAULT_CAPTION_STYLE = {
+  sourceFontSize: 20,
+  sourceFontColor: "#f4f7f5",
+  translationFontSize: 20,
+  translationFontColor: "#36d98b",
+};
+const CAPTION_STYLE_STORAGE_KEYS = {
+  sourceFontSize: "whisperlive_source_font_size",
+  sourceFontColor: "whisperlive_source_font_color",
+  translationFontSize: "whisperlive_translation_font_size",
+  translationFontColor: "whisperlive_translation_font_color",
+};
 
 function getDisplayLimit() {
   return DEFAULT_DISPLAY_SEGMENTS;
@@ -104,6 +123,78 @@ function defaultWebSocketUrl() {
   return `${protocol}//${window.location.host}/ws`;
 }
 
+function clampCaptionFontSize(value, fallback) {
+  if (value === null || value === undefined || String(value).trim() === "") return fallback;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(40, Math.max(14, Math.round(number)));
+}
+
+function normalizeCaptionColor(value, fallback) {
+  const color = String(value || "").trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : fallback;
+}
+
+function readCaptionStyle() {
+  return {
+    sourceFontSize: clampCaptionFontSize(
+      window.localStorage.getItem(CAPTION_STYLE_STORAGE_KEYS.sourceFontSize),
+      DEFAULT_CAPTION_STYLE.sourceFontSize,
+    ),
+    sourceFontColor: normalizeCaptionColor(
+      window.localStorage.getItem(CAPTION_STYLE_STORAGE_KEYS.sourceFontColor),
+      DEFAULT_CAPTION_STYLE.sourceFontColor,
+    ),
+    translationFontSize: clampCaptionFontSize(
+      window.localStorage.getItem(CAPTION_STYLE_STORAGE_KEYS.translationFontSize),
+      DEFAULT_CAPTION_STYLE.translationFontSize,
+    ),
+    translationFontColor: normalizeCaptionColor(
+      window.localStorage.getItem(CAPTION_STYLE_STORAGE_KEYS.translationFontColor),
+      DEFAULT_CAPTION_STYLE.translationFontColor,
+    ),
+  };
+}
+
+function applyCaptionStyle(style, persist = false) {
+  const normalized = {
+    sourceFontSize: clampCaptionFontSize(style.sourceFontSize, DEFAULT_CAPTION_STYLE.sourceFontSize),
+    sourceFontColor: normalizeCaptionColor(style.sourceFontColor, DEFAULT_CAPTION_STYLE.sourceFontColor),
+    translationFontSize: clampCaptionFontSize(style.translationFontSize, DEFAULT_CAPTION_STYLE.translationFontSize),
+    translationFontColor: normalizeCaptionColor(style.translationFontColor, DEFAULT_CAPTION_STYLE.translationFontColor),
+  };
+  const rootStyle = document.documentElement.style;
+  rootStyle.setProperty("--source-font-size", `${normalized.sourceFontSize}px`);
+  rootStyle.setProperty("--source-font-color", normalized.sourceFontColor);
+  rootStyle.setProperty("--translation-font-size", `${normalized.translationFontSize}px`);
+  rootStyle.setProperty("--translation-font-color", normalized.translationFontColor);
+  elements.sourceFontSize.value = String(normalized.sourceFontSize);
+  elements.sourceFontSizeValue.textContent = `${normalized.sourceFontSize}px`;
+  elements.sourceFontColor.value = normalized.sourceFontColor;
+  elements.translationFontSize.value = String(normalized.translationFontSize);
+  elements.translationFontSizeValue.textContent = `${normalized.translationFontSize}px`;
+  elements.translationFontColor.value = normalized.translationFontColor;
+  if (persist) {
+    Object.entries(CAPTION_STYLE_STORAGE_KEYS).forEach(([name, key]) => {
+      window.localStorage.setItem(key, String(normalized[name]));
+    });
+  }
+}
+
+function currentCaptionStyleFromControls() {
+  return {
+    sourceFontSize: elements.sourceFontSize.value,
+    sourceFontColor: elements.sourceFontColor.value,
+    translationFontSize: elements.translationFontSize.value,
+    translationFontColor: elements.translationFontColor.value,
+  };
+}
+
+function resetCaptionStyle() {
+  Object.values(CAPTION_STYLE_STORAGE_KEYS).forEach((key) => window.localStorage.removeItem(key));
+  applyCaptionStyle(DEFAULT_CAPTION_STYLE);
+}
+
 function initializeDefaults() {
   const legacyDefault = "ws://localhost:9090";
   if (!elements.server.value || elements.server.value === legacyDefault) {
@@ -124,6 +215,7 @@ function initializeDefaults() {
   if (savedTranslationDirection) elements.translationDirection.value = savedTranslationDirection;
   elements.displayMode.value = displayMode;
   elements.singleLanguage.value = singleLanguageMode;
+  applyCaptionStyle(readCaptionStyle());
   updateTranslationControls();
   setDisplayMode(displayMode);
   updateMeetingTitle();
@@ -1095,6 +1187,11 @@ elements.singleLanguage.addEventListener("change", () => {
   window.localStorage.setItem("whisperlive_single_language", singleLanguageMode);
   renderTranscriptViews();
 });
+[elements.sourceFontSize, elements.sourceFontColor, elements.translationFontSize, elements.translationFontColor]
+  .forEach((input) => {
+    input.addEventListener("input", () => applyCaptionStyle(currentCaptionStyleFromControls(), true));
+  });
+elements.resetCaptionStyle.addEventListener("click", resetCaptionStyle);
 elements.translationEnabled.addEventListener("change", () => {
   window.localStorage.setItem("whisperlive_translation_enabled", String(elements.translationEnabled.checked));
   updateTranslationControls();

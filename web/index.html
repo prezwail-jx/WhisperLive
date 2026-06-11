@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>WhisperLive 中英同传</title>
-    <link rel="stylesheet" href="./style.css?v=immersive-dark-3">
+    <link rel="stylesheet" href="./style.css?v=caption-style-1">
   </head>
   <body>
     <main class="app-shell">
@@ -81,6 +81,17 @@
             <div class="field-stack">
               <label>内容布局<select id="displayModeInput"><option value="split">原文与翻译双栏</option><option value="interleaved">一句原文一句译文</option><option value="single">单语言显示</option></select></label>
               <label id="singleLanguageField" hidden>单栏内容<select id="singleLanguageInput"><option value="source">只显示原文</option><option value="zh">只显示中文</option><option value="en">只显示 English</option><option value="translation">只显示翻译</option></select></label>
+              <div class="caption-style-group">
+                <div class="caption-style-heading"><strong>原文样式</strong><span id="sourceFontSizeValue">20px</span></div>
+                <label class="style-control">字号<input id="sourceFontSizeInput" type="range" min="14" max="40" step="1" value="20"></label>
+                <label class="style-control color-control">颜色<input id="sourceFontColorInput" type="color" value="#f4f7f5"></label>
+              </div>
+              <div class="caption-style-group">
+                <div class="caption-style-heading"><strong>译文样式</strong><span id="translationFontSizeValue">20px</span></div>
+                <label class="style-control">字号<input id="translationFontSizeInput" type="range" min="14" max="40" step="1" value="20"></label>
+                <label class="style-control color-control">颜色<input id="translationFontColorInput" type="color" value="#36d98b"></label>
+              </div>
+              <button id="resetCaptionStyleButton" class="secondary-button" type="button">恢复默认显示</button>
             </div>
           </section>
         </form>
@@ -99,6 +110,6 @@
         </section>
       </div>
     </aside>
-    <script src="./app.js?v=translation-glossary-1"></script>
+    <script src="./app.js?v=caption-style-1"></script>
   </body>
 </html>
