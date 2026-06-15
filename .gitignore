@@ -32,6 +32,8 @@ dist/
 # Meeting hotword files contain deployment-specific terms
 config/hotwords.d/*
 !config/hotwords.d/.gitkeep
+config/summary_templates/*
+!config/summary_templates/.gitkeep
 
 # Local runtime output
 chunks/

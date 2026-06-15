@@ -1,0 +1,56 @@
+import json
+import os
+import tempfile
+import unittest
+from unittest import mock
+from unittest.mock import MagicMock, patch
+
+from whisper_live.meeting import MeetingHotwordStore, count_hotwords, hotword_text_to_prompt, parse_hotword_config
+
+
+class TestMeetingHotwordStore(unittest.TestCase):
+    def test_list_and_get_scan_txt_files_from_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "会议A.txt"), "w", encoding="utf-8") as file:
+                file.write("# comment\n图灵科技\n\nfaster-whisper\n")
+            with open(os.path.join(directory, "ignore.md"), "w", encoding="utf-8") as file:
+                file.write("ignored")
+
+            store = MeetingHotwordStore(directory)
+            meetings = store.list()["meetings"]
+            self.assertEqual(len(meetings), 1)
+            self.assertEqual(meetings[0]["meeting_name"], "会议A")
+            self.assertEqual(meetings[0]["filename"], "会议A.txt")
+            self.assertEqual(meetings[0]["count"], 2)
+
+            loaded = store.get("会议A")
+            self.assertEqual(loaded["text"], "图灵科技\nfaster-whisper")
+            self.assertEqual(loaded["count"], 2)
+
+            missing = store.get("会议B")
+            self.assertEqual(missing["count"], 0)
+            self.assertEqual(missing["filename"], "")
+
+    def test_count_hotwords_ignores_blank_lines_and_comments(self):
+        self.assertEqual(count_hotwords("# c\nACE\n\nDocker"), 2)
+
+    def test_translation_rules_add_only_source_to_hotword_prompt(self):
+        parsed = parse_hotword_config(
+            "# comment\nOpenAI => 开放人工智能\n普通热词\ninvalid =>\n=> invalid\n"
+        )
+
+        self.assertEqual(parsed["hotwords"], ["OpenAI", "普通热词"])
+        self.assertEqual(parsed["translation_glossary"], {"OpenAI": "开放人工智能"})
+        self.assertEqual(parsed["count"], 2)
+        self.assertEqual(parsed["translation_count"], 1)
+        self.assertEqual(
+            hotword_text_to_prompt(parsed["text"]),
+            "OpenAI 普通热词",
+        )
+
+    def test_duplicate_translation_rule_uses_last_target(self):
+        parsed = parse_hotword_config("OpenAI => 旧译名\nOpenAI => 新译名")
+
+        self.assertEqual(parsed["translation_glossary"], {"OpenAI": "新译名"})
+        self.assertEqual(parsed["translation_count"], 1)
+

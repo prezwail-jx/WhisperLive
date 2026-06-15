@@ -2,6 +2,14 @@
 
 本项目当前主要用途：
 
+本项目后端按职责组织：
+
+```text
+whisper_live/server.py       WebSocket、Admin API、客户端管理与服务编排
+whisper_live/meeting/        会议热词、日志、总结模板和 LLM 总结
+whisper_live/backend/        ASR 与翻译后端
+```
+
 ```text
 Docker 镜像拉起 WhisperLive 服务
 -> GPU 跑 faster-whisper ASR
@@ -502,7 +510,35 @@ Admin API：http://192.168.1.100:9093
 
 `9090/9094` 是后端真实端口，通常不直接填到浏览器页面里。
 
-## 12. 停止服务
+
+## 12. Markdown 自定义会议纪要模板
+
+Web 设置面板支持上传 UTF-8 编码的 `.md` 模板。模板至少包含一个 `##` 到 `######` 标题，系统会调用当前总结模型分析字段；模型不可用时会按标题生成基础字段供手动确认。
+
+基本流程：
+
+1. 停止会议，确保后端会议日志状态为 `finished`。
+2. 在“日志与总结”中上传不超过 2 MB 的 `.md` 文件并点击“分析模板”。
+3. 调整字段名称、字段键、类型和说明后保存。
+4. 在总结模板下拉框的“自定义模板”分组中选择模板并生成总结。
+5. 下载的 Markdown 会保留上传模板的标题结构，模板里的示例正文会被新总结替换。
+
+模板支持以下字段类型：
+
+- `文本`：概述、背景等单段内容。
+- `列表`：议题、普通要点等无需逐条证据的内容。
+- `带证据列表`：决策、待办、观点、风险等，生成后校验原文时间戳和引用。
+- `表格`：按确认的列名生成 Markdown 表格。
+
+默认模板库目录为 `config/summary_templates`，可以通过启动参数修改：
+
+```bash
+--summary_templates_dir config/summary_templates
+```
+
+生产部署需要持久化该目录。模板库第一版全局共享且只在前端提供新增功能；同名模板会自动生成新的 ID，不覆盖已有模板。
+
+## 13. 停止服务
 
 停止前端容器：
 
@@ -516,7 +552,7 @@ docker stop whisperlive-web-gateway
 docker stop whisperlive-server
 ```
 
-## 13. 原始项目地址
+## 14. 原始项目地址
 
 原 fork / 上游 README 可参考：
 

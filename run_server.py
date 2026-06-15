@@ -162,6 +162,7 @@ if __name__ == "__main__":
     parser.add_argument('--summary_ready_timeout', type=int, default=300)
     parser.add_argument('--summary_max_chars_per_chunk', type=int, default=4000)
     parser.add_argument('--summary_idle_shutdown_seconds', type=int, default=600)
+    parser.add_argument('--summary_templates_dir', default='config/summary_templates')
     args = parser.parse_args()
 
     if args.backend == "tensorrt":
@@ -212,4 +213,5 @@ if __name__ == "__main__":
         summary_ready_timeout=args.summary_ready_timeout,
         summary_max_chars_per_chunk=args.summary_max_chars_per_chunk,
         summary_idle_shutdown_seconds=args.summary_idle_shutdown_seconds,
+        summary_templates_dir=args.summary_templates_dir,
     )

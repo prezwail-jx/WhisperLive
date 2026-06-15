@@ -16,6 +16,13 @@ const elements = {
   summarySession: document.getElementById("summarySessionInput"),
   summaryTemplate: document.getElementById("summaryTemplateInput"),
   summaryVersion: document.getElementById("summaryVersionInput"),
+  summaryTemplateFile: document.getElementById("summaryTemplateFileInput"),
+  analyzeSummaryTemplate: document.getElementById("analyzeSummaryTemplateButton"),
+  summaryTemplateEditor: document.getElementById("summaryTemplateEditor"),
+  summaryTemplateName: document.getElementById("summaryTemplateNameInput"),
+  summaryTemplateFields: document.getElementById("summaryTemplateFields"),
+  addSummaryTemplateField: document.getElementById("addSummaryTemplateFieldButton"),
+  saveSummaryTemplate: document.getElementById("saveSummaryTemplateButton"),
   refreshSummarySessions: document.getElementById("refreshSummarySessionsButton"),
   clearLog: document.getElementById("clearLogButton"),
   status: document.getElementById("connectionStatus"),
@@ -71,6 +78,8 @@ let summaryGenerating = false;
 let selectedSummarySessionId = null;
 let selectedSummarySessionStatus = null;
 let summaryVersions = [];
+let summaryTemplateDraft = null;
+let customSummaryTemplates = [];
 let lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0 };
 let clientInstanceId = null;
 let displayMode = "split";
@@ -224,6 +233,7 @@ function initializeDefaults() {
     updateHotwordStatus("热词文件列表暂不可用，可手动填写会议号");
   });
   loadSummarySessions().catch(() => {});
+  loadSummaryTemplates().catch(() => {});
 }
 
 function parseHotwordText(text) {
@@ -339,8 +349,130 @@ function summaryDownloadUrl(sessionId, format = "md", version = "") {
 }
 
 
+function summaryTemplateApiUrl(path = "") {
+  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/summary-templates${path}`;
+}
+
 function selectedSummaryTemplate() {
-  return (elements.summaryTemplate && elements.summaryTemplate.value) || "auto";
+  const value = (elements.summaryTemplate && elements.summaryTemplate.value) || "auto";
+  if (value.startsWith("custom:")) {
+    return { template: "custom", custom_template_id: value.slice(7) };
+  }
+  return { template: value };
+}
+
+async function loadSummaryTemplates(preferredId = "") {
+  if (!elements.summaryTemplate) return;
+  const response = await fetch(summaryTemplateApiUrl(), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  customSummaryTemplates = data.templates || [];
+  const current = preferredId ? `custom:${preferredId}` : elements.summaryTemplate.value;
+  elements.summaryTemplate.querySelectorAll('optgroup[data-custom-templates]').forEach((node) => node.remove());
+  if (customSummaryTemplates.length) {
+    const group = document.createElement("optgroup");
+    group.label = "自定义模板";
+    group.dataset.customTemplates = "true";
+    customSummaryTemplates.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = `custom:${item.id}`;
+      option.textContent = item.name || item.id;
+      group.appendChild(option);
+    });
+    elements.summaryTemplate.appendChild(group);
+  }
+  if (Array.from(elements.summaryTemplate.options).some((option) => option.value === current)) {
+    elements.summaryTemplate.value = current;
+  }
+}
+
+function renderSummaryTemplateFields() {
+  if (!elements.summaryTemplateFields || !summaryTemplateDraft) return;
+  elements.summaryTemplateFields.innerHTML = "";
+  summaryTemplateDraft.fields.forEach((field, index) => {
+    const card = document.createElement("div");
+    card.className = "summary-template-field";
+    const heading = document.createElement("strong");
+    heading.textContent = field.heading;
+    card.appendChild(heading);
+    const grid = document.createElement("div");
+    grid.className = "summary-template-field-grid";
+    const label = document.createElement("input");
+    label.value = field.label || field.heading;
+    label.placeholder = "字段名称";
+    label.addEventListener("input", () => { field.label = label.value; });
+    const key = document.createElement("input");
+    key.value = field.key || `field_${index + 1}`;
+    key.placeholder = "field_key";
+    key.addEventListener("input", () => { field.key = key.value; });
+    const type = document.createElement("select");
+    [["text", "文本"], ["list", "列表"], ["evidence_list", "带证据列表"], ["table", "表格"]].forEach(([value, name]) => {
+      const option = document.createElement("option"); option.value = value; option.textContent = name; type.appendChild(option);
+    });
+    type.value = field.type || "text";
+    type.addEventListener("change", () => { field.type = type.value; renderSummaryTemplateFields(); });
+    const description = document.createElement("input");
+    description.value = field.description || "";
+    description.placeholder = "从会议原文提取的内容说明";
+    description.addEventListener("input", () => { field.description = description.value; });
+    grid.append(label, key, type, description);
+    card.appendChild(grid);
+    if (field.type === "table") {
+      const columns = document.createElement("input");
+      columns.value = (field.columns || []).join(",");
+      columns.placeholder = "表格列名，使用逗号分隔";
+      columns.addEventListener("input", () => { field.columns = columns.value.split(/[,，]/).map((item) => item.trim()).filter(Boolean); });
+      card.appendChild(columns);
+    }
+    const actions = document.createElement("div");
+    actions.className = "summary-template-field-actions";
+    [["上移", -1], ["下移", 1]].forEach(([name, offset]) => {
+      const button = document.createElement("button"); button.type = "button"; button.className = "ghost-button"; button.textContent = name;
+      button.disabled = index + offset < 0 || index + offset >= summaryTemplateDraft.fields.length;
+      button.addEventListener("click", () => {
+        const target = index + offset;
+        [summaryTemplateDraft.fields[index], summaryTemplateDraft.fields[target]] = [summaryTemplateDraft.fields[target], summaryTemplateDraft.fields[index]];
+        renderSummaryTemplateFields();
+      });
+      actions.appendChild(button);
+    });
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "ghost-button"; remove.textContent = "删除";
+    remove.addEventListener("click", () => { summaryTemplateDraft.fields.splice(index, 1); renderSummaryTemplateFields(); });
+    actions.appendChild(remove);
+    card.appendChild(actions);
+    elements.summaryTemplateFields.appendChild(card);
+  });
+}
+
+async function analyzeSummaryTemplate() {
+  const file = elements.summaryTemplateFile && elements.summaryTemplateFile.files[0];
+  if (!file) throw new Error("请先选择 Markdown 模板文件");
+  if (!file.name.toLowerCase().endsWith(".md")) throw new Error("只支持上传 .md 文件");
+  const form = new FormData(); form.append("file", file);
+  const response = await fetch(summaryTemplateApiUrl("/analyze"), { method: "POST", body: form });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  summaryTemplateDraft = result;
+  elements.summaryTemplateName.value = file.name.replace(/\.md$/i, "");
+  elements.summaryTemplateEditor.hidden = false;
+  renderSummaryTemplateFields();
+  setToolStatus("模板分析完成，请确认字段后保存。", "success");
+}
+
+async function saveSummaryTemplate() {
+  if (!summaryTemplateDraft) throw new Error("请先分析模板");
+  const response = await fetch(summaryTemplateApiUrl(`/${encodeURIComponent(summaryTemplateDraft.draft_id)}/confirm`), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: elements.summaryTemplateName.value.trim(), fields: summaryTemplateDraft.fields }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  const templateId = result.template && result.template.id;
+  summaryTemplateDraft = null;
+  elements.summaryTemplateEditor.hidden = true;
+  elements.summaryTemplateFile.value = "";
+  await loadSummaryTemplates(templateId);
+  setToolStatus("自定义总结模板已保存。", "success");
 }
 
 function renderSummaryVersions() {
@@ -350,7 +482,7 @@ function renderSummaryVersions() {
   summaryVersions.slice().reverse().forEach((item) => {
     const option = document.createElement("option");
     option.value = String(item.version);
-    option.textContent = `v${item.version} · ${item.template || "legacy"} · ${item.generated_at || ""}`;
+    option.textContent = `v${item.version} · ${item.template_name || item.template || "legacy"} · ${item.generated_at || ""}`;
     elements.summaryVersion.appendChild(option);
   });
   elements.summaryVersion.value = Array.from(elements.summaryVersion.options).some((option) => option.value === selected) ? selected : "";
@@ -500,7 +632,7 @@ async function generateSummary() {
     const response = await fetch(summaryApiUrl(selectedSummarySessionId), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ template: selectedSummaryTemplate() }),
+      body: JSON.stringify(selectedSummaryTemplate()),
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok || !result.generated) throw new Error(result.error || `HTTP ${response.status}`);
@@ -1223,6 +1355,43 @@ elements.exportLog.addEventListener("click", () => {
     setToolStatus(`日志导出失败：${error.message}`, "error");
   });
 });
+if (elements.analyzeSummaryTemplate) {
+  elements.analyzeSummaryTemplate.addEventListener("click", () => {
+    setToolStatus("正在分析 Markdown 模板…");
+    analyzeSummaryTemplate().catch((error) => {
+      console.error(error);
+      setToolStatus(`模板分析失败：${error.message}`, "error");
+    });
+  });
+}
+if (elements.saveSummaryTemplate) {
+  elements.saveSummaryTemplate.addEventListener("click", () => {
+    saveSummaryTemplate().catch((error) => {
+      console.error(error);
+      setToolStatus(`模板保存失败：${error.message}`, "error");
+    });
+  });
+}
+if (elements.addSummaryTemplateField) {
+  elements.addSummaryTemplateField.addEventListener("click", () => {
+    if (!summaryTemplateDraft) return;
+    const used = new Set(summaryTemplateDraft.fields.map((field) => field.heading));
+    const section = (summaryTemplateDraft.sections || []).find((item) => !used.has(item.heading));
+    if (!section) {
+      setToolStatus("模板中的所有标题都已配置字段。", "error");
+      return;
+    }
+    summaryTemplateDraft.fields.push({
+      key: `field_${summaryTemplateDraft.fields.length + 1}`,
+      label: section.heading,
+      heading: section.heading,
+      type: "text",
+      description: `根据会议原文填写“${section.heading}”`,
+      columns: [],
+    });
+    renderSummaryTemplateFields();
+  });
+}
 if (elements.generateSummary) {
   elements.generateSummary.addEventListener("click", () => {
     generateSummary().catch((error) => {

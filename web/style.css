@@ -159,6 +159,16 @@ input:focus, select:focus { border-color: var(--green-deep); box-shadow: 0 0 0 3
 .ghost-button { border: 1px solid transparent; background: transparent; color: var(--muted); }
 .tool-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
 .summary-fields { padding-top: 16px; border-top: 1px dashed var(--line); }
+.summary-template-upload { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, .015); }
+.summary-template-upload input[type="file"] { padding: 9px; font-size: 11px; }
+.summary-template-editor { display: grid; gap: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.summary-template-fields { display: grid; gap: 10px; }
+.summary-template-field { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); }
+.summary-template-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.summary-template-field input, .summary-template-field select { min-height: 36px; font-size: 11px; }
+.summary-template-field-actions, .template-editor-actions { display: flex; gap: 8px; }
+.summary-template-field-actions button { min-height: 32px; padding: 0 9px; font-size: 11px; }
+.template-editor-actions > * { flex: 1; }
 .tool-status { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .tool-status.error { color: var(--red); }
 .tool-status.success { color: var(--green); }

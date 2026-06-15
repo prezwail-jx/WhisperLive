@@ -12,10 +12,11 @@
 ## 项目结构与职责
 
 - `run_server.py` 是服务启动入口，新增服务参数时要同步检查 `whisper_live/server.py` 的 `TranscriptionServer.run()`。
-- `whisper_live/` 是后端核心，包含 ASR、翻译、WebSocket 服务、Admin API、会议热词和会议日志逻辑。
+- `whisper_live/` 是后端核心，包含 ASR、翻译、WebSocket 服务和 Admin API；会议热词、日志、总结与模板逻辑集中在 `whisper_live/meeting/`。
 - `web/` 是浏览器前端，只负责音频采集、实时展示、连接配置和下载后端生成的日志。
 - 前端不要重新实现会议日志拼接、清洗、落盘；会议日志由后端 Python 按 session 记录。
 - `scripts/start_whisper_service.sh` 和 `scripts/start_funasr_service.sh` 是服务拉起脚本，修改启动参数时优先同步这里。
+- `whisper_live/server.py` 负责服务编排，并兼容导出会议模块公共类型；新增会议业务优先放入 `whisper_live/meeting/`，不要重新堆回 `server.py`。
 - `deploy/` 存放部署和 Nginx 相关配置；除非需求明确，不要顺手改部署文件。
 
 ## 运行与部署约定

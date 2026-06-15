@@ -101,6 +101,15 @@
           <div class="field-stack summary-fields">
             <label>总结会议<select id="summarySessionInput"><option value="">暂无已结束会议</option></select></label>
             <label>总结模板<select id="summaryTemplateInput"><option value="auto" selected>自动判断</option><option value="project_meeting">项目会议</option><option value="customer_interview">客户访谈</option><option value="training_speech">培训 / 演讲</option><option value="discussion">讨论会</option></select></label>
+            <div class="summary-template-upload">
+              <label>上传 Markdown 模板<input id="summaryTemplateFileInput" type="file" accept=".md,text/markdown"></label>
+              <button id="analyzeSummaryTemplateButton" class="secondary-button" type="button">分析模板</button>
+              <div id="summaryTemplateEditor" class="summary-template-editor" hidden>
+                <label>模板名称<input id="summaryTemplateNameInput" type="text" maxlength="100" placeholder="例如：周例会纪要"></label>
+                <div id="summaryTemplateFields" class="summary-template-fields"></div>
+                <div class="template-editor-actions"><button id="addSummaryTemplateFieldButton" class="ghost-button" type="button">添加字段</button><button id="saveSummaryTemplateButton" class="primary-button" type="button">保存模板</button></div>
+              </div>
+            </div>
             <button id="refreshSummarySessionsButton" class="secondary-button" type="button">刷新会议列表</button>
             <button id="generateSummaryButton" class="primary-button" type="button" disabled>生成总结</button>
             <label>下载版本<select id="summaryVersionInput" disabled><option value="">最新版</option></select></label>
@@ -110,6 +119,6 @@
         </section>
       </div>
     </aside>
-    <script src="./app.js?v=caption-style-1"></script>
+    <script src="./app.js?v=summary-template-1"></script>
   </body>
 </html>
