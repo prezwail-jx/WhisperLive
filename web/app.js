@@ -424,6 +424,27 @@ function renderSummaryTemplateFields() {
       columns.addEventListener("input", () => { field.columns = columns.value.split(/[,，]/).map((item) => item.trim()).filter(Boolean); });
       card.appendChild(columns);
     }
+    const options = document.createElement("div");
+    options.className = "summary-template-field-options";
+    const requiredLabel = document.createElement("label");
+    const required = document.createElement("input");
+    required.type = "checkbox";
+    required.checked = Boolean(field.required);
+    required.addEventListener("change", () => { field.required = required.checked; });
+    requiredLabel.append(required, document.createTextNode("必填字段"));
+    options.appendChild(requiredLabel);
+    if (field.type === "table") {
+      const metadataLabel = document.createElement("label");
+      const metadata = document.createElement("input");
+      metadata.type = "checkbox";
+      metadata.checked = Boolean(field.metadata_enrichment);
+      metadata.addEventListener("change", () => { field.metadata_enrichment = metadata.checked; });
+      metadataLabel.append(metadata, document.createTextNode("补充会议信息"));
+      options.appendChild(metadataLabel);
+    } else {
+      field.metadata_enrichment = false;
+    }
+    card.appendChild(options);
     const actions = document.createElement("div");
     actions.className = "summary-template-field-actions";
     [["上移", -1], ["下移", 1]].forEach(([name, offset]) => {
@@ -624,6 +645,14 @@ async function exportMeetingLog() {
   setToolStatus("当前会议日志已下载。", "success");
 }
 
+function summaryErrorDetailText(error) {
+  const details = error && error.details;
+  const missing = details && Array.isArray(details.missing_fields) ? details.missing_fields : [];
+  const labels = missing.map((field) => field && (field.label || field.key)).filter(Boolean);
+  if (!labels.length) return "";
+  return "；缺失字段：" + labels.join("、");
+}
+
 async function generateSummary() {
   if (!selectedSummarySessionId) throw new Error("请选择已结束的会议 session");
   if (selectedSummarySessionStatus !== "finished") throw new Error("请先停止会议后再生成总结");
@@ -635,7 +664,12 @@ async function generateSummary() {
       body: JSON.stringify(selectedSummaryTemplate()),
     });
     const result = await response.json().catch(() => ({}));
-    if (!response.ok || !result.generated) throw new Error(result.error || `HTTP ${response.status}`);
+    if (!response.ok || !result.generated) {
+      const error = new Error(result.error || `HTTP ${response.status}`);
+      error.code = result.error_code || "";
+      error.details = result.details || {};
+      throw error;
+    }
     summaryGenerated = true;
     await loadSummaryInfo(selectedSummarySessionId);
     setStatus(result.summary && result.summary.latest_version > 1 ? "总结已重新生成" : "总结已生成", "ready");
@@ -1388,6 +1422,8 @@ if (elements.addSummaryTemplateField) {
       type: "text",
       description: `根据会议原文填写“${section.heading}”`,
       columns: [],
+      required: false,
+      metadata_enrichment: false,
     });
     renderSummaryTemplateFields();
   });
@@ -1397,7 +1433,10 @@ if (elements.generateSummary) {
     generateSummary().catch((error) => {
       console.error(error);
       setStatus("总结生成失败", "error");
-      setToolStatus(`总结生成失败：${error.message}`, "error");
+      const prefix = error.code === "summary_quality_insufficient"
+        ? "总结不完整，未保存新版本"
+        : "总结生成失败";
+      setToolStatus(`${prefix}：${error.message}${summaryErrorDetailText(error)}`, "error");
     });
   });
 }

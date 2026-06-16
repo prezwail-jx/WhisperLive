@@ -437,6 +437,22 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
 
 
 class TestMeetingSummaryIntegration(unittest.TestCase):
+    def test_custom_quality_failure_does_not_write_new_version(self):
+        server = object.__new__(TranscriptionServer)
+        server.meeting_logs = MagicMock()
+        server.meeting_logs.session_info.return_value = {"status": "finished"}
+        server.meeting_logs.get_session_payload.return_value = {"source_segments": [{"text": "test"}]}
+        server.summary_templates = MagicMock()
+        server.summary_templates.get.return_value = {"id": "custom", "fields": [{"key": "overview"}]}
+        server.meeting_summary = MagicMock()
+        server.meeting_summary.generate_custom.side_effect = SummaryGenerationError(
+            "summary_quality_insufficient", "总结质量不足，未保存新版本",
+            {"missing_fields": ["overview"]},
+        )
+        with self.assertRaises(SummaryGenerationError):
+            server.generate_meeting_summary("session-1", "custom", "custom")
+        server.meeting_logs.write_summary.assert_not_called()
+
     def test_summary_failure_does_not_write_new_version(self):
         server = object.__new__(TranscriptionServer)
         server.meeting_logs = MagicMock()

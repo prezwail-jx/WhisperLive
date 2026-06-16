@@ -63,6 +63,8 @@ class SummaryTemplateStore:
                 "description": f"根据会议原文填写‘{section['heading']}’",
                 "heading": section["heading"],
                 "columns": [],
+                "required": False,
+                "metadata_enrichment": False,
             })
         return fields
 
@@ -101,6 +103,8 @@ class SummaryTemplateStore:
                 "description": str(field.get("description") or f"根据会议原文填写‘{heading}’").strip()[:300],
                 "heading": heading,
                 "columns": columns,
+                "required": bool(field.get("required")),
+                "metadata_enrichment": bool(field.get("metadata_enrichment")) and field_type == "table",
             })
         return cleaned
 
@@ -119,10 +123,18 @@ class SummaryTemplateStore:
             output.append(lines[index])
             if heading in replacements:
                 output.extend(["", replacements[heading]])
+                current_level = len(match.group(1))
+            else:
+                current_level = None
             index += 1
+            if current_level is None:
+                continue
             while index < len(lines):
                 next_heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", lines[index])
-                if next_heading:
+                if next_heading and (
+                    len(next_heading.group(1)) <= current_level
+                    or next_heading.group(2).strip() in replacements
+                ):
                     break
                 index += 1
         return "\n".join(output).rstrip() + "\n"

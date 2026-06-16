@@ -8,15 +8,18 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .common import now_iso
 from .templates import SummaryTemplateStore
 
 
 class SummaryGenerationError(RuntimeError):
-    def __init__(self, code, message):
+    def __init__(self, code, message, details=None):
         super().__init__(message)
         self.code = code
+        self.details = details or {}
 
 
 class MeetingSummaryService:
@@ -207,7 +210,7 @@ class MeetingSummaryService:
 
     def __init__(self, base_url="http://127.0.0.1:8001/v1", model="qwen3-4b-awq",
                  startup_command="bash scripts/start_summary_llm_service.sh", timeout=600,
-                 ready_timeout=300, max_chars_per_chunk=4000, idle_shutdown_seconds=600):
+                 ready_timeout=300, max_chars_per_chunk=8000, idle_shutdown_seconds=600):
         self.base_url = str(base_url or "").rstrip("/")
         self.model = model or "qwen3-4b-awq"
         self.startup_command = startup_command or ""
@@ -867,40 +870,306 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
         for field in fields:
             key, field_type = field["key"], field["type"]
             if field_type == "text":
-                schema = (
-                    f'"{key}":{{"text":"","evidence_start":0,'
-                    '"evidence_end":0,"evidence_quote":""}'
-                )
+                schema = f'"{key}":{{"text":""}}'
             elif field_type == "table":
                 columns = field.get("columns") or ["内容"]
                 values = [f'"{column}":""' for column in columns]
-                values.extend([
-                    '"evidence_start":0',
-                    '"evidence_end":0',
-                    '"evidence_quote":""',
-                ])
                 schema = f'"{key}":[{{' + ",".join(values) + '}]'
-            else:
+            elif field_type == "evidence_list":
                 schema = f'"{key}":[{{"text":"","evidence_start":0,"evidence_end":0,"evidence_quote":""}}]'
+            else:
+                schema = f'"{key}":[""]'
             parts.append(schema)
         return "{\n  " + ",\n  ".join(parts) + "\n}"
+
+    @staticmethod
+    def _custom_field_instruction(field):
+        key = str(field.get("key") or "").lower()
+        label = str(field.get("label") or "")
+        description = str(field.get("description") or "")
+        text = f"{key} {label} {description}".lower()
+        instructions = []
+        if "议题" in text or "topic" in text or "agenda" in text:
+            instructions.append(
+                "输出会议自然顺序中的6到10个高层议题，必须覆盖整场会议，禁止把口头残句、单个动作、项目经理姓名或模板示例拆成零碎短语。"
+            )
+        if any(marker in text for marker in ("综述", "总结", "讨论事项", "重点事项", "key item", "key point", "overview")):
+            instructions.append(
+                "按编号议题输出，格式为“1. 议题标题”加一段综述；每个编号聚合背景、进展、结论和后续动作，输出6到10个高层事项；覆盖整场会议，不只总结前半段；禁止时间戳、逐片段摘要、单个大项挂几十个子项或未分组流水账。"
+            )
+        if any(marker in text for marker in ("待办", "行动", "后续", "action", "follow")):
+            instructions.append("只提取原文明示的后续动作、责任方、时间或状态；不要把泛泛建议写成待办。")
+        if any(marker in text for marker in ("风险", "问题", "待确认", "risk", "question")):
+            instructions.append("区分已确认风险、待确认问题和普通讨论，不要扩大化。")
+        if field.get("type") == "table":
+            instructions.append("表格行必须是同一粒度的事实项，避免把整段综述塞进单元格。")
+        return " ".join(instructions)
 
     def _custom_prompt(self, definition, fields, merge=False):
         descriptions = "\n".join(
             f"- 字段 {field['key']}，标题【{field['label']}】，类型 {field['type']}。"
-            f"提取范围提示：{field.get('description') or field['label']}"
+            f"提取范围提示：{field.get('description') or field['label']}。"
+            f"{self._custom_field_instruction(field)}"
             for field in fields
         )
-        task = "合并同一会议的分块结果，去重且不得增加新事实或证据。" if merge else "仅根据会议原文填写字段。"
+        task = (
+            "合并同一会议的分块结果，按编号议题去重归并，保持编号议题段落结构，不得增加新事实或证据。"
+            if merge else
+            "仅根据会议原文填写字段。"
+        )
         return (
             f"{self.BASE_PROMPT}\n\n这是用户确认过的自定义纪要字段。{task}\n"
             "字段名称、标题、说明、表格列名以及模板中的示例只定义格式和提取范围，不是会议事实。"
+            "禁止在字段内容里重复输出字段标题。"
             "严禁复述原文没有直接提及的专名、日期、任务、结论或示例内容。"
-            "每一项都必须提供能在会议原文中核验的时间范围和原文引用；没有依据时，"
-            "text 返回空对象，list、evidence_list、table 返回空数组。\n"
+            "只有 evidence_list 字段必须提供能在会议原文中核验的时间范围和原文引用；"
+            "text、list、table 字段只需基于原文概括，不要为了证据格式牺牲正文完整性。"
+            "没有依据时，text 返回空对象，list、evidence_list、table 返回空数组。\n"
             f"字段说明：\n{descriptions}\n只输出以下 JSON 字段，禁止输出其他字段：\n"
-            f"{self._custom_schema(fields)}\n每个数组最多8项；文本字段不超过300字。"
+            f"{self._custom_schema(fields)}\n"
+            "普通列表最多12项；议题类列表应为6到10项高层议题；证据列表和表格最多8项；"
+            "适合综述/总结的文本字段必须使用编号议题段落，编号为1. 2. 3.，每项标题后写简明综述；"
+            "禁止时间戳、逐segment摘要、几十条平铺列表或单个大项挂全部子项。文本字段不超过1200字。"
         )
+
+    @staticmethod
+    def _is_custom_summary_text_field(field):
+        if field.get("type") != "text":
+            return False
+        text = " ".join(str(field.get(key) or "") for key in ("key", "label", "heading", "description")).lower()
+        return any(marker in text for marker in ("综述", "总结", "讨论事项", "重点事项", "key item", "key point", "overview"))
+
+    @staticmethod
+    def _custom_heading_tokens(field):
+        values = [field.get("label"), field.get("heading"), field.get("key")]
+        tokens = []
+        for value in values:
+            token = re.sub(r"[\s#*_：:;；。,.，、\-—•]+", "", str(value or "")).lower()
+            if token and token not in tokens:
+                tokens.append(token)
+        return tokens
+
+    @classmethod
+    def _normalize_custom_text(cls, body, field):
+        heading_tokens = cls._custom_heading_tokens(field)
+        normalized_lines = []
+        for raw_line in str(body or "").splitlines():
+            line = raw_line.rstrip()
+            if not line.strip():
+                if normalized_lines and normalized_lines[-1]:
+                    normalized_lines.append("")
+                continue
+            match = re.match(r"^(\s*)[•*]\s+(.+)$", line)
+            if match:
+                line = f"{match.group(1)}- {match.group(2).strip()}"
+            top_level = not line.startswith((" ", "\t"))
+            content = re.sub(r"^[-•*]\s*", "", line.strip())
+            content_token = re.sub(r"[\s#*_：:;；。,.，、\-—•]+", "", content).lower()
+            if top_level and content_token in heading_tokens:
+                continue
+            normalized_lines.append(line)
+        return "\n".join(normalized_lines).strip()
+
+    @staticmethod
+    def _custom_numbered_count(body):
+        return len(re.findall(r"(?m)^\s*\d{1,2}[.、]\s+\S+", str(body or "")))
+
+    @staticmethod
+    def _custom_numbered_items(body):
+        items = []
+        current = None
+        for raw_line in str(body or "").splitlines():
+            line = raw_line.strip()
+            match = re.match(r"^(\d{1,2})[.、]\s+(.+)$", line)
+            if match:
+                if current:
+                    items.append(current)
+                current = {"number": int(match.group(1)), "lines": [match.group(2).strip()]}
+                continue
+            if current and line:
+                current["lines"].append(line)
+        if current:
+            items.append(current)
+        return items
+
+    @staticmethod
+    def _custom_topic_soft_target(body):
+        length = len(str(body or ""))
+        if length >= 9000:
+            return 28
+        if length >= 6000:
+            return 24
+        if length >= 3500:
+            return 20
+        if length >= 1800:
+            return 16
+        return 12
+
+    @classmethod
+    def _custom_numbering_restarts(cls, body):
+        numbers = [item["number"] for item in cls._custom_numbered_items(body)]
+        return any(number == 1 and index > 0 for index, number in enumerate(numbers))
+
+    @classmethod
+    def _custom_topic_title(cls, item):
+        first_line = (item.get("lines") or [""])[0]
+        title = re.split(
+            r"(?:\s+会议|会议通报|会议讨论|会议听取|会议同意|会议决定|[：:。；;])",
+            first_line.strip(), 1,
+        )[0].strip()
+        return re.sub(r"\s+", " ", title)
+
+    @staticmethod
+    def _custom_title_token(title):
+        return re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]", "", str(title or "")).lower()
+
+    @classmethod
+    def _custom_duplicate_topic_titles(cls, body):
+        tokens = []
+        for item in cls._custom_numbered_items(body):
+            token = cls._custom_title_token(cls._custom_topic_title(item))
+            if len(token) >= 4:
+                tokens.append(token)
+        return any(tokens.count(token) >= 2 for token in set(tokens))
+
+    @staticmethod
+    def _custom_template_residue(body):
+        return bool(re.search(r"议题标题|字段标题|field[_\s-]*\d+|讨论事项综述[:：]", str(body or ""), re.IGNORECASE))
+
+    @classmethod
+    def _custom_title_only_topics(cls, body):
+        items = cls._custom_numbered_items(body)
+        if len(items) < 4:
+            return False
+        title_only = 0
+        for item in items:
+            text = "".join(item.get("lines") or [])
+            compact = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]", "", text)
+            title_token = cls._custom_title_token(cls._custom_topic_title(item))
+            if len(compact) <= max(16, len(title_token) + 8):
+                title_only += 1
+        return title_only >= max(3, len(items) // 2)
+
+    @staticmethod
+    def _custom_line_repetition_issue(lines):
+        normalized = []
+        for line in lines:
+            body = re.sub(r"^\s*(?:[-*]\s*)?(?:\[[^\]]+\]\s*)?", "", line)
+            body = re.sub(r"[0-9０-９.一二三四五六七八九十百千万亿]+", "#", body)
+            body = re.sub(r"[\s，。！？!?；;：:、,.（）()【】\[\]\-—]+", "", body)
+            if len(body) >= 8:
+                normalized.append(body[:24])
+        return any(normalized.count(item) >= 4 for item in set(normalized))
+
+    @classmethod
+    def _custom_text_quality_detail(cls, body, field, issues=None):
+        issues = list(issues if issues is not None else cls._custom_text_quality_issues(body, field))
+        return {
+            "issues": issues,
+            "numbered_count": cls._custom_numbered_count(body),
+            "allowed_min": 4,
+            "soft_target_max": cls._custom_topic_soft_target(body),
+        }
+
+    @classmethod
+    def _custom_text_quality_blocking(cls, issues, body=None):
+        return [issue for issue in issues if issue != "bad_topic_count"]
+
+    @classmethod
+    def _custom_text_quality_issues(cls, body, field):
+        if not cls._is_custom_summary_text_field(field):
+            return []
+        lines = [line for line in str(body or "").splitlines() if line.strip()]
+        if not lines:
+            return []
+        issues = []
+        timestamp_lines = [
+            line for line in lines
+            if re.match(r"^\s*(?:[-*]\s*)?\[\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\]", line)
+        ]
+        top_bullets = [line for line in lines if re.match(r"^-\s+", line)]
+        child_bullets = [line for line in lines if re.match(r"^\s{2,}-\s+", line)]
+        numbered_count = cls._custom_numbered_count(body)
+        if len(timestamp_lines) >= 3 and len(timestamp_lines) / max(1, len(lines)) >= 0.2:
+            issues.append("timeline_dump")
+        if top_bullets and numbered_count == 0:
+            if len(top_bullets) == 1 and len(child_bullets) >= 10:
+                issues.append("bad_grouping_structure")
+            if len(top_bullets) > 12:
+                issues.append("too_many_top_level_bullets")
+            if len(child_bullets) < max(2, len(top_bullets) // 4):
+                issues.append("low_grouping_depth")
+            issues.append("missing_numbered_topics")
+        if numbered_count and numbered_count < 4:
+            issues.append("bad_topic_count")
+        if numbered_count and numbered_count > cls._custom_topic_soft_target(body):
+            issues.append("bad_topic_count")
+        if numbered_count and cls._custom_numbering_restarts(body):
+            issues.append("restarted_numbering")
+        if numbered_count and cls._custom_duplicate_topic_titles(body):
+            issues.append("duplicate_topic_titles")
+        if numbered_count and cls._custom_title_only_topics(body):
+            issues.append("title_only_topics")
+        if cls._custom_template_residue(body):
+            issues.append("template_residue")
+        if not numbered_count and len(lines) >= 8 and "missing_numbered_topics" not in issues:
+            issues.append("missing_numbered_topics")
+        if cls._custom_line_repetition_issue(lines):
+            issues.append("high_repetition")
+        return list(dict.fromkeys(issues))
+
+    @staticmethod
+    def _is_custom_list_fragment(body, field):
+        text = str(body or "").strip()
+        if not text or not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", text):
+            return True
+        marker_text = f"{field.get('key') or ''} {field.get('label') or ''} {field.get('description') or ''}".lower()
+        if "议题" not in marker_text and "topic" not in marker_text and "agenda" not in marker_text:
+            return False
+        compact = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]", "", text)
+        return len(compact) < 4
+
+    @staticmethod
+    def _custom_source_excerpt(source_text, chunk_chars=1800):
+        text = str(source_text or "")
+        limit = chunk_chars * 3
+        if len(text) <= limit:
+            return text[:limit]
+        middle_start = max(0, len(text) // 2 - chunk_chars // 2)
+        middle = text[middle_start:middle_start + chunk_chars]
+        return "\n\n".join([
+            f"【会议前段】\n{text[:chunk_chars].strip()}",
+            f"【会议中段】\n{middle.strip()}",
+            f"【会议后段】\n{text[-chunk_chars:].strip()}",
+        ]).strip()
+
+    @staticmethod
+    def _is_custom_topic_list_field(field):
+        if field.get("type") != "list":
+            return False
+        text = " ".join(
+            str(field.get(key) or "")
+            for key in ("key", "label", "heading", "description")
+        ).lower()
+        return any(marker in text for marker in ("议题", "议程", "topic", "agenda"))
+
+    @staticmethod
+    def _custom_numbered_titles(body, limit=12):
+        titles = []
+        for raw_line in str(body or "").splitlines():
+            match = re.match(r"^\s*\d{1,2}[.、]\s+(.+)$", raw_line.strip())
+            if not match:
+                continue
+            title = re.split(
+                r"(?:\s+会议|会议通报|会议讨论|会议听取|会议同意|会议决定|[：:。；;])",
+                match.group(1).strip(), 1,
+            )[0].strip()
+            title = re.sub(r"\s+", " ", title)
+            if title and title not in titles:
+                titles.append(title[:120])
+            if len(titles) >= limit:
+                break
+        return titles
 
     def _normalize_custom_data(self, data, payload, fields):
         normalized, evidence_count, filtered = {}, 0, 0
@@ -909,27 +1178,28 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             key, field_type = field["key"], field["type"]
             value = data.get(key)
             if field_type == "text":
-                body = str(value.get("text") or "").strip() if isinstance(value, dict) else ""
-                evidence = self._validate_evidence(value, payload) if body else None
-                if body and evidence:
-                    normalized[key] = body[:2000]
-                    evidence_count += 1
-                else:
-                    normalized[key] = ""
-                    if value not in (None, "", {}):
-                        filtered += 1
-            elif field_type in {"list", "evidence_list"}:
+                body = str(value.get("text") or "").strip() if isinstance(value, dict) else str(value or "").strip()
+                normalized[key] = self._normalize_custom_text(body, field)[:3000]
+            elif field_type == "evidence_list":
                 items, rejected = self._evidence_items(value, payload, limit=8)
-                normalized[key] = items if field_type == "evidence_list" else [
-                    item["text"] for item in items
-                ]
+                normalized[key] = items
                 evidence_count += len(items)
                 filtered += rejected
+            elif field_type == "list":
+                items = []
+                source_items = value if isinstance(value, list) else ([value] if isinstance(value, str) else [])
+                for item in source_items:
+                    body = str(item.get("text") or "").strip() if isinstance(item, dict) else str(item or "").strip()
+                    body = self._normalize_custom_text(body, field)
+                    if body and not self._is_custom_list_fragment(body, field) and body not in items:
+                        items.append(body[:300])
+                    if len(items) >= 12:
+                        break
+                normalized[key] = items
             else:
                 rows = []
                 for row in value[:8] if isinstance(value, list) else []:
                     if not isinstance(row, dict):
-                        filtered += 1
                         continue
                     columns = field.get("columns") or ["内容"]
                     normalized_row = {
@@ -938,13 +1208,383 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                     }
                     if not any(normalized_row.values()):
                         continue
-                    if not self._validate_evidence(row, payload):
-                        filtered += 1
-                        continue
                     rows.append(normalized_row)
-                    evidence_count += 1
                 normalized[key] = rows
         return normalized, evidence_count, filtered
+
+    @staticmethod
+    def _custom_value_empty(value):
+        if isinstance(value, str):
+            return not value.strip()
+        if isinstance(value, (list, dict)):
+            return not value
+        return value in (None, "")
+
+    @staticmethod
+    def _parse_session_time(value):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if not parsed.tzinfo:
+                return parsed
+            try:
+                target_zone = ZoneInfo(os.environ.get("TZ") or "Asia/Shanghai")
+            except ZoneInfoNotFoundError:
+                return parsed.astimezone()
+            return parsed.astimezone(target_zone)
+        except ValueError:
+            return None
+
+    def _meeting_metadata_rows(self, payload):
+        segments = []
+        for segment in payload.get("source_segments") or []:
+            if not isinstance(segment, dict) or not str(segment.get("text") or "").strip():
+                continue
+            start = self._float(segment.get("start"))
+            end = self._float(segment.get("end"))
+            if start is not None and end is not None and end >= start:
+                segments.append((start, end, segment))
+        rows = [("会议名称", payload.get("meeting_name") or payload.get("client_name") or "")]
+        if segments:
+            content_start = min(item[0] for item in segments)
+            content_end = max(item[1] for item in segments)
+            base_value = segments[0][2].get("session_started_at") or payload.get("created_at")
+            base_time = self._parse_session_time(base_value)
+            if base_time:
+                started = base_time + timedelta(seconds=content_start)
+                ended = base_time + timedelta(seconds=content_end)
+                rows.extend([
+                    ("开始时间", started.strftime("%Y-%m-%d %H:%M:%S")),
+                    ("结束时间", ended.strftime("%Y-%m-%d %H:%M:%S")),
+                ])
+            duration = max(0, int(round(content_end - content_start)))
+            minutes, seconds = divmod(duration, 60)
+            rows.append(("时长", f"{minutes}分{seconds:02d}秒"))
+        languages = []
+        for _start, _end, segment in segments:
+            language = str(segment.get("language") or "").strip()
+            if language and language not in languages:
+                languages.append(language)
+        source_language = str(payload.get("source_language") or "").strip()
+        if not languages and source_language:
+            languages.append(source_language)
+        if languages:
+            rows.append(("语言", ", ".join(languages)))
+        if payload.get("model"):
+            rows.append(("ASR 模型", str(payload.get("model"))))
+        return [(key, str(value).strip()) for key, value in rows if str(value or "").strip()]
+
+    def _enrich_custom_metadata(self, data, payload, fields):
+        enriched = dict(data)
+        metadata_rows = self._meeting_metadata_rows(payload)
+        metadata_keys = {key for key, _value in metadata_rows}
+        metadata_keys.update({"会议基本信息", "会议时间", "时间", "内容时间范围", "会议时长"})
+        for field in fields:
+            if field.get("type") != "table" or not field.get("metadata_enrichment"):
+                continue
+            columns = field.get("columns") or ["项目", "内容"]
+            if len(columns) < 2:
+                continue
+            name_column, value_column = columns[:2]
+            existing = enriched.get(field["key"])
+            preserved = []
+            for row in existing if isinstance(existing, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get(name_column) or "").strip()
+                if name and name not in metadata_keys:
+                    preserved.append(row)
+            deterministic = [
+                {name_column: name, value_column: value}
+                for name, value in metadata_rows
+            ]
+            enriched[field["key"]] = deterministic + preserved
+        return enriched
+
+    @staticmethod
+    def _custom_output_budget(fields):
+        weights = {"text": 2200, "list": 1600, "evidence_list": 1800, "table": 1800}
+        return min(3000, max(1200, sum(weights.get(field.get("type"), 1600) for field in fields)))
+
+    @staticmethod
+    def _custom_field_groups(fields):
+        groups, pending = [], []
+        for field in fields:
+            if field.get("type") == "text" and field.get("required"):
+                if pending:
+                    groups.append(pending)
+                    pending = []
+                groups.append([field])
+                continue
+            pending.append(field)
+            if len(pending) >= 2:
+                groups.append(pending)
+                pending = []
+        if pending:
+            groups.append(pending)
+        return groups
+
+    def _request_custom_fields(self, messages, definition, fields, context, merge=False):
+        try:
+            return self.request_json(
+                messages,
+                max_tokens=self._custom_output_budget(fields),
+                context=context,
+            )
+        except SummaryGenerationError as exc:
+            if len(fields) == 1 or exc.code not in {
+                "summary_response_truncated", "summary_response_invalid_json"
+            }:
+                raise
+            logging.warning("%s context=%s; splitting custom fields", exc.code, context)
+            combined = {}
+            for field in fields:
+                field_messages = [
+                    {"role": "system", "content": self._custom_prompt(definition, [field], merge=merge)},
+                    *messages[1:],
+                ]
+                combined.update(self.request_json(
+                    field_messages,
+                    max_tokens=self._custom_output_budget([field]),
+                    context=f"{context} field={field['key']}",
+                ))
+            return combined
+
+    def _generate_custom_fields(self, payload, definition, fields, chunks):
+        combined = {}
+        meeting_name = payload.get("meeting_name") or payload.get("client_name") or "未命名会议"
+        for group_index, group in enumerate(self._custom_field_groups(fields)):
+            results = []
+            for chunk in chunks:
+                messages = [
+                    {"role": "system", "content": self._custom_prompt(definition, group)},
+                    {"role": "user", "content": f"会议名称：{meeting_name}\n\n会议原文记录：\n{chunk}"},
+                ]
+                results.append(self._request_custom_fields(
+                    messages, definition, group,
+                    f"custom template={definition.get('id')} group={group_index}",
+                ))
+            merge_level = 0
+            while len(results) > 1:
+                merged = []
+                for result_index in range(0, len(results), 2):
+                    pair = results[result_index:result_index + 2]
+                    if len(pair) == 1:
+                        merged.append(pair[0])
+                        continue
+                    messages = [
+                        {"role": "system", "content": self._custom_prompt(definition, group, merge=True)},
+                        {"role": "user", "content": json.dumps(pair, ensure_ascii=False, separators=(",", ":"))},
+                    ]
+                    merged.append(self._request_custom_fields(
+                        messages, definition, group,
+                        f"custom template merge={definition.get('id')} group={group_index} level={merge_level}",
+                        merge=True,
+                    ))
+                results = merged
+                merge_level += 1
+            combined.update(results[0] if results else {})
+        return combined
+
+    def _custom_rewrite_text_field(self, payload, definition, field, current_text, source_text):
+        current_text = str(current_text or "")
+        source_text = str(source_text or "")
+        meeting_name = payload.get("meeting_name") or payload.get("client_name") or "未命名会议"
+        max_tokens = min(self._custom_output_budget([field]), 1600)
+
+        def prompt_for_retry(degraded=False):
+            source_note = (
+                "本次为降级重试，不能使用完整原文；只能基于当前不合格输出归并整理，禁止新增事实。"
+                if degraded else
+                "会议原文摘录包含前段、中段和后段，用于补齐尾部事项；主要任务是把当前不合格输出压缩重组为编号议题综述。"
+            )
+            return (
+                f"{self.BASE_PROMPT}\n\n"
+                "你要修复自定义会议纪要中的一个综述类字段。只输出严格 JSON。"
+                f"字段 key：{field['key']}；标题：{field.get('label') or field['key']}。"
+                f"{source_note}"
+                "输出格式必须是编号议题段落：1. 议题标题，然后写一段会议综述；继续 2. 3.。"
+                "按会议自然顺序覆盖整场会议，优先合并同类项；长会议可以保留更多正式事项，不要为了减少条数删除关键事项。"
+                "每项聚合背景、进展、结论和后续动作，不要逐句摘录。"
+                "禁止输出时间戳，禁止逐segment摘要，禁止几十条平铺列表，禁止单个大项挂全部子项；决赛安排、收购处置、融资事项、概念验证、款项验收等相近讨论应分别合并成独立事项。"
+                "不要重复字段标题，不要输出 Markdown 表格。\n"
+                f"JSON schema：{{\"{field['key']}\":{{\"text\":\"\"}}}}"
+            )
+
+        def user_message(include_source):
+            parts = [
+                f"会议名称：{meeting_name}",
+                "当前不合格输出：",
+                current_text[:2500 if include_source else 3000],
+            ]
+            if include_source:
+                parts.extend(["会议原文前中后摘录：", self._custom_source_excerpt(source_text)])
+            return "\n\n".join(parts)
+
+        def request_rewrite(include_source):
+            degraded = not include_source
+            return self.request_json(
+                [
+                    {"role": "system", "content": prompt_for_retry(degraded=degraded)},
+                    {"role": "user", "content": user_message(include_source=include_source)},
+                ],
+                max_tokens=max_tokens,
+                context=(
+                    f"custom template rewrite={definition.get('id')} field={field['key']}"
+                    f" mode={'degraded' if degraded else 'source'}"
+                ),
+            )
+
+        try:
+            data = request_rewrite(include_source=True)
+        except RuntimeError as exc:
+            if not self._is_context_error(exc):
+                raise
+            logging.warning(
+                "Custom summary rewrite exceeded context; retrying without source text: template=%s field=%s",
+                definition.get("id"), field["key"],
+            )
+            try:
+                data = request_rewrite(include_source=False)
+            except RuntimeError as retry_exc:
+                if not self._is_context_error(retry_exc):
+                    raise
+                logging.warning(
+                    "Custom summary degraded rewrite still exceeded context: template=%s field=%s",
+                    definition.get("id"), field["key"],
+                )
+                return self._normalize_custom_text(current_text, field)[:3000]
+        value = data.get(field["key"]) if isinstance(data, dict) else None
+        body = str(value.get("text") or "").strip() if isinstance(value, dict) else str(value or "").strip()
+        return self._normalize_custom_text(body, field)[:3000]
+
+    def _custom_compact_numbered_summary(self, payload, definition, field, current_text):
+        current_text = str(current_text or "")
+        meeting_name = payload.get("meeting_name") or payload.get("client_name") or "未命名会议"
+        max_tokens = min(self._custom_output_budget([field]), 1600)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"{self.BASE_PROMPT}\n\n"
+                    "你要把一个过碎的会议综述字段压缩合并。只输出严格 JSON。"
+                    f"字段 key：{field['key']}；标题：{field.get('label') or field['key']}。"
+                    "只能使用当前编号事项中的事实，禁止新增事实，禁止引入当前文本没有的信息。"
+                    "输出格式必须是编号议题段落：1. 议题标题，然后写一段稍微详细的会议综述；继续 2. 3.。"
+                    "优先压缩到当前会议复杂度对应的合理范围；长会议可以保留更多事项，但必须合并重复主题、修复重新编号、删除模板残留。"
+                    "每项不能只有标题，必须保留简明解释，说明会议讲了什么、结论或后续安排是什么。"
+                    "禁止输出时间戳，禁止逐条改写原编号，禁止多个编号序列拼接，禁止 Markdown 表格，禁止重复字段标题。\n"
+                    f"JSON schema：{{\"{field['key']}\":{{\"text\":\"\"}}}}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": "\n\n".join([
+                    f"会议名称：{meeting_name}",
+                    "需要压缩合并的当前编号事项：",
+                    current_text[:5000],
+                ]),
+            },
+        ]
+        data = self.request_json(
+            messages,
+            max_tokens=max_tokens,
+            context=f"custom template compact={definition.get('id')} field={field['key']}",
+        )
+        value = data.get(field["key"]) if isinstance(data, dict) else None
+        body = str(value.get("text") or "").strip() if isinstance(value, dict) else str(value or "").strip()
+        return self._normalize_custom_text(body, field)[:3000]
+
+    def _repair_custom_text_quality(self, custom_data, payload, definition, fields, source_text):
+        repaired = dict(custom_data)
+        all_issues = []
+        for field in fields:
+            if not self._is_custom_summary_text_field(field):
+                continue
+            key = field["key"]
+            issues = self._custom_text_quality_issues(repaired.get(key), field)
+            if not issues:
+                continue
+            logging.warning(
+                "Custom summary text quality rewrite: template=%s field=%s issues=%s",
+                definition.get("id"), key, ",".join(issues),
+            )
+            rewritten = self._custom_rewrite_text_field(
+                payload, definition, field, repaired.get(key), source_text
+            )
+            repaired[key] = rewritten
+            remaining = self._custom_text_quality_issues(rewritten, field)
+            compact_issues = {
+                "bad_topic_count", "restarted_numbering", "duplicate_topic_titles",
+                "template_residue", "title_only_topics", "high_repetition",
+            }
+            if any(issue in remaining for issue in compact_issues):
+                logging.warning(
+                    "Custom summary text compacting structural issues: template=%s field=%s issues=%s numbered_count=%s soft_target_max=%s",
+                    definition.get("id"), key, ",".join(remaining),
+                    self._custom_numbered_count(rewritten), self._custom_topic_soft_target(rewritten),
+                )
+                compacted = self._custom_compact_numbered_summary(payload, definition, field, rewritten)
+                repaired[key] = compacted
+                remaining = self._custom_text_quality_issues(compacted, field)
+                rewritten = compacted
+            blocking = self._custom_text_quality_blocking(remaining, rewritten)
+            if blocking:
+                detail = self._custom_text_quality_detail(rewritten, field, remaining)
+                detail.update({"key": key, "label": field.get("label") or key})
+                all_issues.append(detail)
+            elif remaining:
+                logging.warning(
+                    "Custom summary text quality warning accepted: template=%s field=%s issues=%s numbered_count=%s",
+                    definition.get("id"), key, ",".join(remaining), self._custom_numbered_count(rewritten),
+                )
+        return repaired, all_issues
+
+    def _repair_custom_topic_lists_from_summary(self, custom_data, fields):
+        summary_titles = []
+        for field in fields:
+            if not self._is_custom_summary_text_field(field):
+                continue
+            titles = self._custom_numbered_titles(custom_data.get(field["key"]), limit=12)
+            if len(titles) >= 4:
+                summary_titles = titles
+                break
+        if len(summary_titles) < 4:
+            return custom_data
+
+        repaired = dict(custom_data)
+        for field in fields:
+            if not self._is_custom_topic_list_field(field):
+                continue
+            key = field["key"]
+            current = repaired.get(key) if isinstance(repaired.get(key), list) else []
+            current_compact = {re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]", "", str(item)) for item in current}
+            title_compact = {re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]", "", title) for title in summary_titles}
+            overlap = len(current_compact & title_compact)
+            if len(current) < 4 or overlap < max(2, len(summary_titles) // 3):
+                repaired[key] = summary_titles[:12]
+        return repaired
+
+    def _custom_quality_issues(self, data, fields, evidence_count, filtered):
+        missing_fields = [
+            {"key": field["key"], "label": field.get("label") or field["key"]}
+            for field in fields
+            if field.get("required") and self._custom_value_empty(data.get(field["key"]))
+        ]
+        evidence_fields = [
+            field for field in fields
+            if field.get("type") == "evidence_list" and (field.get("required") or data.get(field["key"]))
+        ]
+        issues = []
+        if missing_fields:
+            issues.append("required_fields_empty")
+        if evidence_fields and evidence_count == 0:
+            issues.append("no_valid_evidence")
+        if evidence_fields and filtered >= 2 and filtered / max(1, evidence_count + filtered) >= 0.5:
+            issues.append("high_evidence_rejection")
+        return issues, missing_fields
 
     def generate_custom(self, payload, definition):
         text = self.extract_meeting_text(payload)
@@ -955,22 +1595,61 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             raise ValueError("custom summary template has no fields")
         self.ensure_ready()
         chunks = self.split_text(text)
-        combined = {}
-        for index in range(0, len(fields), 4):
-            group = fields[index:index + 4]
-            results = []
-            for chunk in chunks:
-                results.append(self.request_json([
-                    {"role": "system", "content": self._custom_prompt(definition, group)},
-                    {"role": "user", "content": f"会议名称：{payload.get('meeting_name') or payload.get('client_name') or '未命名会议'}\n\n会议原文记录：\n{chunk}"},
-                ], max_tokens=1200, context=f"custom template={definition.get('id')} fields={index}"))
-            if len(results) > 1:
-                results = [self.request_json([
-                    {"role": "system", "content": self._custom_prompt(definition, group, merge=True)},
-                    {"role": "user", "content": json.dumps(results, ensure_ascii=False, separators=(",", ":"))},
-                ], max_tokens=1200, context=f"custom template merge={definition.get('id')} fields={index}")]
-            combined.update(results[0] if results else {})
+        combined = self._generate_custom_fields(payload, definition, fields, chunks)
         custom_data, evidence_count, filtered = self._normalize_custom_data(combined, payload, fields)
+        custom_data = self._enrich_custom_metadata(custom_data, payload, fields)
+        custom_data, text_quality_fields = self._repair_custom_text_quality(
+            custom_data, payload, definition, fields, text
+        )
+        custom_data = self._repair_custom_topic_lists_from_summary(custom_data, fields)
+        issues, missing_fields = self._custom_quality_issues(custom_data, fields, evidence_count, filtered)
+        if text_quality_fields:
+            issues.append("custom_text_quality_insufficient")
+        if issues:
+            retry_keys = {field["key"] for field in missing_fields}
+            if "no_valid_evidence" in issues or "high_evidence_rejection" in issues:
+                retry_keys.update(field["key"] for field in fields if field.get("type") == "evidence_list")
+            retry_fields = [field for field in fields if field["key"] in retry_keys]
+            if retry_fields:
+                retry_chunks = self.split_text_with_limit(
+                    text, max(1200, int(self.max_chars_per_chunk * 0.6))
+                )
+                logging.warning(
+                    "Custom summary quality retry: template=%s issues=%s fields=%s chunks=%d",
+                    definition.get("id"), ",".join(issues),
+                    ",".join(field["key"] for field in retry_fields), len(retry_chunks),
+                )
+                combined.update(self._generate_custom_fields(
+                    payload, definition, retry_fields, retry_chunks
+                ))
+                custom_data, evidence_count, filtered = self._normalize_custom_data(
+                    combined, payload, fields
+                )
+                custom_data = self._enrich_custom_metadata(custom_data, payload, fields)
+                custom_data, text_quality_fields = self._repair_custom_text_quality(
+                    custom_data, payload, definition, fields, text
+                )
+                custom_data = self._repair_custom_topic_lists_from_summary(custom_data, fields)
+                issues, missing_fields = self._custom_quality_issues(
+                    custom_data, fields, evidence_count, filtered
+                )
+                if text_quality_fields:
+                    issues.append("custom_text_quality_insufficient")
+        if issues:
+            details = {
+                "issues": issues,
+                "missing_fields": missing_fields,
+                "text_quality_fields": text_quality_fields,
+                "evidence_count": evidence_count,
+                "filtered_unverified_count": filtered,
+            }
+            logging.warning("Custom summary quality insufficient: %s", details)
+            self.schedule_idle_shutdown()
+            raise SummaryGenerationError(
+                "summary_quality_insufficient",
+                "总结质量不足，未保存新版本",
+                details,
+            )
         summary = {
             "session_id": payload.get("session_id") or "",
             "meeting_name": payload.get("meeting_name") or payload.get("client_name") or "",

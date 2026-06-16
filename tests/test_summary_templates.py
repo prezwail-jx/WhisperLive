@@ -21,6 +21,46 @@ class TestSummaryTemplateStore(unittest.TestCase):
                 self.assertNotIn("示例内容", file.read())
             self.assertEqual(store.list()["templates"][0]["name"], "周例会")
 
+    def test_confirm_removes_unconfigured_nested_sample_headings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SummaryTemplateStore(directory)
+            markdown = (
+                "# 会议纪要\n\n## 讨论综述\n示例内容\n"
+                "### 1. 示例议题\n### 2. 另一个示例\n\n## 待办\n- 示例待办\n"
+            )
+            sections = store._extract_sections(markdown)
+            fields = [
+                {"key": "overview", "heading": "讨论综述", "label": "讨论综述", "type": "text"},
+                {"key": "actions", "heading": "待办", "label": "待办", "type": "list"},
+            ]
+            draft = store.create_draft("nested.md", markdown, fields)
+            definition = store.confirm(draft["draft_id"], "嵌套示例", draft["fields"])
+            template_path = os.path.join(directory, definition["id"], "template.md")
+            with open(template_path, encoding="utf-8") as file:
+                saved = file.read()
+            self.assertIn("{{overview}}", saved)
+            self.assertIn("{{actions}}", saved)
+            self.assertNotIn("示例内容", saved)
+            self.assertNotIn("### 1.", saved)
+            self.assertNotIn("### 2.", saved)
+            self.assertEqual(os.stat(template_path).st_mode & 0o777, 0o644)
+
+    def test_confirm_saves_field_quality_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SummaryTemplateStore(directory)
+            draft = store.create_draft("info.md", "## 会议信息\n示例\n")
+            fields = draft["fields"]
+            fields[0].update({
+                "type": "table",
+                "columns": ["项目", "内容"],
+                "required": True,
+                "metadata_enrichment": True,
+            })
+            definition = store.confirm(draft["draft_id"], "会议信息", fields)
+            field = definition["fields"][0]
+            self.assertTrue(field["required"])
+            self.assertTrue(field["metadata_enrichment"])
+
     def test_rejects_template_without_sections(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SummaryTemplateStore(directory)

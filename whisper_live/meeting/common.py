@@ -13,6 +13,7 @@ def atomic_write(path, content):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             file.write(content)
+        os.chmod(temporary_path, 0o644)
         os.replace(temporary_path, path)
     except Exception:
         try:

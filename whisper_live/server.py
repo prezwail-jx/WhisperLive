@@ -1114,7 +1114,12 @@ class TranscriptionServer:
                 logging.error("Meeting summary generation failed: %s", exc.code)
                 return JSONResponse(
                     status_code=502,
-                    content={"generated": False, "error": str(exc), "error_code": exc.code},
+                    content={
+                        "generated": False,
+                        "error": str(exc),
+                        "error_code": exc.code,
+                        "details": exc.details,
+                    },
                 )
             except RuntimeError as exc:
                 return JSONResponse(status_code=409, content={"generated": False, "error": str(exc)})
