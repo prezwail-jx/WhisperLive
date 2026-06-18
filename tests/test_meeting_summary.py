@@ -562,6 +562,49 @@ class TestMeetingSummaryService(unittest.TestCase):
         self.assertNotIn("high_repetition", issues)
         self.assertNotIn("bad_topic_count", service._custom_text_quality_blocking(issues, twenty_four_topics))
 
+    def test_normalize_custom_text_splits_inline_numbered_items(self):
+        service = MeetingSummaryService(startup_command="")
+        field = {"key": "summary", "label": "讨论事项综述", "type": "text"}
+        body = "1. 科技项目申报 会议通报了申报和推荐情况；2. 光电中心事项 会议讨论审计和收购安排；3、量子点激光器 会议同意上会立项。"
+
+        normalized = service._normalize_custom_text(body, field)
+
+        self.assertEqual(service._custom_numbered_count(normalized), 3)
+        self.assertIn("\n2. 光电中心事项", normalized)
+        self.assertIn("\n3、量子点激光器", normalized)
+
+    def test_deterministic_compact_numbered_summary_deduplicates_topics(self):
+        service = MeetingSummaryService(startup_command="")
+        field = {"key": "summary", "label": "讨论事项综述", "type": "text"}
+        body = "\n".join(
+            f"{index}. 项目事项{index % 15:02d} 会议讨论了该事项的背景、进展、结论和后续安排第{index}轮。"
+            for index in range(1, 46)
+        )
+
+        compacted = service._deterministic_compact_numbered_summary(body, field)
+        issues = service._custom_text_quality_issues(compacted, field)
+
+        self.assertLessEqual(service._custom_numbered_count(compacted), service._custom_topic_soft_target(compacted))
+        self.assertNotIn("duplicate_topic_titles", issues)
+        self.assertNotIn("title_only_topics", issues)
+
+    def test_custom_compact_uses_deterministic_fallback_when_llm_still_bad(self):
+        service = MeetingSummaryService(startup_command="")
+        field = {"key": "summary", "label": "讨论事项综述", "type": "text"}
+        bad = "\n".join(
+            f"{index}. 项目事项{index % 15:02d} 会议讨论了该事项的背景、进展、结论和后续安排第{index}轮。"
+            for index in range(1, 46)
+        )
+        with mock.patch.object(service, "request_json", return_value={"summary": {"text": bad}}):
+            compacted = service._custom_compact_numbered_summary(
+                {"meeting_name": "周会"}, {"id": "template-1"}, field, bad
+            )
+
+        issues = service._custom_text_quality_issues(compacted, field)
+        self.assertLessEqual(service._custom_numbered_count(compacted), service._custom_topic_soft_target(compacted))
+        self.assertNotIn("duplicate_topic_titles", issues)
+        self.assertNotIn("title_only_topics", issues)
+
     def test_generate_custom_rewrites_bad_summary_text_before_save(self):
         service = MeetingSummaryService(startup_command="")
         payload = {

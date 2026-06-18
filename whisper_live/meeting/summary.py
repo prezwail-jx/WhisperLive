@@ -951,7 +951,7 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
     def _normalize_custom_text(cls, body, field):
         heading_tokens = cls._custom_heading_tokens(field)
         normalized_lines = []
-        for raw_line in str(body or "").splitlines():
+        for raw_line in cls._split_inline_numbered_items(body).splitlines():
             line = raw_line.rstrip()
             if not line.strip():
                 if normalized_lines and normalized_lines[-1]:
@@ -972,16 +972,26 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
         return "\n".join(normalized_lines).strip()
 
     @staticmethod
+    def _split_inline_numbered_items(body):
+        text = str(body or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"([；;。])\s*(?=\d{1,2}(?:\.\s+|、\s*)\S)", r"\1\n", text)
+        text = re.sub(r"(?<!^)(?<!\n)\s+(?=\d{1,2}(?:\.\s+|、\s*)\S)", "\n", text)
+        return "\n".join(line.rstrip() for line in text.splitlines()).strip()
+
+    @staticmethod
     def _custom_numbered_count(body):
-        return len(re.findall(r"(?m)^\s*\d{1,2}[.、]\s+\S+", str(body or "")))
+        body = MeetingSummaryService._split_inline_numbered_items(body)
+        return len(re.findall(r"(?m)^\s*\d{1,2}(?:\.\s+|、\s*)\S+", str(body or "")))
 
     @staticmethod
     def _custom_numbered_items(body):
         items = []
         current = None
-        for raw_line in str(body or "").splitlines():
+        for raw_line in MeetingSummaryService._split_inline_numbered_items(body).splitlines():
             line = raw_line.strip()
-            match = re.match(r"^(\d{1,2})[.、]\s+(.+)$", line)
+            match = re.match(r"^(\d{1,2})(?:\.\s+|、\s*)(.+)$", line)
             if match:
                 if current:
                     items.append(current)
@@ -1032,6 +1042,71 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             if len(token) >= 4:
                 tokens.append(token)
         return any(tokens.count(token) >= 2 for token in set(tokens))
+
+    @classmethod
+    def _select_evenly(cls, items, limit):
+        if len(items) <= limit:
+            return list(items)
+        if limit <= 0:
+            return []
+        if limit == 1:
+            return [items[0]]
+        indexes = []
+        for index in range(limit):
+            selected = round(index * (len(items) - 1) / (limit - 1))
+            if selected not in indexes:
+                indexes.append(selected)
+        cursor = 0
+        while len(indexes) < limit and cursor < len(items):
+            if cursor not in indexes:
+                indexes.append(cursor)
+            cursor += 1
+        return [items[index] for index in sorted(indexes[:limit])]
+
+    @classmethod
+    def _deterministic_compact_numbered_summary(cls, body, field):
+        normalized = cls._normalize_custom_text(body, field)
+        items = cls._custom_numbered_items(normalized)
+        if not items:
+            return normalized[:3000]
+
+        grouped = []
+        by_token = {}
+        for item in items:
+            title = cls._custom_topic_title(item) or (item.get("lines") or [""])[0][:24]
+            token = cls._custom_title_token(title) or f"item-{len(grouped)}"
+            if token in by_token:
+                target = by_token[token]
+                for line in item.get("lines") or []:
+                    if line and line not in target["lines"]:
+                        target["lines"].append(line)
+                continue
+            group = {"title": title, "lines": list(item.get("lines") or [])}
+            by_token[token] = group
+            grouped.append(group)
+
+        selected = cls._select_evenly(grouped, cls._custom_topic_soft_target(normalized))
+        output_lines = []
+        for index, item in enumerate(selected, start=1):
+            title = re.sub(r"\s+", " ", str(item.get("title") or f"事项{index}")).strip()
+            title_token = cls._custom_title_token(title)
+            details = []
+            for line in item.get("lines") or []:
+                clean = re.sub(r"\s+", " ", str(line or "")).strip(" ；;。")
+                if not clean:
+                    continue
+                if title and clean.startswith(title):
+                    clean = clean[len(title):].lstrip(" ：:，,。；;")
+                if clean and cls._custom_title_token(clean) != title_token and clean not in details:
+                    details.append(clean)
+            detail = "；".join(details).strip(" ；;。")
+            if len(detail) > 260:
+                detail = detail[:260].rstrip("，,；;。 ") + "。"
+            if detail:
+                output_lines.append(f"{index}. {title} {detail}")
+            else:
+                output_lines.append(f"{index}. {title} 会议围绕该事项的背景、进展、结论和后续安排进行了讨论。")
+        return cls._normalize_custom_text("\n".join(output_lines), field)[:3000]
 
     @staticmethod
     def _custom_template_residue(body):
@@ -1545,7 +1620,20 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
         )
         value = data.get(field["key"]) if isinstance(data, dict) else None
         body = str(value.get("text") or "").strip() if isinstance(value, dict) else str(value or "").strip()
-        return self._normalize_custom_text(body, field)[:3000]
+        compacted = self._normalize_custom_text(body, field)[:3000]
+        remaining = self._custom_text_quality_issues(compacted, field)
+        compact_blocking = {
+            "restarted_numbering", "duplicate_topic_titles",
+            "template_residue", "title_only_topics", "high_repetition",
+        }
+        if any(issue in remaining for issue in compact_blocking):
+            logging.warning(
+                "Custom summary deterministic compact fallback: template=%s field=%s issues=%s numbered_count=%s soft_target_max=%s",
+                definition.get("id"), field["key"], ",".join(remaining),
+                self._custom_numbered_count(compacted), self._custom_topic_soft_target(compacted),
+            )
+            return self._deterministic_compact_numbered_summary(compacted or current_text, field)
+        return compacted
 
     def _repair_custom_text_quality(self, custom_data, payload, definition, fields, source_text):
         repaired = dict(custom_data)
@@ -1567,7 +1655,7 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             repaired[key] = rewritten
             remaining = self._custom_text_quality_issues(rewritten, field)
             compact_issues = {
-                "bad_topic_count", "restarted_numbering", "duplicate_topic_titles",
+                "restarted_numbering", "duplicate_topic_titles",
                 "template_residue", "title_only_topics", "high_repetition",
             }
             if any(issue in remaining for issue in compact_issues):
