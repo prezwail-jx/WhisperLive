@@ -13,6 +13,7 @@ const elements = {
   exportLog: document.getElementById("exportLogButton"),
   generateSummary: document.getElementById("generateSummaryButton"),
   downloadSummary: document.getElementById("downloadSummaryButton"),
+  downloadSummaryDocx: document.getElementById("downloadSummaryDocxButton"),
   summarySession: document.getElementById("summarySessionInput"),
   summaryTemplate: document.getElementById("summaryTemplateInput"),
   summaryVersion: document.getElementById("summaryVersionInput"),
@@ -467,14 +468,14 @@ function renderSummaryTemplateFields() {
 
 async function analyzeSummaryTemplate() {
   const file = elements.summaryTemplateFile && elements.summaryTemplateFile.files[0];
-  if (!file) throw new Error("请先选择 Markdown 模板文件");
-  if (!file.name.toLowerCase().endsWith(".md")) throw new Error("只支持上传 .md 文件");
+  if (!file) throw new Error("请先选择模板文件");
+  if (!/\.(md|docx)$/i.test(file.name)) throw new Error("只支持上传 .md 或 .docx 模板文件");
   const form = new FormData(); form.append("file", file);
   const response = await fetch(summaryTemplateApiUrl("/analyze"), { method: "POST", body: form });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
   summaryTemplateDraft = result;
-  elements.summaryTemplateName.value = file.name.replace(/\.md$/i, "");
+  elements.summaryTemplateName.value = file.name.replace(/\.(md|docx)$/i, "");
   elements.summaryTemplateEditor.hidden = false;
   renderSummaryTemplateFields();
   setToolStatus("模板分析完成，请确认字段后保存。", "success");
@@ -680,16 +681,21 @@ async function generateSummary() {
   }
 }
 
-async function downloadSummary() {
+async function downloadSummary(format = "md") {
   if (!selectedSummarySessionId) throw new Error("请选择可下载总结的会议 session");
   const version = elements.summaryVersion ? elements.summaryVersion.value : "";
-  const response = await fetch(summaryDownloadUrl(selectedSummarySessionId, "md", version), { cache: "no-store" });
+  const normalizedFormat = format === "docx" ? "docx" : "md";
+  const response = await fetch(summaryDownloadUrl(selectedSummarySessionId, normalizedFormat, version), { cache: "no-store" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const blob = await response.blob();
-  const fallback = `meeting-summary-${selectedSummarySessionId}${version ? `-v${version}` : ""}.md`;
+  const fallback = `meeting-summary-${selectedSummarySessionId}${version ? `-v${version}` : ""}.${normalizedFormat}`;
   downloadBlob(filenameFromContentDisposition(response.headers.get("Content-Disposition"), fallback), blob);
-  setStatus("总结已下载", "ready");
-  setToolStatus("总结文件已下载。", "success");
+  setStatus(normalizedFormat === "docx" ? "总结 DOCX 已下载" : "总结已下载", "ready");
+  setToolStatus(normalizedFormat === "docx" ? "总结 DOCX 文件已下载。" : "总结文件已下载。", "success");
+}
+
+async function downloadSummaryDocx() {
+  return downloadSummary("docx");
 }
 
 function updateSummaryButtons() {
@@ -700,6 +706,9 @@ function updateSummaryButtons() {
   }
   if (elements.downloadSummary) {
     elements.downloadSummary.disabled = !selectedSummarySessionId || !summaryGenerated || summaryGenerating;
+  }
+  if (elements.downloadSummaryDocx) {
+    elements.downloadSummaryDocx.disabled = !selectedSummarySessionId || !summaryGenerated || summaryGenerating;
   }
 }
 
@@ -1446,6 +1455,15 @@ if (elements.downloadSummary) {
       console.error(error);
       setStatus("总结下载失败", "error");
       setToolStatus(`总结下载失败：${error.message}`, "error");
+    });
+  });
+}
+if (elements.downloadSummaryDocx) {
+  elements.downloadSummaryDocx.addEventListener("click", () => {
+    downloadSummaryDocx().catch((error) => {
+      console.error(error);
+      setStatus("总结 DOCX 下载失败", "error");
+      setToolStatus(`总结 DOCX 下载失败：${error.message}`, "error");
     });
   });
 }

@@ -6,6 +6,7 @@ import threading
 import time
 
 from .common import atomic_write, now_iso
+from .docs import DOCX_MIME_TYPE, MeetingDocConverter
 from .hotwords import count_hotwords
 
 
@@ -341,6 +342,7 @@ class MeetingLogStore:
         }
 
     def get_summary_file(self, session_id, file_format="md", version=None):
+        file_format = str(file_format or "md").lower()
         with self.lock:
             record = self.sessions.get(session_id)
             if not record:
@@ -349,6 +351,10 @@ class MeetingLogStore:
                 summary_json, summary_md = self.summary_paths_for_record(record)
                 if file_format == "json":
                     return summary_json, "application/json", os.path.basename(summary_json)
+                if file_format == "docx":
+                    docx_path = os.path.splitext(summary_md)[0] + ".docx"
+                    MeetingDocConverter.md_file_to_docx(summary_md, docx_path)
+                    return docx_path, DOCX_MIME_TYPE, os.path.basename(docx_path)
                 return summary_md, "text/markdown; charset=utf-8", os.path.basename(summary_md)
             try:
                 version = int(version)
@@ -360,8 +366,12 @@ class MeetingLogStore:
             if file_format == "json":
                 path = os.path.join(directory, f"v{version:04d}.json")
                 return path, "application/json", os.path.basename(path)
-            path = os.path.join(directory, f"v{version:04d}.md")
-            return path, "text/markdown; charset=utf-8", os.path.basename(path)
+            md_path = os.path.join(directory, f"v{version:04d}.md")
+            if file_format == "docx":
+                docx_path = os.path.splitext(md_path)[0] + ".docx"
+                MeetingDocConverter.md_file_to_docx(md_path, docx_path)
+                return docx_path, DOCX_MIME_TYPE, os.path.basename(docx_path)
+            return md_path, "text/markdown; charset=utf-8", os.path.basename(md_path)
 
     @staticmethod
     def _sort_segments(segments):

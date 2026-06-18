@@ -27,6 +27,7 @@ from websockets.exceptions import ConnectionClosed
 from whisper_live.vad import VoiceActivityDetector
 from whisper_live.backend.base import ServeClientBase
 from whisper_live.meeting import (
+    MeetingDocConverter,
     MeetingHotwordStore,
     MeetingLogStore,
     MeetingSummaryService,
@@ -1055,18 +1056,41 @@ class TranscriptionServer:
         async def analyze_admin_summary_template(file: UploadFile):
             try:
                 filename = os.path.basename(file.filename or "")
-                if not filename.lower().endswith(".md"):
-                    raise ValueError("只支持上传 .md 文件")
+                lower_filename = filename.lower()
+                if not lower_filename.endswith((".md", ".docx")):
+                    raise ValueError("只支持上传 .md 或 .docx 模板文件")
                 content = await file.read(SummaryTemplateStore.MAX_FILE_BYTES + 1)
                 if len(content) > SummaryTemplateStore.MAX_FILE_BYTES:
-                    raise ValueError("Markdown 模板不能超过 2 MB")
-                try:
-                    markdown = content.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise ValueError("Markdown 模板必须使用 UTF-8 编码") from exc
+                    raise ValueError("模板文件不能超过 2 MB")
+                if lower_filename.endswith(".md"):
+                    try:
+                        markdown = content.decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise ValueError("Markdown 模板必须使用 UTF-8 编码") from exc
+                    empty_sections_message = "Markdown 模板至少需要一个二级或更低级标题"
+                else:
+                    temp_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as temp_file:
+                            temp_file.write(content)
+                            temp_path = temp_file.name
+                        markdown = MeetingDocConverter.docx_to_md_text(temp_path)
+                        if not self.summary_templates._extract_sections(markdown):
+                            markdown = MeetingDocConverter.docx_to_md_text(
+                                temp_path, promote_plain_headings=True
+                            )
+                    except Exception as exc:
+                        raise ValueError(f"DOCX 模板解析失败: {exc}") from exc
+                    finally:
+                        if temp_path:
+                            try:
+                                os.unlink(temp_path)
+                            except OSError:
+                                pass
+                    empty_sections_message = "DOCX 模板未识别到字段栏目；请使用标题样式，或包含会议基本信息、会议议题、讨论事项综述等栏目名"
                 sections = self.summary_templates._extract_sections(markdown)
                 if not sections:
-                    raise ValueError("Markdown 模板至少需要一个二级或更低级标题")
+                    raise ValueError(empty_sections_message)
                 fields = await asyncio.to_thread(self.meeting_summary.analyze_custom_template, markdown, sections)
                 return self.summary_templates.create_draft(filename, markdown, fields)
             except ValueError as exc:
@@ -1131,11 +1155,13 @@ class TranscriptionServer:
 
         @app.get("/admin/meeting-logs/{session_id}/summary")
         async def download_admin_meeting_summary(session_id: str, format: str = "md", version: Optional[int] = None):
-            result = self.meeting_logs.get_summary_file(
-                session_id,
-                "json" if format.lower() == "json" else "md",
-                version=version,
-            )
+            file_format = str(format or "md").lower()
+            if file_format not in {"md", "json", "docx"}:
+                return JSONResponse(status_code=404, content={"error": "unsupported summary format"})
+            try:
+                result = self.meeting_logs.get_summary_file(session_id, file_format, version=version)
+            except RuntimeError as exc:
+                return JSONResponse(status_code=500, content={"error": str(exc)})
             if not result or not os.path.isfile(result[0]):
                 return JSONResponse(status_code=404, content={"error": "meeting summary not found"})
             return FileResponse(result[0], media_type=result[1], filename=result[2])

@@ -77,3 +77,4 @@ docs/site/
 /deploy/
 /scripts/start_funasr_service.sh
 /scripts/start_whisper_service.sh
+/scripts/start_summary_llm_service.sh

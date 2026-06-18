@@ -102,7 +102,7 @@
             <label>总结会议<select id="summarySessionInput"><option value="">暂无已结束会议</option></select></label>
             <label>总结模板<select id="summaryTemplateInput"><option value="auto" selected>自动判断</option><option value="project_meeting">项目会议</option><option value="customer_interview">客户访谈</option><option value="training_speech">培训 / 演讲</option><option value="discussion">讨论会</option></select></label>
             <div class="summary-template-upload">
-              <label>上传 Markdown 模板<input id="summaryTemplateFileInput" type="file" accept=".md,text/markdown"></label>
+              <label>上传模板<input id="summaryTemplateFileInput" type="file" accept=".md,.docx,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
               <button id="analyzeSummaryTemplateButton" class="secondary-button" type="button">分析模板</button>
               <div id="summaryTemplateEditor" class="summary-template-editor" hidden>
                 <label>模板名称<input id="summaryTemplateNameInput" type="text" maxlength="100" placeholder="例如：周例会纪要"></label>
@@ -113,12 +113,12 @@
             <button id="refreshSummarySessionsButton" class="secondary-button" type="button">刷新会议列表</button>
             <button id="generateSummaryButton" class="primary-button" type="button" disabled>生成总结</button>
             <label>下载版本<select id="summaryVersionInput" disabled><option value="">最新版</option></select></label>
-            <button id="downloadSummaryButton" class="secondary-button" type="button" disabled>下载总结</button>
+            <button id="downloadSummaryButton" class="secondary-button" type="button" disabled>下载总结</button><button id="downloadSummaryDocxButton" class="secondary-button" type="button" disabled>下载 DOCX</button>
           </div>
           <p id="toolStatus" class="tool-status">每次生成都会保留新版本。</p>
         </section>
       </div>
     </aside>
-    <script src="./app.js?v=summary-template-2"></script>
+    <script src="./app.js?v=summary-docx-1"></script>
   </body>
 </html>

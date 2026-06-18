@@ -889,18 +889,10 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
         description = str(field.get("description") or "")
         text = f"{key} {label} {description}".lower()
         instructions = []
-        if "议题" in text or "topic" in text or "agenda" in text:
-            instructions.append(
-                "输出会议自然顺序中的6到10个高层议题，必须覆盖整场会议，禁止把口头残句、单个动作、项目经理姓名或模板示例拆成零碎短语。"
-            )
         if any(marker in text for marker in ("综述", "总结", "讨论事项", "重点事项", "key item", "key point", "overview")):
             instructions.append(
-                "按编号议题输出，格式为“1. 议题标题”加一段综述；每个编号聚合背景、进展、结论和后续动作，输出6到10个高层事项；覆盖整场会议，不只总结前半段；禁止时间戳、逐片段摘要、单个大项挂几十个子项或未分组流水账。"
+                "用编号组织输出，每个编号聚合一个议题的背景、进展、结论和后续动作，按会议自然顺序覆盖整场会议；不要输出时间戳、逐段摘要或单个大项挂几十个子项。"
             )
-        if any(marker in text for marker in ("待办", "行动", "后续", "action", "follow")):
-            instructions.append("只提取原文明示的后续动作、责任方、时间或状态；不要把泛泛建议写成待办。")
-        if any(marker in text for marker in ("风险", "问题", "待确认", "risk", "question")):
-            instructions.append("区分已确认风险、待确认问题和普通讨论，不要扩大化。")
         if field.get("type") == "table":
             instructions.append("表格行必须是同一粒度的事实项，避免把整段综述塞进单元格。")
         return " ".join(instructions)
@@ -914,6 +906,7 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
         )
         task = (
             "合并同一会议的分块结果，按编号议题去重归并，保持编号议题段落结构，不得增加新事实或证据。"
+            "逐块核对：原文前段、中段、后段各产生了哪些议题，合并后必须覆盖每个分块中的重要议题，不得遗漏任一阶段的内容。"
             if merge else
             "仅根据会议原文填写字段。"
         )
@@ -927,9 +920,9 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             "没有依据时，text 返回空对象，list、evidence_list、table 返回空数组。\n"
             f"字段说明：\n{descriptions}\n只输出以下 JSON 字段，禁止输出其他字段：\n"
             f"{self._custom_schema(fields)}\n"
-            "普通列表最多12项；议题类列表应为6到10项高层议题；证据列表和表格最多8项；"
-            "适合综述/总结的文本字段必须使用编号议题段落，编号为1. 2. 3.，每项标题后写简明综述；"
-            "禁止时间戳、逐segment摘要、几十条平铺列表或单个大项挂全部子项。文本字段不超过1200字。"
+            "普通列表最多12项；证据列表和表格最多8项；"
+            "综述/总结类文本字段用编号组织输出，每项包含标题和简明综述；"
+            "禁止时间戳、逐segment摘要、几十条平铺列表或单个大项挂全部子项。"
         )
 
     @staticmethod
@@ -962,6 +955,9 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             match = re.match(r"^(\s*)[•*]\s+(.+)$", line)
             if match:
                 line = f"{match.group(1)}- {match.group(2).strip()}"
+            match = re.match(r"^(\s*)[-•*·]\s*(\d{1,2}[.、]\s+.+)$", line)
+            if match:
+                line = f"{match.group(1)}{match.group(2).strip()}"
             top_level = not line.startswith((" ", "\t"))
             content = re.sub(r"^[-•*]\s*", "", line.strip())
             content_token = re.sub(r"[\s#*_：:;；。,.，、\-—•]+", "", content).lower()

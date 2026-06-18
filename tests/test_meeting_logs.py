@@ -6,6 +6,7 @@ from unittest import mock
 from unittest.mock import MagicMock, patch
 
 from whisper_live.meeting import MeetingLogStore
+from whisper_live.meeting.docs import DOCX_MIME_TYPE
 
 
 class TestMeetingLogStore(unittest.TestCase):
@@ -81,6 +82,20 @@ class TestMeetingLogStore(unittest.TestCase):
             self.assertEqual(len(info["versions"]), 2)
             version_file = store.get_summary_file("session-1", "json", version=1)
             self.assertTrue(os.path.isfile(version_file[0]))
+
+            def fake_docx(md_path, docx_path):
+                with open(docx_path, "wb") as file:
+                    file.write(b"docx")
+
+            with mock.patch("whisper_live.meeting.logs.MeetingDocConverter.md_file_to_docx", side_effect=fake_docx) as converter:
+                latest_docx = store.get_summary_file("session-1", "docx")
+                self.assertEqual(latest_docx[1], DOCX_MIME_TYPE)
+                self.assertTrue(latest_docx[0].endswith("-summary.docx"))
+                self.assertTrue(os.path.isfile(latest_docx[0]))
+                version_docx = store.get_summary_file("session-1", "docx", version=1)
+                self.assertEqual(os.path.basename(version_docx[0]), "v0001.docx")
+                self.assertTrue(os.path.isfile(version_docx[0]))
+                self.assertEqual(converter.call_count, 2)
 
             restored = MeetingLogStore(directory)
             restored_info = restored.summary_info("session-1")
