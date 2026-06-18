@@ -30,6 +30,7 @@ from whisper_live.meeting import (
     MeetingDocConverter,
     MeetingHotwordStore,
     MeetingLogStore,
+    apply_timeline_offset_to_segments,
     MeetingSummaryService,
     SummaryGenerationError,
     SummaryTemplateStore,
@@ -362,6 +363,21 @@ class TranscriptionServer:
             return {"server_time": time.time(), "clients": []}
         return self.client_manager.get_client_status_snapshot()
 
+    def session_timeline_offset(self, websocket):
+        client = self.client_manager.get_client(websocket) if self.client_manager else None
+        return float(getattr(client, "meeting_log_timeline_offset_seconds", 0.0) or 0.0) if client else 0.0
+
+    def offset_client_segment(self, websocket, segment):
+        return apply_timeline_offset_to_segments([segment], self.session_timeline_offset(websocket))[0]
+
+    def offset_client_segments(self, websocket, segments):
+        return apply_timeline_offset_to_segments(segments, self.session_timeline_offset(websocket))
+
+    def process_client_segment(self, websocket, base_processor, segment):
+        if base_processor is not None:
+            segment = base_processor(segment) or segment
+        return self.offset_client_segment(websocket, segment)
+
     def handle_client_segments(self, websocket, message_type, segments):
         if self.client_manager:
             self.client_manager.update_client_message(websocket, message_type, segments)
@@ -373,10 +389,12 @@ class TranscriptionServer:
         except Exception as exc:
             logging.error("Failed to append meeting log segments: %s", exc)
 
-    def finalize_client_meeting_log(self, websocket):
+    def finalize_client_meeting_log(self, websocket, interrupted=False):
         client = self.client_manager.get_client(websocket) if self.client_manager else None
         session_id = getattr(client, "meeting_log_session_id", None)
         try:
+            if interrupted:
+                return self.meeting_logs.interrupt_session(session_id)
             return self.meeting_logs.finish_session(session_id)
         except Exception as exc:
             logging.error("Failed to finalize meeting log: %s", exc)
@@ -677,13 +695,39 @@ class TranscriptionServer:
             self.handle_client_segments, websocket, "segments"
         )
         try:
-            log_info = self.meeting_logs.start_session(options, backend=self.backend)
+            if options.get("resume_session"):
+                log_info = self.meeting_logs.resume_session(options, backend=self.backend)
+            else:
+                log_info = self.meeting_logs.start_session(options, backend=self.backend)
             client.meeting_log_session_id = log_info.get("session_id") if log_info else options.get("session_id") or options.get("uid")
+            client.meeting_log_timeline_offset_seconds = float((log_info or {}).get("timeline_offset_seconds") or 0.0)
         except Exception as exc:
             logging.error("Failed to start meeting log session: %s", exc)
             client.meeting_log_session_id = options.get("session_id") or options.get("uid")
+            client.meeting_log_timeline_offset_seconds = 0.0
+        base_segment_processor = getattr(client, "segment_post_processor", None)
+        client.segment_post_processor = functools.partial(
+            self.process_client_segment,
+            websocket,
+            base_segment_processor,
+        )
+        if translation_client:
+            translation_client.segment_post_processor = functools.partial(self.offset_client_segment, websocket)
         self.client_manager.add_client(websocket, client)
         self.client_manager.register_client_status(websocket, client, options, self.backend)
+        try:
+            websocket.send(json.dumps({
+                "uid": getattr(client, "client_uid", options.get("uid")),
+                "message": getattr(client, "SERVER_READY", "SERVER_READY"),
+                "backend": self.backend.value if hasattr(self.backend, "value") else str(self.backend),
+                "session_id": getattr(client, "meeting_log_session_id", None),
+                "session_status": (log_info or {}).get("status"),
+                "resumed": bool(options.get("resume_session")),
+                "connection_count": (log_info or {}).get("connection_count") or 1,
+                "timeline_offset_seconds": getattr(client, "meeting_log_timeline_offset_seconds", 0.0),
+            }))
+        except Exception as exc:
+            logging.debug("Failed to send meeting session ready metadata: %s", exc)
 
     def _create_diarizer(self, options):
         """Create a SpeakerDiarizer if the client requested diarization.
@@ -767,6 +811,7 @@ class TranscriptionServer:
         frame_np = self.get_audio_from_websocket(websocket)
         client = self.client_manager.get_client(websocket)
         if frame_np is False:
+            setattr(websocket, "whisperlive_end_of_audio", True)
             if self.backend.is_tensorrt():
                 client.set_eos(True)
             return False
@@ -1039,6 +1084,11 @@ class TranscriptionServer:
         @app.get("/admin/meeting-logs/{session_id}/info")
         async def get_admin_meeting_log_info(session_id: str):
             info = self.meeting_logs.session_info(session_id)
+            return info if info else JSONResponse(status_code=404, content={"error": "meeting log session not found"})
+
+        @app.post("/admin/meeting-logs/{session_id}/finish")
+        async def finish_admin_meeting_log(session_id: str, request: Request):
+            info = self.meeting_logs.finish_session(session_id)
             return info if info else JSONResponse(status_code=404, content={"error": "meeting log session not found"})
 
         @app.get("/admin/summary-templates")
@@ -1353,6 +1403,9 @@ class TranscriptionServer:
             # Wait for translation thread to finish
             if hasattr(client, 'translation_thread') and client.translation_thread:
                 client.translation_thread.join(timeout=2.0)
-            self.finalize_client_meeting_log(websocket)
+            self.finalize_client_meeting_log(
+                websocket,
+                interrupted=not bool(getattr(websocket, "whisperlive_end_of_audio", False)),
+            )
             self.client_manager.mark_client_disconnected(websocket)
             self.client_manager.remove_client(websocket)

@@ -61,6 +61,22 @@ class TestSummaryTemplateStore(unittest.TestCase):
             self.assertTrue(field["required"])
             self.assertTrue(field["metadata_enrichment"])
 
+    def test_confirm_corrects_common_custom_field_types(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SummaryTemplateStore(directory)
+            markdown = "## 会议议题\n示例\n\n## 讨论事项综述\n示例\n\n## 决策\n示例\n"
+            draft = store.create_draft("types.md", markdown, [
+                {"key": "topics", "heading": "会议议题", "label": "会议议题", "type": "text"},
+                {"key": "summary", "heading": "讨论事项综述", "label": "讨论事项综述", "type": "evidence_list"},
+                {"key": "decisions", "heading": "决策", "label": "决策", "type": "evidence_list"},
+            ])
+            definition = store.confirm(draft["draft_id"], "类型纠偏", draft["fields"])
+
+        types = {field["heading"]: field["type"] for field in definition["fields"]}
+        self.assertEqual(types["会议议题"], "list")
+        self.assertEqual(types["讨论事项综述"], "text")
+        self.assertEqual(types["决策"], "list")
+
     def test_rejects_template_without_sections(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SummaryTemplateStore(directory)
@@ -87,6 +103,34 @@ class TestSummaryTemplateStore(unittest.TestCase):
         self.assertIn("- 完成联调", markdown)
         self.assertNotIn("旧示例", markdown)
         self.assertNotIn("旧待办", markdown)
+
+    def test_custom_markdown_renders_structured_values_without_json_residue(self):
+        summary = {
+            "summary_template": "custom",
+            "session_id": "session-structured",
+            "meeting_name": "周例会",
+            "custom_template_name": "结构化模板",
+            "custom_template_revision": 1,
+            "custom_template_markdown": "# {{meeting_name}}\n\n## 综述\n{{summary}}\n\n## 议题\n{{topics}}\n\n## 表格\n{{rows}}\n",
+            "custom_template_fields": [
+                {"key": "summary", "heading": "综述", "type": "text"},
+                {"key": "topics", "heading": "议题", "type": "list"},
+                {"key": "rows", "heading": "表格", "type": "table", "columns": ["事项", "说明"]},
+            ],
+            "template_data": {
+                "summary": {"content": "会议讨论项目推进。"},
+                "topics": [{"title": "领域决赛", "content": "安排承办单位"}],
+                "rows": [{"事项": {"content": "完成材料"}, "说明": ["本周", "提交"]}],
+            },
+        }
+
+        markdown = MeetingLogStore.render_summary_markdown(summary)
+
+        self.assertIn("会议讨论项目推进。", markdown)
+        self.assertIn("- 领域决赛：安排承办单位", markdown)
+        self.assertIn("| 完成材料 | 本周 提交 |", markdown.replace("\n", " "))
+        self.assertNotIn("{'", markdown)
+        self.assertNotIn('"content"', markdown)
 
     def test_custom_markdown_keeps_empty_headings_without_sample_content(self):
         summary = {

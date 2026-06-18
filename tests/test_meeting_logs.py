@@ -6,6 +6,7 @@ from unittest import mock
 from unittest.mock import MagicMock, patch
 
 from whisper_live.meeting import MeetingLogStore
+from whisper_live.meeting.sessions import apply_timeline_offset_to_segments
 from whisper_live.meeting.docs import DOCX_MIME_TYPE
 
 
@@ -102,3 +103,64 @@ class TestMeetingLogStore(unittest.TestCase):
             self.assertEqual(restored_info["latest_version"], 2)
             self.assertEqual(len(restored.list_sessions()["sessions"]), 1)
 
+    def test_session_can_be_interrupted_and_resumed_without_overwriting_segments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({
+                "uid": "uid-1",
+                "session_id": "session-1",
+                "client_instance_id": "browser-1",
+                "meeting_name": "会议",
+                "session_started_at": "2026-06-18T10:00:00+00:00",
+            })
+            store.append_segments("session-1", "source", [{"start": "0.000", "end": "1.000", "text": "第一段", "completed": True}])
+
+            with mock.patch.object(MeetingLogStore, "now_iso", return_value="2026-06-18T10:01:00+00:00"):
+                interrupted = store.interrupt_session("session-1")
+            self.assertEqual(interrupted["status"], "interrupted")
+
+            with mock.patch.object(MeetingLogStore, "now_iso", return_value="2026-06-18T10:01:10+00:00"):
+                resumed = store.resume_session({
+                    "session_id": "session-1",
+                    "client_instance_id": "browser-1",
+                    "meeting_name": "会议",
+                })
+            self.assertEqual(resumed["status"], "active")
+            self.assertEqual(resumed["source_count"], 1)
+            self.assertEqual(resumed["connection_count"], 2)
+            self.assertEqual(resumed["timeline_offset_seconds"], 70.0)
+            self.assertEqual(len(resumed["audio_gaps"]), 1)
+
+            store.append_segments("session-1", "source", [{"start": "70.000", "end": "71.000", "text": "第二段", "completed": True}])
+            payload = store.get_session_payload("session-1")
+            self.assertEqual([item["text"] for item in payload["source_segments"]], ["第一段", "第二段"])
+
+    def test_finished_session_cannot_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({"uid": "uid-1", "session_id": "session-1", "client_instance_id": "browser-1"})
+            store.finish_session("session-1")
+            with self.assertRaises(ValueError):
+                store.resume_session({"session_id": "session-1", "client_instance_id": "browser-1"})
+
+    def test_resume_rejects_different_client_instance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({"uid": "uid-1", "session_id": "session-1", "client_instance_id": "browser-1"})
+            store.interrupt_session("session-1")
+            with self.assertRaises(ValueError):
+                store.resume_session({"session_id": "session-1", "client_instance_id": "browser-2"})
+
+    def test_timeline_offset_applies_to_segment_and_words(self):
+        segments = [{
+            "start": "1.000",
+            "end": "2.000",
+            "text": "hello",
+            "completed": True,
+            "words": [{"word": "hello", "start": 1.1, "end": 1.5}],
+        }]
+        adjusted = apply_timeline_offset_to_segments(segments, 10.0)
+        self.assertEqual(adjusted[0]["start"], "11.000")
+        self.assertEqual(adjusted[0]["end"], "12.000")
+        self.assertEqual(adjusted[0]["words"][0]["start"], 11.1)
+        self.assertEqual(segments[0]["start"], "1.000")

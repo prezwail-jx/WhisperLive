@@ -16,6 +16,9 @@ class SummaryTemplateStore:
     DRAFT_TTL_SECONDS = 24 * 60 * 60
     FIELD_TYPES = {"text", "list", "evidence_list", "table"}
     SAFE_ID_PATTERN = re.compile(r"[^a-z0-9_-]+")
+    SUMMARY_TEXT_HEADINGS = {"讨论事项综述", "事项综述", "会议内容", "讨论内容", "会议总结", "纪要综述"}
+    LIST_HEADINGS = {"会议议题", "议题", "会议议程"}
+    EVIDENCE_MARKERS = ("证据", "依据", "原文引用", "可核验", "时间范围")
 
     def __init__(self, directory="config/summary_templates"):
         self.directory = directory or "config/summary_templates"
@@ -27,6 +30,24 @@ class SummaryTemplateStore:
     def _safe_id(cls, value):
         value = cls.SAFE_ID_PATTERN.sub("-", str(value or "").strip().lower()).strip("-_")
         return value[:64] or "summary-template"
+
+    @staticmethod
+    def _normalized_heading(value):
+        text = re.sub(r"^(第?[一二三四五六七八九十百千0-9]+[章节部分项]?[、.．)）:：\-\s]+)", "", str(value or "").strip())
+        text = text.strip(" ：:;；。.-—\t")
+        return re.sub(r"\s+", "", text)
+
+    @classmethod
+    def _correct_field_type(cls, field_type, heading, label="", description=""):
+        normalized = cls._normalized_heading(heading or label)
+        if normalized in cls.SUMMARY_TEXT_HEADINGS:
+            return "text"
+        if normalized in cls.LIST_HEADINGS:
+            return "list"
+        text = " ".join(str(item or "") for item in (heading, label, description))
+        if field_type == "evidence_list" and not any(marker in text for marker in cls.EVIDENCE_MARKERS):
+            return "list"
+        return field_type
 
     @staticmethod
     def _field_key(value, fallback):
@@ -59,7 +80,10 @@ class SummaryTemplateStore:
             fields.append({
                 "key": key,
                 "label": section["heading"],
-                "type": "list" if any(word in section["heading"] for word in ("事项", "要点", "问题", "风险", "结论", "议题")) else "text",
+                "type": SummaryTemplateStore._correct_field_type(
+                    "list" if any(word in section["heading"] for word in ("事项", "要点", "问题", "风险", "结论", "议题")) else "text",
+                    section["heading"],
+                ),
                 "description": f"根据会议原文填写‘{section['heading']}’",
                 "heading": section["heading"],
                 "columns": [],
@@ -86,6 +110,12 @@ class SummaryTemplateStore:
             field_type = str(field.get("type") or "text").strip()
             if field_type not in SummaryTemplateStore.FIELD_TYPES:
                 field_type = "text"
+            field_type = SummaryTemplateStore._correct_field_type(
+                field_type,
+                heading,
+                field.get("label"),
+                field.get("description"),
+            )
             columns = []
             if field_type == "table":
                 for column in field.get("columns") or []:

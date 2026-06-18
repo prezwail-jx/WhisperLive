@@ -24,6 +24,8 @@
           <div class="session-controls">
             <button id="startButton" class="primary-action" type="button"><span class="control-dot"></span>开始会议</button>
             <button id="stopButton" class="stop-action" type="button" disabled>停止会议</button>
+            <button id="continueButton" class="secondary-button" type="button" hidden>继续会议</button>
+            <button id="finishInterruptedButton" class="stop-action" type="button" hidden>结束会议</button>
           </div>
           <div class="view-switcher" aria-label="显示模式">
             <button type="button" class="view-mode active" data-view-mode="split">双栏</button>
@@ -119,6 +121,10 @@
         </section>
       </div>
     </aside>
-    <script src="./app.js?v=summary-docx-1"></script>
+    <script src="./session-state.js?v=reconnect-1"></script>
+    <script src="./reconnect-controller.js?v=reconnect-1"></script>
+    <script src="./ws-client.js?v=reconnect-1"></script>
+    <script src="./audio-capture.js?v=reconnect-1"></script>
+    <script src="./app.js?v=reconnect-1"></script>
   </body>
 </html>

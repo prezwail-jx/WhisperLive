@@ -736,6 +736,16 @@ class ServeClientTranslation(ServeClientBase):
         Args:
             translated_segments (list): List of translated segments to send
         """
+        if getattr(self, "segment_post_processor", None) is not None:
+            processed = []
+            for seg in translated_segments:
+                try:
+                    result = self.segment_post_processor(seg)
+                    processed.append(result if result is not None else seg)
+                except Exception as e:
+                    logging.error(f"[ERROR]: translation segment_post_processor failed: {e}")
+                    processed.append(seg)
+            translated_segments = processed
         try:
             self.websocket.send(
                 json.dumps({

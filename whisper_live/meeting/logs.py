@@ -8,6 +8,13 @@ import time
 from .common import atomic_write, now_iso
 from .docs import DOCX_MIME_TYPE, MeetingDocConverter
 from .hotwords import count_hotwords
+from .sessions import (
+    SESSION_ACTIVE,
+    SESSION_FINISHED,
+    SESSION_INTERRUPTED,
+    can_resume_payload,
+    seconds_between,
+)
 
 
 class MeetingLogStore:
@@ -43,6 +50,10 @@ class MeetingLogStore:
                     continue
                 stem, _ext = os.path.splitext(json_path)
                 md_path = f"{stem}.md"
+                payload.setdefault("status", SESSION_INTERRUPTED if payload.get("status") == SESSION_ACTIVE else payload.get("status") or SESSION_INTERRUPTED)
+                payload.setdefault("connection_count", 1)
+                payload.setdefault("audio_gaps", [])
+                payload.setdefault("timeline_offset_seconds", 0.0)
                 self.sessions[session_id] = {
                     "payload": payload,
                     "source_keys": {self.segment_key(item) for item in payload.get("source_segments") or [] if isinstance(item, dict)},
@@ -108,7 +119,12 @@ class MeetingLogStore:
             "model": options.get("model"),
             "source_language": options.get("language"),
             "translation_mode": options.get("target_language", "auto"),
-            "status": "active",
+            "status": SESSION_ACTIVE,
+            "connection_count": 1,
+            "timeline_offset_seconds": 0.0,
+            "interrupted_at": None,
+            "resumed_at": None,
+            "audio_gaps": [],
             "source_segments": [],
             "translation_segments": [],
         }
@@ -136,11 +152,59 @@ class MeetingLogStore:
         directory, _stem, json_path, md_path = self.session_paths(payload)
         with self.lock:
             os.makedirs(directory, exist_ok=True)
+            if session_id in self.sessions:
+                raise ValueError("session_id already exists; use resume_session")
             record = {"payload": payload, "source_keys": set(), "translation_keys": set(), "json_path": json_path, "md_path": md_path,
                       "json_filename": os.path.basename(json_path), "md_filename": os.path.basename(md_path)}
             self.sessions[session_id] = record
             self._write_record(record)
         return self.session_info(session_id)
+
+    def resume_session(self, options, backend=None):
+        session_id = options.get("session_id") or options.get("uid")
+        if not session_id:
+            raise ValueError("session_id is required")
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                raise KeyError("meeting log session not found")
+            ok, reason = can_resume_payload(record["payload"], options)
+            if not ok:
+                raise ValueError(reason)
+            payload = record["payload"]
+            now = self.now_iso()
+            last_time = payload.get("interrupted_at") or payload.get("updated_at") or payload.get("created_at")
+            offset = seconds_between(payload.get("created_at"), now)
+            payload["status"] = SESSION_ACTIVE
+            payload["backend"] = backend.value if hasattr(backend, "value") else str(backend or payload.get("backend") or "")
+            payload["updated_at"] = now
+            payload["resumed_at"] = now
+            payload["connection_count"] = int(payload.get("connection_count") or 1) + 1
+            payload["timeline_offset_seconds"] = round(offset, 3)
+            if last_time:
+                payload.setdefault("audio_gaps", []).append({
+                    "start_at": last_time,
+                    "end_at": now,
+                    "reason": "websocket_disconnected",
+                })
+            self._write_record(record)
+            return self.session_info(session_id)
+
+    def interrupt_session(self, session_id):
+        if not session_id:
+            return None
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                return None
+            if record["payload"].get("status") == SESSION_FINISHED:
+                return self.session_info(session_id)
+            now = self.now_iso()
+            record["payload"]["status"] = SESSION_INTERRUPTED
+            record["payload"]["interrupted_at"] = now
+            record["payload"]["updated_at"] = now
+            self._write_record(record)
+            return self.session_info(session_id)
 
     def append_segments(self, session_id, kind, segments):
         if not session_id or kind not in ("source", "translation"):
@@ -176,7 +240,7 @@ class MeetingLogStore:
             record = self.sessions.get(session_id)
             if not record:
                 return None
-            record["payload"]["status"] = "finished"
+            record["payload"]["status"] = SESSION_FINISHED
             record["payload"]["exported_at"] = self.now_iso()
             record["payload"]["updated_at"] = record["payload"]["exported_at"]
             self._write_record(record)
@@ -283,6 +347,11 @@ class MeetingLogStore:
             "source_count": len(record["payload"].get("source_segments", [])),
             "translation_count": len(record["payload"].get("translation_segments", [])),
             "status": record["payload"].get("status"),
+            "connection_count": record["payload"].get("connection_count") or 1,
+            "timeline_offset_seconds": record["payload"].get("timeline_offset_seconds") or 0.0,
+            "interrupted_at": record["payload"].get("interrupted_at"),
+            "resumed_at": record["payload"].get("resumed_at"),
+            "audio_gaps": list(record["payload"].get("audio_gaps") or []),
         }
 
     def list_sessions(self):
@@ -390,7 +459,17 @@ class MeetingLogStore:
                  f"- Session ID: {payload.get('session_id') or ''}", f"- Client: {payload.get('client_name') or ''}",
                  f"- Started: {payload.get('created_at') or ''}", f"- Updated: {payload.get('updated_at') or ''}",
                  f"- Backend: {payload.get('backend') or ''}", f"- Model: {payload.get('model') or ''}",
-                 f"- Source language: {payload.get('source_language') or 'auto'}", "", "## 原文记录"]
+                 f"- Source language: {payload.get('source_language') or 'auto'}",
+                 f"- Status: {payload.get('status') or ''}",
+                 f"- Connections: {payload.get('connection_count') or 1}",
+                 f"- Timeline offset seconds: {payload.get('timeline_offset_seconds') or 0}", "", "## 连接中断记录"]
+        gaps = payload.get("audio_gaps") or []
+        if gaps:
+            for gap in gaps:
+                lines.append(f"- [{gap.get('start_at', '')} - {gap.get('end_at', '')}] {gap.get('reason') or 'websocket_disconnected'}，该时间段音频未记录")
+        else:
+            lines.append("- 无")
+        lines.extend(["", "## 原文记录"])
         for segment in payload.get("source_segments", []):
             lines.append(f"- [{segment.get('start', '')} - {segment.get('end', '')}] {segment.get('text', '')}")
         lines.extend(["", "## 翻译记录"])
@@ -400,10 +479,59 @@ class MeetingLogStore:
         return "\n".join(lines)
 
     @staticmethod
+    def _custom_value_to_text(value):
+        if value in (None, ""):
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+            if text[:1] in ("{", "["):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError):
+                    return text
+                parsed_text = MeetingLogStore._custom_value_to_text(parsed)
+                return parsed_text or text
+            return text
+        if isinstance(value, (int, float, bool)):
+            return str(value).strip()
+        if isinstance(value, list):
+            items = []
+            for item in value:
+                text = MeetingLogStore._custom_value_to_text(item)
+                if text and text not in items:
+                    items.append(text)
+            return "\n".join(items)
+        if isinstance(value, dict):
+            for title_key in ("title", "name"):
+                title = MeetingLogStore._custom_value_to_text(value.get(title_key)) if title_key in value else ""
+                if title:
+                    details = []
+                    for detail_key in ("content", "summary", "text", "value", "内容"):
+                        if detail_key in value:
+                            detail = MeetingLogStore._custom_value_to_text(value.get(detail_key))
+                            if detail and detail != title:
+                                details.append(detail)
+                    return f"{title}：{'；'.join(details)}" if details else title
+            for key in ("text", "content", "summary", "value", "内容"):
+                if key in value:
+                    text = MeetingLogStore._custom_value_to_text(value.get(key))
+                    if text:
+                        return text
+            parts = []
+            for item_key, item_value in value.items():
+                text = MeetingLogStore._custom_value_to_text(item_value)
+                if text:
+                    parts.append(f"{item_key}：{text}")
+            return "；".join(parts)
+        return str(value).strip()
+
+    @staticmethod
     def _render_custom_field(field, value):
         field_type = field.get("type")
         if field_type == "text":
-            return str(value or "").strip()
+            return MeetingLogStore._custom_value_to_text(value)
         if field_type == "table":
             columns = field.get("columns") or ["内容"]
             rows = value if isinstance(value, list) else []
@@ -412,19 +540,22 @@ class MeetingLogStore:
             lines = ["| " + " | ".join(columns) + " |", "| " + " | ".join("---" for _ in columns) + " |"]
             for row in rows:
                 row = row if isinstance(row, dict) else {}
-                lines.append("| " + " | ".join(str(row.get(column) or "").replace("|", "\\|").replace("\n", " ") for column in columns) + " |")
+                lines.append("| " + " | ".join(MeetingLogStore._custom_value_to_text(row.get(column)).replace("|", "\\|").replace("\n", " ") for column in columns) + " |")
             return "\n".join(lines)
         lines = []
         for item in value if isinstance(value, list) else []:
             if isinstance(item, dict):
-                body = str(item.get("text") or "").strip()
+                body = MeetingLogStore._custom_value_to_text(item)
                 if not body:
                     continue
                 lines.append(f"- {body}")
                 if item.get("evidence_quote"):
-                    lines.append(f"  - 依据 [{item.get('evidence_start', '')} - {item.get('evidence_end', '')}]：{item.get('evidence_quote')}")
-            elif str(item or "").strip():
-                lines.append(f"- {str(item).strip()}")
+                    quote = MeetingLogStore._custom_value_to_text(item.get("evidence_quote"))
+                    lines.append(f"  - 依据 [{item.get('evidence_start', '')} - {item.get('evidence_end', '')}]：{quote}")
+            else:
+                body = MeetingLogStore._custom_value_to_text(item)
+                if body:
+                    lines.append(f"- {body}")
         return "\n".join(lines)
 
     @staticmethod

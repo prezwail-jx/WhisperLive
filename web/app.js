@@ -10,6 +10,8 @@ const elements = {
   language: document.getElementById("languageInput"),
   start: document.getElementById("startButton"),
   stop: document.getElementById("stopButton"),
+  continueMeeting: document.getElementById("continueButton"),
+  finishInterrupted: document.getElementById("finishInterruptedButton"),
   exportLog: document.getElementById("exportLogButton"),
   generateSummary: document.getElementById("generateSummaryButton"),
   downloadSummary: document.getElementById("downloadSummaryButton"),
@@ -86,6 +88,9 @@ let clientInstanceId = null;
 let displayMode = "split";
 let singleLanguageMode = "source";
 let detectedSourceLanguage = null;
+let resumeNextConnection = false;
+let intentionallyClosingSocket = false;
+let reconnectController = null;
 
 const DEFAULT_BACKEND = "faster_whisper";
 const DEFAULT_MODEL = "model/asr/small";
@@ -333,6 +338,10 @@ function meetingLogApiUrl() {
 
 function meetingLogDownloadUrl(sessionId, format = "md") {
   return `${meetingLogApiUrl()}/${encodeURIComponent(sessionId)}?format=${encodeURIComponent(format)}`;
+}
+
+function meetingLogFinishUrl(sessionId) {
+  return `${meetingLogApiUrl()}/${encodeURIComponent(sessionId)}/finish`;
 }
 
 function summaryApiUrl(sessionId) {
@@ -1118,7 +1127,11 @@ function handleMessage(event) {
 
   if (message.message === "SERVER_READY") {
     isServerReady = true;
-    setStatus("已连接", "ready");
+    resumeNextConnection = false;
+    if (reconnectController) reconnectController.markConnected();
+    if (elements.continueMeeting) elements.continueMeeting.hidden = true;
+    if (elements.finishInterrupted) elements.finishInterrupted.hidden = true;
+    setStatus(message.resumed ? "已重连" : "已连接", "ready");
     return;
   }
 
@@ -1175,6 +1188,7 @@ function sendConfig(event) {
     uid,
     session_id: currentSessionId,
     session_started_at: currentSessionStartedAt,
+    resume_session: Boolean(resumeNextConnection),
     server: elements.server.value.trim(),
     client_instance_id: clientInstanceId || getClientInstanceId(),
     client_name: meetingName || `Client-${uid.slice(0, 8)}`,
@@ -1210,23 +1224,71 @@ function sendConfig(event) {
 }
 
 async function requestMicrophoneStream() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    throw new Error("当前页面无法访问麦克风。请使用 HTTPS，或在 client 本机通过 http://localhost 打开页面。");
-  }
+  return window.WhisperLiveAudioCapture.requestMicrophoneStream();
+}
 
-  return navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      channelCount: 1,
-    },
+function setConnectionInputsDisabled(disabled) {
+  [
+    elements.server,
+    elements.language,
+    elements.meetingName,
+    elements.translationEnabled,
+    elements.translationDirection,
+    elements.meetingSelect,
+  ].filter(Boolean).forEach((item) => { item.disabled = disabled; });
+  if (elements.refreshMeetings) elements.refreshMeetings.disabled = disabled;
+  updateTranslationControls();
+}
+
+function openMeetingSocket(resume = false) {
+  resumeNextConnection = Boolean(resume);
+  intentionallyClosingSocket = false;
+  isServerReady = false;
+  socket = window.WhisperLiveWsClient.open(elements.server.value.trim(), {
+    open: sendConfig,
+    message: handleMessage,
+    error: () => setStatus("连接错误", "error"),
+    close: handleSocketClose,
   });
+}
+
+function handleSocketClose() {
+  socket = null;
+  isServerReady = false;
+  if (intentionallyClosingSocket || hasStoppedCurrentSession) return;
+  selectedSummarySessionStatus = "interrupted";
+  setStatus("连接中断，准备重连", "busy");
+  if (!reconnectController) {
+    reconnectController = new window.WhisperLiveReconnectController({
+      onStatus: (attempt, total) => setStatus(`正在重连 ${attempt}/${total}，断线期间音频未记录`, "busy"),
+      onReconnect: () => openMeetingSocket(true),
+      onFailed: () => markSessionInterrupted(),
+    });
+  }
+  reconnectController.schedule();
+}
+
+function markSessionInterrupted() {
+  setStatus("会议已中断", "error");
+  if (mediaStream) {
+    window.WhisperLiveAudioCapture.stopTracks(mediaStream);
+    mediaStream = null;
+  }
+  if (processor) { processor.disconnect(); processor = null; }
+  if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+  if (audioContext) { audioContext.close(); audioContext = null; }
+  elements.start.disabled = true;
+  elements.stop.disabled = true;
+  if (elements.continueMeeting) elements.continueMeeting.hidden = false;
+  if (elements.finishInterrupted) elements.finishInterrupted.hidden = false;
+  elements.server.disabled = false;
 }
 
 async function startCapture() {
   setStatus("连接中", "busy");
-  currentSessionId = createUid();
-  currentSessionStartedAt = new Date().toISOString();
+  const newSession = window.WhisperLiveSessionState.createSession();
+  currentSessionId = newSession.sessionId;
+  currentSessionStartedAt = newSession.startedAt;
   hasStoppedCurrentSession = false;
   summaryGenerated = false;
   summaryGenerating = false;
@@ -1242,8 +1304,8 @@ async function startCapture() {
   const meetingName = elements.meetingName.value.trim();
   if (meetingName) {
     window.localStorage.setItem("whisperlive_meeting_name", meetingName);
-  updateMeetingTitle();
   }
+  updateMeetingTitle();
   try {
     lockedHotwords = await fetchMeetingHotwordSnapshot(meetingName);
     updateHotwordStatus(
@@ -1258,17 +1320,7 @@ async function startCapture() {
 
   mediaStream = await requestMicrophoneStream();
 
-  socket = new WebSocket(elements.server.value.trim());
-  socket.binaryType = "arraybuffer";
-  socket.addEventListener("open", sendConfig);
-  socket.addEventListener("message", handleMessage);
-  socket.addEventListener("error", () => setStatus("连接错误", "error"));
-  socket.addEventListener("close", () => {
-    if (elements.start.disabled) {
-      setStatus("已断开", "idle");
-    }
-    stopCapture(false);
-  });
+  openMeetingSocket(false);
 
   audioContext = new AudioContext();
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
@@ -1288,18 +1340,14 @@ async function startCapture() {
 
   elements.start.disabled = true;
   elements.stop.disabled = false;
-  [
-    elements.server,
-    elements.language,
-    elements.meetingName,
-    elements.translationEnabled,
-    elements.translationDirection,
-    elements.meetingSelect,
-  ].filter(Boolean).forEach((item) => { item.disabled = true; });
-  if (elements.refreshMeetings) elements.refreshMeetings.disabled = true;
+  if (elements.continueMeeting) elements.continueMeeting.hidden = true;
+  if (elements.finishInterrupted) elements.finishInterrupted.hidden = true;
+  setConnectionInputsDisabled(true);
 }
 
 function stopCapture(sendEnd = true) {
+  if (reconnectController) reconnectController.reset();
+  intentionallyClosingSocket = Boolean(sendEnd);
   if (sendEnd && currentSessionId) {
     hasStoppedCurrentSession = true;
     selectedSummarySessionId = currentSessionId;
@@ -1322,7 +1370,7 @@ function stopCapture(sendEnd = true) {
     audioContext = null;
   }
   if (mediaStream) {
-    mediaStream.getTracks().forEach((track) => track.stop());
+    window.WhisperLiveAudioCapture.stopTracks(mediaStream);
     mediaStream = null;
   }
   if (socket && socket.readyState === WebSocket.OPEN) {
@@ -1336,15 +1384,9 @@ function stopCapture(sendEnd = true) {
   isServerReady = false;
   elements.start.disabled = false;
   elements.stop.disabled = true;
-  [
-    elements.server,
-    elements.language,
-    elements.meetingName,
-    elements.translationEnabled,
-    elements.meetingSelect,
-  ].filter(Boolean).forEach((item) => { item.disabled = false; });
-  updateTranslationControls();
-  if (elements.refreshMeetings) elements.refreshMeetings.disabled = false;
+  if (elements.continueMeeting) elements.continueMeeting.hidden = true;
+  if (elements.finishInterrupted) elements.finishInterrupted.hidden = true;
+  setConnectionInputsDisabled(false);
 }
 
 elements.settingsButton.addEventListener("click", openSettings);
@@ -1378,6 +1420,42 @@ elements.translationDirection.addEventListener("change", () => {
 elements.server.addEventListener("change", () => window.localStorage.setItem("whisperlive_server_url", elements.server.value.trim()));
 elements.language.addEventListener("change", () => window.localStorage.setItem("whisperlive_source_language", elements.language.value));
 
+async function continueInterruptedMeeting() {
+  if (!currentSessionId) return;
+  setStatus("继续会议中", "busy");
+  mediaStream = await requestMicrophoneStream();
+  audioContext = new AudioContext();
+  sourceNode = audioContext.createMediaStreamSource(mediaStream);
+  processor = audioContext.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = (event) => {
+    if (!socket || socket.readyState !== WebSocket.OPEN || !isServerReady) return;
+    const input = event.inputBuffer.getChannelData(0);
+    const output = downsampleTo16k(input, audioContext.sampleRate);
+    socket.send(output.buffer);
+  };
+  sourceNode.connect(processor);
+  processor.connect(audioContext.destination);
+  elements.stop.disabled = false;
+  if (elements.continueMeeting) elements.continueMeeting.hidden = true;
+  if (elements.finishInterrupted) elements.finishInterrupted.hidden = true;
+  setConnectionInputsDisabled(true);
+  openMeetingSocket(true);
+}
+
+async function finishInterruptedMeeting() {
+  if (!currentSessionId) return;
+  setStatus("结束会议中", "busy");
+  const response = await fetch(meetingLogFinishUrl(currentSessionId), { method: "POST" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  hasStoppedCurrentSession = true;
+  selectedSummarySessionId = currentSessionId;
+  selectedSummarySessionStatus = "finished";
+  updateSummaryButtons();
+  await loadSummarySessions(currentSessionId).catch(() => {});
+  stopCapture(false);
+  setStatus("已停止", "idle");
+}
+
 elements.start.addEventListener("click", () => {
   startCapture().catch((error) => {
     console.error(error);
@@ -1390,6 +1468,24 @@ elements.stop.addEventListener("click", () => {
   setStatus("停止中", "busy");
   stopCapture(true);
 });
+
+if (elements.continueMeeting) {
+  elements.continueMeeting.addEventListener("click", () => {
+    continueInterruptedMeeting().catch((error) => {
+      console.error(error);
+      setStatus("继续失败", "error");
+    });
+  });
+}
+
+if (elements.finishInterrupted) {
+  elements.finishInterrupted.addEventListener("click", () => {
+    finishInterruptedMeeting().catch((error) => {
+      console.error(error);
+      setStatus("结束失败", "error");
+    });
+  });
+}
 
 elements.exportLog.addEventListener("click", () => {
   exportMeetingLog().catch((error) => {

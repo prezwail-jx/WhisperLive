@@ -460,7 +460,12 @@ class MeetingSummaryService:
             if not isinstance(item, dict):
                 filtered += 1
                 continue
-            body = str(item.get(text_key) or "").strip()
+            body = ""
+            for body_key in (text_key, "text", "content", "summary", "title", "name", "value", "内容"):
+                if body_key in item:
+                    body = self._custom_value_to_text(item.get(body_key))
+                    if body:
+                        break
             evidence = self._validate_evidence(item, payload)
             if not body or not evidence:
                 filtered += 1
@@ -1167,6 +1172,55 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                 break
         return titles
 
+    @classmethod
+    def _custom_value_to_text(cls, value):
+        if value in (None, ""):
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+            if text[:1] in ("{", "["):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError):
+                    return text
+                parsed_text = cls._custom_value_to_text(parsed)
+                return parsed_text or text
+            return text
+        if isinstance(value, (int, float, bool)):
+            return str(value).strip()
+        if isinstance(value, list):
+            items = []
+            for item in value:
+                text = cls._custom_value_to_text(item)
+                if text and text not in items:
+                    items.append(text)
+            return "\n".join(items)
+        if isinstance(value, dict):
+            for title_key in ("title", "name"):
+                title = cls._custom_value_to_text(value.get(title_key)) if title_key in value else ""
+                if title:
+                    detail_parts = []
+                    for detail_key in ("content", "summary", "text", "value", "内容"):
+                        if detail_key in value:
+                            detail = cls._custom_value_to_text(value.get(detail_key))
+                            if detail and detail != title:
+                                detail_parts.append(detail)
+                    return f"{title}：{'；'.join(detail_parts)}" if detail_parts else title
+            for key in ("text", "content", "summary", "value", "内容"):
+                if key in value:
+                    text = cls._custom_value_to_text(value.get(key))
+                    if text:
+                        return text
+            parts = []
+            for item_key, item_value in value.items():
+                text = cls._custom_value_to_text(item_value)
+                if text:
+                    parts.append(f"{item_key}：{text}")
+            return "；".join(parts)
+        return str(value).strip()
+
     def _normalize_custom_data(self, data, payload, fields):
         normalized, evidence_count, filtered = {}, 0, 0
         data = data if isinstance(data, dict) else {}
@@ -1174,7 +1228,7 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             key, field_type = field["key"], field["type"]
             value = data.get(key)
             if field_type == "text":
-                body = str(value.get("text") or "").strip() if isinstance(value, dict) else str(value or "").strip()
+                body = self._custom_value_to_text(value)
                 normalized[key] = self._normalize_custom_text(body, field)[:3000]
             elif field_type == "evidence_list":
                 items, rejected = self._evidence_items(value, payload, limit=8)
@@ -1185,7 +1239,7 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                 items = []
                 source_items = value if isinstance(value, list) else ([value] if isinstance(value, str) else [])
                 for item in source_items:
-                    body = str(item.get("text") or "").strip() if isinstance(item, dict) else str(item or "").strip()
+                    body = self._custom_value_to_text(item)
                     body = self._normalize_custom_text(body, field)
                     if body and not self._is_custom_list_fragment(body, field) and body not in items:
                         items.append(body[:300])
@@ -1199,7 +1253,7 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                         continue
                     columns = field.get("columns") or ["内容"]
                     normalized_row = {
-                        column: str(row.get(column) or "").strip()[:300]
+                        column: self._custom_value_to_text(row.get(column)).strip()[:300]
                         for column in columns
                     }
                     if not any(normalized_row.values()):

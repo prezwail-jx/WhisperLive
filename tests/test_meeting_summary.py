@@ -271,6 +271,45 @@ class TestMeetingSummaryService(unittest.TestCase):
         self.assertEqual(evidence_count, 1)
         self.assertEqual(filtered, 0)
 
+    def test_custom_normalization_extracts_text_from_structured_values(self):
+        service = MeetingSummaryService(startup_command="")
+        payload = {"source_segments": []}
+        fields = [
+            {"key": "summary", "label": "讨论事项综述", "type": "text"},
+            {"key": "topics", "label": "会议议题", "type": "list"},
+            {"key": "actions", "label": "行动项", "type": "table", "columns": ["任务", "负责人"]},
+        ]
+        data = {
+            "summary": {"content": "会议讨论项目推进。"},
+            "topics": [
+                {"title": "领域决赛", "content": "安排承办单位"},
+                "{\"text\": \"海沃斯光电处置\"}",
+            ],
+            "actions": [
+                {"任务": {"content": "完成材料"}, "负责人": ["张三", "李四"]},
+            ],
+        }
+
+        normalized, evidence_count, filtered = service._normalize_custom_data(data, payload, fields)
+
+        self.assertEqual(normalized["summary"], "会议讨论项目推进。")
+        self.assertEqual(normalized["topics"], ["领域决赛：安排承办单位", "海沃斯光电处置"])
+        self.assertEqual(normalized["actions"], [{"任务": "完成材料", "负责人": "张三\n李四"}])
+        self.assertEqual(evidence_count, 0)
+        self.assertEqual(filtered, 0)
+
+    def test_custom_evidence_list_rejects_malformed_items_without_json_residue(self):
+        service = MeetingSummaryService(startup_command="")
+        payload = {"source_segments": [{"start": 1, "end": 2, "text": "会议确认通过方案。"}]}
+        fields = [{"key": "evidence", "label": "原文依据", "type": "evidence_list"}]
+        data = {"evidence": [{"content": "通过方案", "evidence_start": 1, "evidence_end": 2, "evidence_quote": "不存在"}]}
+
+        normalized, evidence_count, filtered = service._normalize_custom_data(data, payload, fields)
+
+        self.assertEqual(normalized["evidence"], [])
+        self.assertEqual(evidence_count, 0)
+        self.assertEqual(filtered, 1)
+
     def test_session_time_converts_utc_to_configured_timezone(self):
         service = MeetingSummaryService(startup_command="")
         with mock.patch.dict(os.environ, {"TZ": "Asia/Shanghai"}):
@@ -396,10 +435,10 @@ class TestMeetingSummaryService(unittest.TestCase):
         self.assertIn('"actions":[{"任务":""}]', prompt)
         self.assertIn("只有 evidence_list 字段必须提供", prompt)
         self.assertIn("禁止在字段内容里重复输出字段标题", prompt)
-        self.assertIn("高层议题", prompt)
+        self.assertIn("每个编号聚合一个议题", prompt)
         self.assertIn("覆盖整场会议", prompt)
-        self.assertIn("禁止把口头残句", prompt)
-        self.assertIn("编号议题段落", prompt)
+        self.assertIn("不要输出时间戳", prompt)
+        self.assertIn("编号组织输出", prompt)
         self.assertIn("禁止时间戳", prompt)
         self.assertIn("逐segment摘要", prompt)
 
