@@ -1102,6 +1102,13 @@ class TranscriptionServer:
                 return JSONResponse(status_code=404, content={"error": "summary template not found"})
             return {key: value for key, value in definition.items() if key != "markdown"}
 
+        @app.delete("/admin/summary-templates/{template_id}")
+        async def delete_admin_summary_template(template_id: str):
+            result = self.summary_templates.delete(template_id)
+            if not result:
+                return JSONResponse(status_code=404, content={"error": "summary template not found"})
+            return result
+
         @app.post("/admin/summary-templates/analyze")
         async def analyze_admin_summary_template(file: UploadFile):
             try:

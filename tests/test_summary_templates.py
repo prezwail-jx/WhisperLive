@@ -83,6 +83,32 @@ class TestSummaryTemplateStore(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.create_draft("empty.md", "# 只有主标题\n")
 
+    def test_delete_soft_hides_template_and_keeps_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SummaryTemplateStore(directory)
+            draft = store.create_draft("weekly.md", "# 周例会\n\n## 概述\n示例内容\n")
+            definition = store.confirm(draft["draft_id"], "周例会", draft["fields"])
+            template_dir = os.path.join(directory, definition["id"])
+
+            result = store.delete(definition["id"])
+
+            self.assertTrue(result["deleted"])
+            self.assertEqual(result["template_id"], definition["id"])
+            self.assertIsNone(store.get(definition["id"]))
+            self.assertEqual(store.list()["templates"], [])
+            definition_path = os.path.join(template_dir, "definition.json")
+            self.assertTrue(os.path.isfile(definition_path))
+            with open(definition_path, encoding="utf-8") as file:
+                saved = json.load(file)
+            self.assertTrue(saved["deleted"])
+            self.assertIn("deleted_at", saved)
+            self.assertTrue(store.delete(definition["id"])["deleted"])
+
+    def test_delete_missing_template_returns_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SummaryTemplateStore(directory)
+            self.assertIsNone(store.delete("missing-template"))
+
     def test_custom_markdown_replaces_sample_section_content(self):
         summary = {
             "summary_template": "custom",

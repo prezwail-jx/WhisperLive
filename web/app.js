@@ -18,6 +18,7 @@ const elements = {
   downloadSummaryDocx: document.getElementById("downloadSummaryDocxButton"),
   summarySession: document.getElementById("summarySessionInput"),
   summaryTemplate: document.getElementById("summaryTemplateInput"),
+  deleteSummaryTemplate: document.getElementById("deleteSummaryTemplateButton"),
   summaryVersion: document.getElementById("summaryVersionInput"),
   summaryTemplateFile: document.getElementById("summaryTemplateFileInput"),
   analyzeSummaryTemplate: document.getElementById("analyzeSummaryTemplateButton"),
@@ -29,11 +30,18 @@ const elements = {
   refreshSummarySessions: document.getElementById("refreshSummarySessionsButton"),
   clearLog: document.getElementById("clearLogButton"),
   status: document.getElementById("connectionStatus"),
+  drawerConnectionStatus: document.getElementById("drawerConnectionStatus"),
+  drawerMeetingName: document.getElementById("drawerMeetingName"),
+  drawerTranslationStatus: document.getElementById("drawerTranslationStatus"),
   languageStatus: document.getElementById("languageStatus"),
   sourceText: document.getElementById("sourceText"),
   translationText: document.getElementById("translationText"),
   clearSource: document.getElementById("clearSourceButton"),
   clearTranslation: document.getElementById("clearTranslationButton"),
+  summaryQuick: document.getElementById("summaryQuickButton"),
+  summaryPanel: document.getElementById("summaryPanel"),
+  summaryDrawer: document.getElementById("summaryDrawer"),
+  closeSummary: document.getElementById("closeSummaryButton"),
   settingsButton: document.getElementById("settingsButton"),
   closeSettings: document.getElementById("closeSettingsButton"),
   settingsDrawer: document.getElementById("settingsDrawer"),
@@ -275,7 +283,14 @@ function updateHotwordStatus(text = "") {
 }
 
 function updateMeetingTitle() {
-  elements.meetingTitle.textContent = elements.meetingName.value.trim() || "实时同传";
+  const title = elements.meetingName.value.trim() || "实时同传";
+  elements.meetingTitle.textContent = title;
+  if (elements.drawerMeetingName) elements.drawerMeetingName.textContent = title;
+}
+
+function updateDrawerTranslationStatus() {
+  if (!elements.drawerTranslationStatus || !elements.translationEnabled) return;
+  elements.drawerTranslationStatus.textContent = elements.translationEnabled.checked ? "已启用" : "已关闭";
 }
 
 function setToolStatus(text, state = "") {
@@ -284,30 +299,66 @@ function setToolStatus(text, state = "") {
   elements.toolStatus.className = `tool-status ${state}`.trim();
 }
 
-function openSettings() {
+function showDrawerBackdrop() {
   elements.settingsBackdrop.hidden = false;
   requestAnimationFrame(() => elements.settingsBackdrop.classList.add("visible"));
-  elements.settingsDrawer.classList.add("open");
-  elements.settingsDrawer.setAttribute("aria-hidden", "false");
-  elements.settingsButton.setAttribute("aria-expanded", "true");
   document.body.classList.add("drawer-open");
 }
 
-function closeSettings() {
+function hideDrawerBackdropIfIdle() {
+  const settingsOpen = elements.settingsDrawer && elements.settingsDrawer.classList.contains("open");
+  const summaryOpen = elements.summaryDrawer && elements.summaryDrawer.classList.contains("open");
+  if (settingsOpen || summaryOpen) return;
   elements.settingsBackdrop.classList.remove("visible");
+  document.body.classList.remove("drawer-open");
+  window.setTimeout(() => {
+    const stillIdle = !elements.settingsDrawer.classList.contains("open") && !(elements.summaryDrawer && elements.summaryDrawer.classList.contains("open"));
+    if (stillIdle) elements.settingsBackdrop.hidden = true;
+  }, 240);
+}
+
+function closeSettings() {
   elements.settingsDrawer.classList.remove("open");
   elements.settingsDrawer.setAttribute("aria-hidden", "true");
   elements.settingsButton.setAttribute("aria-expanded", "false");
-  document.body.classList.remove("drawer-open");
-  window.setTimeout(() => {
-    if (!elements.settingsDrawer.classList.contains("open")) elements.settingsBackdrop.hidden = true;
-  }, 240);
+  hideDrawerBackdropIfIdle();
+}
+
+function closeSummaryDrawer() {
+  if (!elements.summaryDrawer) return;
+  elements.summaryDrawer.classList.remove("open");
+  elements.summaryDrawer.setAttribute("aria-hidden", "true");
+  if (elements.summaryQuick) elements.summaryQuick.setAttribute("aria-expanded", "false");
+  hideDrawerBackdropIfIdle();
+}
+
+function closeAllDrawers() {
+  closeSettings();
+  closeSummaryDrawer();
+}
+
+function openSettings() {
+  closeSummaryDrawer();
+  showDrawerBackdrop();
+  elements.settingsDrawer.classList.add("open");
+  elements.settingsDrawer.setAttribute("aria-hidden", "false");
+  elements.settingsButton.setAttribute("aria-expanded", "true");
+}
+
+function openSummaryDrawer() {
+  closeSettings();
+  if (!elements.summaryDrawer) return;
+  showDrawerBackdrop();
+  elements.summaryDrawer.classList.add("open");
+  elements.summaryDrawer.setAttribute("aria-hidden", "false");
+  if (elements.summaryQuick) elements.summaryQuick.setAttribute("aria-expanded", "true");
 }
 
 function updateTranslationControls() {
   const enabled = elements.translationEnabled.checked;
   elements.translationDirection.disabled = !enabled;
   elements.translationDirectionField.classList.toggle("disabled", !enabled);
+  updateDrawerTranslationStatus();
 }
 
 function normalizeLanguage(value) {
@@ -371,6 +422,18 @@ function selectedSummaryTemplate() {
   return { template: value };
 }
 
+function selectedCustomSummaryTemplateId() {
+  const value = (elements.summaryTemplate && elements.summaryTemplate.value) || "";
+  return value.startsWith("custom:") ? value.slice(7) : "";
+}
+
+function updateSummaryTemplateDeleteButton() {
+  if (!elements.deleteSummaryTemplate) return;
+  const templateId = selectedCustomSummaryTemplateId();
+  elements.deleteSummaryTemplate.hidden = false;
+  elements.deleteSummaryTemplate.disabled = !templateId;
+}
+
 async function loadSummaryTemplates(preferredId = "") {
   if (!elements.summaryTemplate) return;
   const response = await fetch(summaryTemplateApiUrl(), { cache: "no-store" });
@@ -394,6 +457,7 @@ async function loadSummaryTemplates(preferredId = "") {
   if (Array.from(elements.summaryTemplate.options).some((option) => option.value === current)) {
     elements.summaryTemplate.value = current;
   }
+  updateSummaryTemplateDeleteButton();
 }
 
 function renderSummaryTemplateFields() {
@@ -506,6 +570,22 @@ async function saveSummaryTemplate() {
   setToolStatus("自定义总结模板已保存。", "success");
 }
 
+async function deleteSelectedSummaryTemplate() {
+  const templateId = selectedCustomSummaryTemplateId();
+  if (!templateId) throw new Error("请选择自定义总结模板");
+  const template = customSummaryTemplates.find((item) => item.id === templateId) || {};
+  const templateName = template.name || templateId;
+  if (!window.confirm(`确认删除自定义模板“${templateName}”？\n历史总结文件不受影响，但之后不能再选择这个模板生成新总结。`)) {
+    return;
+  }
+  const response = await fetch(summaryTemplateApiUrl(`/${encodeURIComponent(templateId)}`), { method: "DELETE" });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.deleted) throw new Error(result.error || `HTTP ${response.status}`);
+  elements.summaryTemplate.value = "auto";
+  await loadSummaryTemplates();
+  setToolStatus("自定义总结模板已删除。", "success");
+}
+
 function renderSummaryVersions() {
   if (!elements.summaryVersion) return;
   const selected = elements.summaryVersion.value;
@@ -615,6 +695,7 @@ async function fetchMeetingHotwordSnapshot(meetingName) {
 function setStatus(text, state = "idle") {
   elements.status.textContent = text;
   elements.status.className = `status ${state}`;
+  if (elements.drawerConnectionStatus) elements.drawerConnectionStatus.textContent = text;
 }
 
 function safeExportFilenamePrefix(value) {
@@ -1389,11 +1470,13 @@ function stopCapture(sendEnd = true) {
   setConnectionInputsDisabled(false);
 }
 
+if (elements.summaryQuick) elements.summaryQuick.addEventListener("click", openSummaryDrawer);
 elements.settingsButton.addEventListener("click", openSettings);
 elements.closeSettings.addEventListener("click", closeSettings);
-elements.settingsBackdrop.addEventListener("click", closeSettings);
+if (elements.closeSummary) elements.closeSummary.addEventListener("click", closeSummaryDrawer);
+elements.settingsBackdrop.addEventListener("click", closeAllDrawers);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeSettings();
+  if (event.key === "Escape") closeAllDrawers();
 });
 elements.viewModeButtons.forEach((button) => {
   button.addEventListener("click", () => setDisplayMode(button.dataset.viewMode));
@@ -1508,6 +1591,17 @@ if (elements.saveSummaryTemplate) {
     saveSummaryTemplate().catch((error) => {
       console.error(error);
       setToolStatus(`模板保存失败：${error.message}`, "error");
+    });
+  });
+}
+if (elements.summaryTemplate) {
+  elements.summaryTemplate.addEventListener("change", updateSummaryTemplateDeleteButton);
+}
+if (elements.deleteSummaryTemplate) {
+  elements.deleteSummaryTemplate.addEventListener("click", () => {
+    deleteSelectedSummaryTemplate().catch((error) => {
+      console.error(error);
+      setToolStatus(`模板删除失败：${error.message}`, "error");
     });
   });
 }

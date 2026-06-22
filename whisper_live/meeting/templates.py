@@ -208,7 +208,7 @@ class SummaryTemplateStore:
             self.drafts.pop(draft_id, None)
         return definition
 
-    def get(self, template_id):
+    def get(self, template_id, include_deleted=False):
         if not str(template_id or "").strip():
             return None
         template_id = self._safe_id(template_id)
@@ -219,12 +219,37 @@ class SummaryTemplateStore:
         try:
             with open(definition_path, "r", encoding="utf-8") as file:
                 definition = json.load(file)
+            if definition.get("deleted") and not include_deleted:
+                return None
             with open(template_path, "r", encoding="utf-8") as file:
                 definition["markdown"] = file.read()
         except (OSError, ValueError) as exc:
             logging.warning("Failed to load summary template %s: %s", template_id, exc)
             return None
         return definition
+
+    def delete(self, template_id):
+        if not str(template_id or "").strip():
+            return None
+        template_id = self._safe_id(template_id)
+        definition_path = os.path.join(self.directory, template_id, "definition.json")
+        template_path = os.path.join(self.directory, template_id, "template.md")
+        if not os.path.isfile(definition_path) or not os.path.isfile(template_path):
+            return None
+        with self.lock:
+            definition = self.get(template_id, include_deleted=True)
+            if not definition:
+                return None
+            if not definition.get("deleted"):
+                definition["deleted"] = True
+                definition["deleted_at"] = now_iso()
+                definition.pop("markdown", None)
+                atomic_write(definition_path, json.dumps(definition, ensure_ascii=False, indent=2) + "\n")
+            return {
+                "deleted": True,
+                "template_id": definition.get("id") or template_id,
+                "template_name": definition.get("name") or template_id,
+            }
 
     def list(self):
         templates = []
