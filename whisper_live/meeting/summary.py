@@ -894,7 +894,11 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
         description = str(field.get("description") or "")
         text = f"{key} {label} {description}".lower()
         instructions = []
-        if any(marker in text for marker in ("综述", "总结", "讨论事项", "重点事项", "key item", "key point", "overview")):
+        if field.get("output_style") == "prose":
+            instructions.append(
+                "使用1至3个完整自然段组织背景、讨论内容、结论和后续安排；禁止数字编号、项目符号、内部小标题和重复字段标题。"
+            )
+        elif any(marker in text for marker in ("综述", "总结", "讨论事项", "重点事项", "key item", "key point", "overview")):
             instructions.append(
                 "用编号组织输出，每个编号聚合一个议题的背景、进展、结论和后续动作，按会议自然顺序覆盖整场会议；不要输出时间戳、逐段摘要或单个大项挂几十个子项。"
             )
@@ -909,12 +913,19 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             f"{self._custom_field_instruction(field)}"
             for field in fields
         )
-        task = (
-            "合并同一会议的分块结果，按编号议题去重归并，保持编号议题段落结构，不得增加新事实或证据。"
-            "逐块核对：原文前段、中段、后段各产生了哪些议题，合并后必须覆盖每个分块中的重要议题，不得遗漏任一阶段的内容。"
-            if merge else
-            "仅根据会议原文填写字段。"
-        )
+        has_prose_fields = any(field.get("output_style") == "prose" for field in fields)
+        if merge and has_prose_fields:
+            task = (
+                "合并同一会议的分块结果，按字段范围去重归并为1至3个完整自然段，不得增加新事实或证据。"
+                "逐块核对原文前段、中段和后段的重要内容，禁止编号、项目符号和重复字段标题。"
+            )
+        elif merge:
+            task = (
+                "合并同一会议的分块结果，按编号议题去重归并，保持编号议题段落结构，不得增加新事实或证据。"
+                "逐块核对：原文前段、中段、后段各产生了哪些议题，合并后必须覆盖每个分块中的重要议题，不得遗漏任一阶段的内容。"
+            )
+        else:
+            task = "仅根据会议原文填写字段。"
         return (
             f"{self.BASE_PROMPT}\n\n这是用户确认过的自定义纪要字段。{task}\n"
             "字段名称、标题、说明、表格列名以及模板中的示例只定义格式和提取范围，不是会议事实。"
@@ -926,13 +937,13 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             f"字段说明：\n{descriptions}\n只输出以下 JSON 字段，禁止输出其他字段：\n"
             f"{self._custom_schema(fields)}\n"
             "普通列表最多12项；证据列表和表格最多8项；"
-            "综述/总结类文本字段用编号组织输出，每项包含标题和简明综述；"
+            "未设置自然段格式的综述/总结类文本字段用编号组织输出，每项包含标题和简明综述；"
             "禁止时间戳、逐segment摘要、几十条平铺列表或单个大项挂全部子项。"
         )
 
     @staticmethod
     def _is_custom_summary_text_field(field):
-        if field.get("type") != "text":
+        if field.get("type") != "text" or field.get("output_style") == "prose":
             return False
         text = " ".join(str(field.get(key) or "") for key in ("key", "label", "heading", "description")).lower()
         return any(marker in text for marker in ("综述", "总结", "讨论事项", "重点事项", "key item", "key point", "overview"))
@@ -970,6 +981,30 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                 continue
             normalized_lines.append(line)
         return "\n".join(normalized_lines).strip()
+
+    @classmethod
+    def _normalize_custom_prose(cls, body, field):
+        normalized = cls._normalize_custom_text(body, field)
+        if not normalized:
+            return ""
+        paragraphs, current = [], []
+        for raw_line in normalized.splitlines():
+            line = raw_line.strip()
+            if not line:
+                if current:
+                    paragraphs.append(" ".join(current))
+                    current = []
+                continue
+            line = re.sub(r"^(?:[-*•·]+|\d{1,3}[.、)）])\s*", "", line).strip()
+            line = re.sub(r"^#{1,6}\s*", "", line).strip()
+            if line:
+                current.append(line)
+        if current:
+            paragraphs.append(" ".join(current))
+        paragraphs = [paragraph for paragraph in paragraphs if paragraph]
+        if len(paragraphs) > 3:
+            paragraphs = paragraphs[:2] + [" ".join(paragraphs[2:])]
+        return "\n\n".join(paragraphs).strip()
 
     @staticmethod
     def _split_inline_numbered_items(body):
@@ -1304,7 +1339,10 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             value = data.get(key)
             if field_type == "text":
                 body = self._custom_value_to_text(value)
-                normalized[key] = self._normalize_custom_text(body, field)[:3000]
+                if field.get("output_style") == "prose":
+                    normalized[key] = self._normalize_custom_prose(body, field)[:3000]
+                else:
+                    normalized[key] = self._normalize_custom_text(body, field)[:3000]
             elif field_type == "evidence_list":
                 items, rejected = self._evidence_items(value, payload, limit=8)
                 normalized[key] = items
@@ -1680,6 +1718,84 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                 )
         return repaired, all_issues
 
+    @staticmethod
+    def _custom_display_heading(field):
+        heading = str(field.get("heading") or field.get("label") or field.get("key") or "").strip()
+        heading = re.sub(
+            r"^(?:第?[一二三四五六七八九十百千0-9]+[章节部分项]?[、.．)）:：\-\s]+)",
+            "",
+            heading,
+        )
+        return heading.strip(" ：:;；。.-—\t")
+
+    def _derive_custom_fields(self, custom_data, fields):
+        repaired = dict(custom_data)
+        fields_by_key = {field["key"]: field for field in fields}
+        for field in fields:
+            source_keys = field.get("derive_from_fields") or []
+            if not source_keys:
+                continue
+            values = []
+            for source_key in source_keys:
+                source_field = fields_by_key.get(source_key)
+                if not source_field or self._custom_value_empty(repaired.get(source_key)):
+                    continue
+                title = self._custom_display_heading(source_field)
+                if title and title not in values:
+                    values.append(title)
+            repaired[field["key"]] = values
+        return repaired
+
+    def _clean_residual_custom_fields(self, custom_data, definition, fields):
+        repaired = dict(custom_data)
+        for field in fields:
+            if not field.get("residual"):
+                continue
+            key = field["key"]
+            candidate = self._custom_value_to_text(repaired.get(key))
+            if not candidate:
+                repaired[key] = ""
+                continue
+            covered_parts = []
+            for covered_field in fields:
+                if covered_field["key"] == key or covered_field.get("derive_from_fields"):
+                    continue
+                if covered_field.get("metadata_enrichment") or self._is_custom_topic_list_field(covered_field):
+                    continue
+                covered = self._custom_value_to_text(repaired.get(covered_field["key"]))
+                if covered:
+                    covered_parts.append(f"【{covered_field.get('label') or covered_field['key']}】{covered}")
+            if not covered_parts:
+                continue
+            prompt = (
+                "你是会议纪要去重器。只从候选其他事项中删除已被前述专题覆盖的内容，禁止新增、改写或补充事实。"
+                "输出严格 JSON，格式为 {\"text\":\"\"}。若没有未覆盖内容，text 返回空字符串。"
+            )
+            try:
+                result = self.request_json([
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": (
+                        "前述专题内容：\n" + "\n".join(covered_parts)[:7000]
+                        + "\n\n候选其他事项：\n" + candidate[:3000]
+                    )},
+                ], max_tokens=1024, context=f"custom residual template={definition.get(id)} field={key}")
+                body = self._custom_value_to_text(result.get("text") if isinstance(result, dict) else "")
+                repaired[key] = self._normalize_custom_prose(body, field)[:3000]
+            except Exception as exc:
+                logging.warning("Custom residual cleanup failed; leaving field empty: template=%s field=%s error=%s", definition.get("id"), key, exc)
+                repaired[key] = ""
+        return repaired
+
+    def _finalize_custom_data(self, custom_data, payload, definition, fields, source_text):
+        custom_data = self._enrich_custom_metadata(custom_data, payload, fields)
+        custom_data, text_quality_fields = self._repair_custom_text_quality(
+            custom_data, payload, definition, fields, source_text
+        )
+        custom_data = self._clean_residual_custom_fields(custom_data, definition, fields)
+        custom_data = self._derive_custom_fields(custom_data, fields)
+        custom_data = self._repair_custom_topic_lists_from_summary(custom_data, fields)
+        return custom_data, text_quality_fields
+
     def _repair_custom_topic_lists_from_summary(self, custom_data, fields):
         summary_titles = []
         for field in fields:
@@ -1694,7 +1810,7 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
 
         repaired = dict(custom_data)
         for field in fields:
-            if not self._is_custom_topic_list_field(field):
+            if not self._is_custom_topic_list_field(field) or field.get("derive_from_fields"):
                 continue
             key = field["key"]
             current = repaired.get(key) if isinstance(repaired.get(key), list) else []
@@ -1733,13 +1849,12 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             raise ValueError("custom summary template has no fields")
         self.ensure_ready()
         chunks = self.split_text(text)
-        combined = self._generate_custom_fields(payload, definition, fields, chunks)
+        generated_fields = [field for field in fields if not field.get("derive_from_fields")]
+        combined = self._generate_custom_fields(payload, definition, generated_fields, chunks)
         custom_data, evidence_count, filtered = self._normalize_custom_data(combined, payload, fields)
-        custom_data = self._enrich_custom_metadata(custom_data, payload, fields)
-        custom_data, text_quality_fields = self._repair_custom_text_quality(
+        custom_data, text_quality_fields = self._finalize_custom_data(
             custom_data, payload, definition, fields, text
         )
-        custom_data = self._repair_custom_topic_lists_from_summary(custom_data, fields)
         issues, missing_fields = self._custom_quality_issues(custom_data, fields, evidence_count, filtered)
         if text_quality_fields:
             issues.append("custom_text_quality_insufficient")
@@ -1747,7 +1862,10 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             retry_keys = {field["key"] for field in missing_fields}
             if "no_valid_evidence" in issues or "high_evidence_rejection" in issues:
                 retry_keys.update(field["key"] for field in fields if field.get("type") == "evidence_list")
-            retry_fields = [field for field in fields if field["key"] in retry_keys]
+            retry_fields = [
+                field for field in fields
+                if field["key"] in retry_keys and not field.get("derive_from_fields")
+            ]
             if retry_fields:
                 retry_chunks = self.split_text_with_limit(
                     text, max(1200, int(self.max_chars_per_chunk * 0.6))
@@ -1763,11 +1881,9 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                 custom_data, evidence_count, filtered = self._normalize_custom_data(
                     combined, payload, fields
                 )
-                custom_data = self._enrich_custom_metadata(custom_data, payload, fields)
-                custom_data, text_quality_fields = self._repair_custom_text_quality(
+                custom_data, text_quality_fields = self._finalize_custom_data(
                     custom_data, payload, definition, fields, text
                 )
-                custom_data = self._repair_custom_topic_lists_from_summary(custom_data, fields)
                 issues, missing_fields = self._custom_quality_issues(
                     custom_data, fields, evidence_count, filtered
                 )

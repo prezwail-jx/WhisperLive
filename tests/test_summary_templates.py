@@ -38,6 +38,29 @@ class TestSummaryTemplateStore(unittest.TestCase):
             ],
         )
 
+    def test_hierarchy_defaults_use_prose_and_derive_meeting_topics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SummaryTemplateStore(directory)
+            markdown = (
+                "# 会议纪要\n\n## 一、会议议题\n\n"
+                "## 二、讨论事项综述\n\n"
+                "### 1. 创新创业大赛安排\n\n"
+                "### 2. 其他需讨论汇报事项\n"
+            )
+            draft = store.create_draft("hierarchy.md", markdown)
+
+        fields = {field["heading"]: field for field in draft["fields"]}
+        topics = fields["一、会议议题"]
+        competition = fields["1. 创新创业大赛安排"]
+        other = fields["2. 其他需讨论汇报事项"]
+        self.assertEqual(
+            topics["derive_from_fields"],
+            [competition["key"], other["key"]],
+        )
+        self.assertEqual(competition["output_style"], "prose")
+        self.assertEqual(other["output_style"], "prose")
+        self.assertTrue(other["residual"])
+
     def test_parent_with_own_body_remains_content_field(self):
         markdown = "## 讨论事项综述\n需要生成总体概述\n\n### 1. 专题\n示例\n"
         sections = SummaryTemplateStore._extract_sections(markdown)

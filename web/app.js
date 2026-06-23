@@ -583,6 +583,25 @@ function renderSummaryTemplateFields() {
     required.addEventListener("change", () => { field.required = required.checked; });
     requiredLabel.append(required, document.createTextNode("必填字段"));
     options.appendChild(requiredLabel);
+    if (field.type === "text") {
+      const proseLabel = document.createElement("label");
+      const prose = document.createElement("input");
+      prose.type = "checkbox";
+      prose.checked = field.output_style === "prose";
+      prose.addEventListener("change", () => { field.output_style = prose.checked ? "prose" : null; });
+      proseLabel.append(prose, document.createTextNode("自然段正文（无编号）"));
+      options.appendChild(proseLabel);
+      const residualLabel = document.createElement("label");
+      const residual = document.createElement("input");
+      residual.type = "checkbox";
+      residual.checked = Boolean(field.residual);
+      residual.addEventListener("change", () => { field.residual = residual.checked; });
+      residualLabel.append(residual, document.createTextNode("仅保留未覆盖事项"));
+      options.appendChild(residualLabel);
+    } else {
+      field.output_style = null;
+      field.residual = false;
+    }
     if (field.type === "table") {
       const metadataLabel = document.createElement("label");
       const metadata = document.createElement("input");
@@ -595,6 +614,12 @@ function renderSummaryTemplateFields() {
       field.metadata_enrichment = false;
     }
     card.appendChild(options);
+    if ((field.derive_from_fields || []).length) {
+      const derivedHint = document.createElement("p");
+      derivedHint.className = "summary-template-container-hint";
+      derivedHint.textContent = "该字段将根据有内容的固定专题标题自动生成，不调用 LLM。";
+      card.appendChild(derivedHint);
+    }
     elements.summaryTemplateFields.appendChild(card);
   });
 }

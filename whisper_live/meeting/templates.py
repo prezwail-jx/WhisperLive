@@ -141,6 +141,12 @@ class SummaryTemplateStore:
                         break
                 if not columns:
                     columns = ["内容"]
+            output_style = "prose" if field_type == "text" and field.get("output_style") == "prose" else None
+            derive_from_fields = [
+                str(item or "").strip()[:64]
+                for item in field.get("derive_from_fields") or []
+                if str(item or "").strip()
+            ][:SummaryTemplateStore.MAX_FIELDS]
             cleaned.append({
                 "key": key,
                 "label": str(field.get("label") or heading).strip()[:100],
@@ -150,8 +156,49 @@ class SummaryTemplateStore:
                 "columns": columns,
                 "required": bool(field.get("required")),
                 "metadata_enrichment": bool(field.get("metadata_enrichment")) and field_type == "table",
+                "output_style": output_style,
+                "derive_from_fields": derive_from_fields,
+                "residual": bool(field.get("residual")) and field_type == "text",
             })
+        valid_keys = {field["key"] for field in cleaned}
+        for field in cleaned:
+            field["derive_from_fields"] = [
+                key for key in field["derive_from_fields"]
+                if key in valid_keys and key != field["key"]
+            ]
         return cleaned
+
+    @classmethod
+    def _apply_hierarchy_defaults(cls, fields, sections):
+        fields_by_heading = {field["heading"]: field for field in fields}
+        fixed_fields = []
+        for index, section in enumerate(sections):
+            if section.get("role") != "container":
+                continue
+            if cls._normalized_heading(section["heading"]) not in cls.SUMMARY_TEXT_HEADINGS:
+                continue
+            for candidate in sections[index + 1:]:
+                if candidate["level"] <= section["level"]:
+                    break
+                if candidate["level"] != section["level"] + 1:
+                    continue
+                field = fields_by_heading.get(candidate["heading"])
+                if not field:
+                    continue
+                field["type"] = "text"
+                field["columns"] = []
+                field["metadata_enrichment"] = False
+                field["output_style"] = "prose"
+                normalized = cls._normalized_heading(candidate["heading"])
+                if normalized.startswith(("其他", "补充")):
+                    field["residual"] = True
+                fixed_fields.append(field)
+        fixed_keys = [field["key"] for field in fixed_fields]
+        if fixed_keys:
+            for field in fields:
+                if cls._normalized_heading(field["heading"]) in cls.LIST_HEADINGS:
+                    field["derive_from_fields"] = fixed_keys
+        return fields
 
     @staticmethod
     def _sanitize_markdown(markdown, fields):
@@ -193,6 +240,7 @@ class SummaryTemplateStore:
         if not sections:
             raise ValueError("Markdown 模板至少需要一个二级或更低级标题")
         fields = self._sanitize_fields(fields, sections) or self._fallback_fields(sections)
+        fields = self._apply_hierarchy_defaults(fields, sections)
         draft_id = str(uuid.uuid4())
         draft = {"draft_id": draft_id, "filename": os.path.basename(filename or "template.md"), "markdown": markdown, "sections": sections, "fields": fields, "created_at": time.time()}
         with self.lock:
