@@ -61,6 +61,77 @@ class TestSummaryTemplateStore(unittest.TestCase):
         self.assertEqual(other["output_style"], "prose")
         self.assertTrue(other["residual"])
 
+    def test_confirm_reapplies_hierarchy_defaults_missing_from_client_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SummaryTemplateStore(directory)
+            markdown = (
+                "# 会议纪要\n\n## 会议议题\n\n"
+                "## 讨论事项综述\n\n"
+                "### 1、创新创业大赛安排\n\n"
+                "### 2、其他需讨论汇报事项\n"
+            )
+            draft = store.create_draft("hierarchy.md", markdown)
+            client_fields = [
+                {
+                    "key": field["key"],
+                    "label": field["label"],
+                    "heading": field["heading"],
+                    "type": "list",
+                }
+                for field in draft["fields"]
+            ]
+
+            definition = store.confirm(draft["draft_id"], "层级模板", client_fields)
+
+        fields = {field["heading"]: field for field in definition["fields"]}
+        topics = fields["会议议题"]
+        competition = fields["1、创新创业大赛安排"]
+        other = fields["2、其他需讨论汇报事项"]
+        self.assertEqual(topics["derive_from_fields"], [competition["key"], other["key"]])
+        self.assertEqual(competition["type"], "text")
+        self.assertEqual(competition["output_style"], "prose")
+        self.assertEqual(other["type"], "text")
+        self.assertEqual(other["output_style"], "prose")
+        self.assertTrue(other["residual"])
+
+    def test_get_repairs_legacy_hierarchy_definition_in_memory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SummaryTemplateStore(directory)
+            template_dir = os.path.join(directory, "legacy")
+            os.makedirs(template_dir)
+            markdown = (
+                "# 会议纪要\n\n## 会议议题\n\n{{meeting_topic}}\n\n"
+                "## 讨论事项综述\n\n"
+                "### 1、创新创业大赛安排\n\n{{field_1}}\n\n"
+                "### 2、其他需讨论汇报事项\n\n{{field_2}}\n"
+            )
+            definition = {
+                "id": "legacy",
+                "name": "旧模板",
+                "format": "md",
+                "revision": 1,
+                "fields": [
+                    {"key": "meeting_topic", "heading": "会议议题", "type": "list", "derive_from_fields": []},
+                    {"key": "field_1", "heading": "1、创新创业大赛安排", "type": "text", "derive_from_fields": []},
+                    {"key": "field_2", "heading": "2、其他需讨论汇报事项", "type": "list", "derive_from_fields": []},
+                ],
+            }
+            with open(os.path.join(template_dir, "template.md"), "w", encoding="utf-8") as file:
+                file.write(markdown)
+            definition_path = os.path.join(template_dir, "definition.json")
+            with open(definition_path, "w", encoding="utf-8") as file:
+                json.dump(definition, file, ensure_ascii=False)
+
+            repaired = store.get("legacy")
+
+            fields = {field["key"]: field for field in repaired["fields"]}
+            self.assertEqual(fields["meeting_topic"]["derive_from_fields"], ["field_1", "field_2"])
+            self.assertEqual(fields["field_2"]["type"], "text")
+            self.assertEqual(fields["field_2"]["output_style"], "prose")
+            self.assertTrue(fields["field_2"]["residual"])
+            with open(definition_path, encoding="utf-8") as file:
+                self.assertEqual(json.load(file)["fields"][0]["derive_from_fields"], [])
+
     def test_parent_with_own_body_remains_content_field(self):
         markdown = "## 讨论事项综述\n需要生成总体概述\n\n### 1. 专题\n示例\n"
         sections = SummaryTemplateStore._extract_sections(markdown)

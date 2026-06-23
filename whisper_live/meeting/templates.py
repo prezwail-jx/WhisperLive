@@ -257,6 +257,7 @@ class SummaryTemplateStore:
             cleaned = self._sanitize_fields(fields, draft["sections"])
             if not cleaned:
                 raise ValueError("模板至少需要一个有效字段")
+            cleaned = self._apply_hierarchy_defaults(cleaned, draft["sections"])
             base_id = self._safe_id(name or os.path.splitext(draft["filename"])[0])
             template_id, suffix = base_id, 2
             while os.path.exists(os.path.join(self.directory, template_id)):
@@ -286,6 +287,10 @@ class SummaryTemplateStore:
                 return None
             with open(template_path, "r", encoding="utf-8") as file:
                 definition["markdown"] = file.read()
+            fields = definition.get("fields")
+            if isinstance(fields, list):
+                sections = self._extract_sections(definition["markdown"])
+                definition["fields"] = self._apply_hierarchy_defaults(fields, sections)
         except (OSError, ValueError) as exc:
             logging.warning("Failed to load summary template %s: %s", template_id, exc)
             return None
