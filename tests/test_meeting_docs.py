@@ -101,6 +101,55 @@ class TestMeetingDocConverter(unittest.TestCase):
         self.assertIn("## 讨论事项综述", text)
         self.assertIn("模板示例内容", text)
 
+    def test_docx_to_md_text_preserves_standard_heading_three(self):
+        from docx import Document
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "heading-three.docx")
+            document = Document()
+            document.add_heading("讨论事项综述", level=2)
+            document.add_heading("1. 标准三级专题", level=3)
+            document.add_paragraph("专题正文。")
+            document.save(path)
+
+            text = MeetingDocConverter.docx_to_md_text(path, promote_plain_headings=True)
+
+        self.assertIn("## 讨论事项综述", text)
+        self.assertIn("### 1. 标准三级专题", text)
+
+    def test_docx_to_md_text_promotes_plain_numbered_topics_only_under_summary(self):
+        from docx import Document
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "plain-numbered-topics.docx")
+            document = Document()
+            document.add_paragraph("会议纪要")
+            document.add_paragraph("一、会议议题")
+            document.add_paragraph("1. 创新创业大赛项目总体情况及领域决赛安排")
+            document.add_paragraph("二、讨论事项综述")
+            heading = document.add_paragraph("1、创新创业大赛总体情况及领域决赛安排")
+            for run in heading.runs:
+                run.font.name = "KaiTi"
+            body = document.add_paragraph("会议讨论了领域决赛安排。")
+            for run in body.runs:
+                run.font.name = "Times New Roman"
+            document.add_paragraph("2、其他需讨论汇报事项")
+            document.add_paragraph("会议讨论了华境融资事项。")
+            document.save(path)
+
+            text = MeetingDocConverter.docx_to_md_text(path, promote_plain_headings=True)
+
+        self.assertIn("## 会议议题", text)
+        self.assertIn("1. 创新创业大赛项目总体情况及领域决赛安排", text)
+        self.assertNotIn("### 1. 创新创业大赛项目总体情况及领域决赛安排", text)
+        self.assertIn("## 讨论事项综述", text)
+        self.assertIn("### 1、创新创业大赛总体情况及领域决赛安排", text)
+        self.assertIn("### 2、其他需讨论汇报事项", text)
+
     def test_docx_to_md_text_does_not_promote_plain_body_text(self):
         from docx import Document
         import tempfile

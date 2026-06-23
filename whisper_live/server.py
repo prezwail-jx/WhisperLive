@@ -1131,11 +1131,10 @@ class TranscriptionServer:
                         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as temp_file:
                             temp_file.write(content)
                             temp_path = temp_file.name
-                        markdown = MeetingDocConverter.docx_to_md_text(temp_path)
-                        if not self.summary_templates._extract_sections(markdown):
-                            markdown = MeetingDocConverter.docx_to_md_text(
-                                temp_path, promote_plain_headings=True
-                            )
+                        markdown = MeetingDocConverter.docx_to_md_text(
+                            temp_path,
+                            promote_plain_headings=True,
+                        )
                     except Exception as exc:
                         raise ValueError(f"DOCX 模板解析失败: {exc}") from exc
                     finally:

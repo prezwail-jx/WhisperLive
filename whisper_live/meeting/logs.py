@@ -563,13 +563,25 @@ class MeetingLogStore:
         markdown = str(summary.get("custom_template_markdown") or "").rstrip()
         fields = summary.get("custom_template_fields") or []
         data = summary.get("template_data") or {}
+        residual_errors = {
+            str(item.get("key") or ""): item
+            for item in (summary.get("summary_quality") or {}).get("residual_generation_errors") or []
+            if isinstance(item, dict) and item.get("key")
+        }
+
+        def render_field(field):
+            key = str(field.get("key") or "")
+            rendered = MeetingLogStore._render_custom_field(field, data.get(key))
+            if not rendered and key in residual_errors:
+                return "（该专题生成失败，请重新生成总结）"
+            return rendered
+
         markdown = markdown.replace("{{meeting_name}}", str(summary.get("meeting_name") or "会议总结"))
         for field in fields:
-            rendered = MeetingLogStore._render_custom_field(field, data.get(field.get("key")))
-            markdown = markdown.replace("{{" + str(field.get("key") or "") + "}}", rendered)
+            markdown = markdown.replace("{{" + str(field.get("key") or "") + "}}", render_field(field))
 
         lines = markdown.splitlines()
-        replacements = {str(field.get("heading") or ""): MeetingLogStore._render_custom_field(field, data.get(field.get("key"))) for field in fields}
+        replacements = {str(field.get("heading") or ""): render_field(field) for field in fields}
         output, index = [], 0
         while index < len(lines):
             match = re.match(r"^(#{2,6})\s+(.+?)\s*$", lines[index])

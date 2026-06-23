@@ -332,20 +332,50 @@ class TestMeetingSummaryService(unittest.TestCase):
 
         self.assertEqual(derived["topics"], ["创新创业大赛安排"])
 
-    def test_residual_cleanup_failure_leaves_optional_field_empty(self):
+    def test_residual_generation_uses_source_and_covered_topics(self):
+        service = MeetingSummaryService(startup_command="")
+        fields = [
+            {"key": "competition", "label": "大赛安排", "type": "text"},
+            {"key": "other", "label": "其他事项", "type": "text", "output_style": "prose", "residual": True},
+        ]
+        with mock.patch.object(
+            service,
+            "request_json",
+            return_value={"other": {"text": "会议讨论华境融资及子公司成立。"}},
+        ) as request_json:
+            generated, errors = service._generate_residual_custom_fields(
+                {"competition": "领域决赛安排。", "other": ""},
+                {"meeting_name": "周会"},
+                {"id": "template-1"},
+                fields,
+                "[0 - 10] 会议讨论领域决赛安排。\n[10 - 20] 会议讨论华境融资及子公司成立。",
+            )
+
+        system_content = request_json.call_args.args[0][0]["content"]
+        user_content = request_json.call_args.args[0][1]["content"]
+        self.assertIn("领域决赛安排", system_content)
+        self.assertIn("华境融资及子公司成立", user_content)
+        self.assertEqual(generated["other"], "会议讨论华境融资及子公司成立。")
+        self.assertEqual(errors, [])
+
+    def test_residual_generation_failure_records_error_and_leaves_field_empty(self):
         service = MeetingSummaryService(startup_command="")
         fields = [
             {"key": "competition", "label": "大赛安排", "type": "text"},
             {"key": "other", "label": "其他事项", "type": "text", "output_style": "prose", "residual": True},
         ]
         with mock.patch.object(service, "request_json", side_effect=RuntimeError("offline")):
-            cleaned = service._clean_residual_custom_fields(
-                {"competition": "领域决赛安排。", "other": "重复领域决赛安排。"},
+            generated, errors = service._generate_residual_custom_fields(
+                {"competition": "领域决赛安排。", "other": ""},
+                {"meeting_name": "周会"},
                 {"id": "template-1"},
                 fields,
+                "[0 - 10] 会议讨论其他事项。",
             )
 
-        self.assertEqual(cleaned["other"], "")
+        self.assertEqual(generated["other"], "")
+        self.assertEqual(errors[0]["key"], "other")
+        self.assertIn("offline", errors[0]["error"])
 
     def test_custom_evidence_list_rejects_malformed_items_without_json_residue(self):
         service = MeetingSummaryService(startup_command="")
@@ -707,6 +737,36 @@ class TestMeetingSummaryService(unittest.TestCase):
         generated_fields = generate.call_args.args[2]
         self.assertEqual([field["key"] for field in generated_fields], ["competition"])
         self.assertEqual(summary["template_data"]["topics"], ["创新创业大赛安排"])
+
+    def test_generate_custom_runs_residual_field_after_fixed_topics(self):
+        service = MeetingSummaryService(startup_command="")
+        payload = {
+            "session_id": "session-residual",
+            "meeting_name": "周会",
+            "source_segments": [
+                {"start": 0, "end": 10, "text": "会议讨论领域决赛安排。"},
+                {"start": 10, "end": 20, "text": "会议讨论华境融资及子公司成立。"},
+            ],
+        }
+        definition = {
+            "id": "template-residual",
+            "name": "剩余事项模板",
+            "fields": [
+                {"key": "topics", "heading": "一、会议议题", "type": "list", "derive_from_fields": ["competition", "other"]},
+                {"key": "competition", "heading": "1. 创新创业大赛安排", "label": "创新创业大赛安排", "type": "text", "output_style": "prose"},
+                {"key": "other", "heading": "2. 其他事项", "label": "其他事项", "type": "text", "output_style": "prose", "residual": True},
+            ],
+        }
+        with mock.patch.object(service, "ensure_ready"), \
+             mock.patch.object(service, "_generate_custom_fields", return_value={"competition": {"text": "领域决赛安排已确认。"}}) as generate, \
+             mock.patch.object(service, "request_json", return_value={"other": {"text": "会议讨论华境融资及子公司成立。"}}), \
+             mock.patch.object(service, "schedule_idle_shutdown"):
+            summary = service.generate_custom(payload, definition)
+
+        self.assertEqual([field["key"] for field in generate.call_args.args[2]], ["competition"])
+        self.assertEqual(summary["template_data"]["other"], "会议讨论华境融资及子公司成立。")
+        self.assertEqual(summary["template_data"]["topics"], ["创新创业大赛安排", "其他事项"])
+        self.assertEqual(summary["summary_quality"]["residual_generation_errors"], [])
 
     def test_custom_rewrite_limits_source_context_and_output_budget(self):
         service = MeetingSummaryService(startup_command="")

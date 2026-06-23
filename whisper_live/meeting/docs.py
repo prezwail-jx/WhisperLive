@@ -65,6 +65,76 @@ class MeetingDocConverter:
         return None
 
     @staticmethod
+    def _docx_heading_level(paragraph):
+        style = paragraph.style
+        visited = set()
+        while style is not None and id(style) not in visited:
+            visited.add(id(style))
+            name = str(getattr(style, "name", "") or "").strip()
+            match = re.match(r"^(?:Heading|标题)\s*([1-6])$", name, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+            ppr = getattr(getattr(style, "element", None), "pPr", None)
+            outline = getattr(ppr, "outlineLvl", None) if ppr is not None else None
+            if outline is not None and getattr(outline, "val", None) is not None:
+                try:
+                    return max(1, min(int(outline.val) + 1, 6))
+                except (TypeError, ValueError):
+                    pass
+            style = getattr(style, "base_style", None)
+        paragraph_style_name = str(getattr(paragraph.style, "name", "") or "").strip().lower()
+        if paragraph_style_name not in {"normal", "正文", "body text"}:
+            ppr = getattr(paragraph._p, "pPr", None)
+            outline = getattr(ppr, "outlineLvl", None) if ppr is not None else None
+            if outline is not None and getattr(outline, "val", None) is not None:
+                try:
+                    return max(1, min(int(outline.val) + 1, 6))
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    @staticmethod
+    def _docx_run_signature(paragraph):
+        try:
+            from docx.oxml.ns import qn
+        except ImportError:
+            return set(), False
+        fonts = set()
+        bold = False
+        for run in paragraph.runs:
+            if not run.text.strip():
+                continue
+            if run.font.name:
+                fonts.add(str(run.font.name).lower())
+            rpr = run._element.rPr
+            rfonts = rpr.rFonts if rpr is not None else None
+            if rfonts is not None:
+                east_asia = rfonts.get(qn("w:eastAsia"))
+                if east_asia:
+                    fonts.add(str(east_asia).lower())
+            bold = bold or bool(run.bold)
+        return fonts, bold
+
+    @classmethod
+    def _is_plain_numbered_subheading(cls, paragraph, next_paragraph=None):
+        text = paragraph.text.strip()
+        match = re.match(r"^(\d{1,2})\s*[.、．)）]\s*(\S.+?)\s*$", text)
+        if not match:
+            return False
+        title = match.group(2).strip()
+        if not 2 <= len(title) <= 100 or re.search(r"[。！？!?；;]$", title):
+            return False
+        title_markers = (
+            "安排", "汇报", "讨论", "情况", "方案", "事项", "计划", "进展",
+            "处置", "办法", "更新", "总结", "问题", "审议", "验收", "建设",
+        )
+        keyword_match = title.endswith(title_markers)
+        fonts, bold = cls._docx_run_signature(paragraph)
+        next_fonts, _next_bold = cls._docx_run_signature(next_paragraph) if next_paragraph is not None else (set(), False)
+        format_differs = bool(fonts and next_fonts and fonts != next_fonts)
+        return bold or format_differs or keyword_match
+
+    @staticmethod
     def _split_table_row(line):
         body = line.strip().strip("|")
         return [cell.strip() for cell in body.split("|")]
@@ -250,26 +320,44 @@ class MeetingDocConverter:
         document = Document(docx_path)
         lines = []
         used_plain_headings = set()
-        for paragraph in document.paragraphs:
+        current_plain_section = ""
+        paragraphs = [paragraph for paragraph in document.paragraphs if paragraph.text.strip()]
+        for index, paragraph in enumerate(paragraphs):
             text = paragraph.text.strip()
-            if not text:
-                continue
             style = paragraph.style.name if paragraph.style else ""
-            if style.startswith("Heading"):
-                match = re.search(r"(\d+)$", style)
-                level = int(match.group(1)) if match else 1
-                lines.append(f"{'#' * max(1, min(level, 6))} {text}")
+            heading_level = MeetingDocConverter._docx_heading_level(paragraph)
+            if heading_level is not None:
+                level = max(1, min(heading_level, 6))
+                lines.append(f"{chr(35) * level} {text}")
+                if level == 1:
+                    current_plain_section = ""
+                elif level == 2:
+                    current_plain_section = MeetingDocConverter._normalize_plain_heading(text)
+                continue
+
+            promoted = MeetingDocConverter._plain_heading_markdown(text) if promote_plain_headings else None
+            if promoted and promoted not in used_plain_headings:
+                lines.append(promoted)
+                used_plain_headings.add(promoted)
+                if promoted.startswith("## "):
+                    current_plain_section = MeetingDocConverter._normalize_plain_heading(text)
+                elif promoted.startswith("# "):
+                    current_plain_section = ""
+                continue
+
+            next_paragraph = paragraphs[index + 1] if index + 1 < len(paragraphs) else None
+            if (
+                promote_plain_headings
+                and current_plain_section == "讨论事项综述"
+                and MeetingDocConverter._is_plain_numbered_subheading(paragraph, next_paragraph)
+            ):
+                lines.append(f"### {text}")
             elif "List Bullet" in style:
                 lines.append(f"- {text}")
             elif "List Number" in style:
                 lines.append(f"1. {text}")
             else:
-                promoted = MeetingDocConverter._plain_heading_markdown(text) if promote_plain_headings else None
-                if promoted and promoted not in used_plain_headings:
-                    lines.append(promoted)
-                    used_plain_headings.add(promoted)
-                else:
-                    lines.append(text)
+                lines.append(text)
         for table in document.tables:
             rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
             if not rows:

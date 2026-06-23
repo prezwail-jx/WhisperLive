@@ -1746,52 +1746,78 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             repaired[field["key"]] = values
         return repaired
 
-    def _clean_residual_custom_fields(self, custom_data, definition, fields):
+    def _generate_residual_custom_fields(self, custom_data, payload, definition, fields, source_text):
         repaired = dict(custom_data)
+        errors = []
+        template_id = definition.get("id")
+        meeting_name = payload.get("meeting_name") or payload.get("client_name") or "未命名会议"
         for field in fields:
             if not field.get("residual"):
                 continue
             key = field["key"]
-            candidate = self._custom_value_to_text(repaired.get(key))
-            if not candidate:
-                repaired[key] = ""
-                continue
             covered_parts = []
             for covered_field in fields:
-                if covered_field["key"] == key or covered_field.get("derive_from_fields"):
+                if covered_field["key"] == key or covered_field.get("derive_from_fields") or covered_field.get("residual"):
                     continue
                 if covered_field.get("metadata_enrichment") or self._is_custom_topic_list_field(covered_field):
                     continue
                 covered = self._custom_value_to_text(repaired.get(covered_field["key"]))
                 if covered:
-                    covered_parts.append(f"【{covered_field.get('label') or covered_field['key']}】{covered}")
-            if not covered_parts:
-                continue
+                    covered_label = covered_field.get("label") or covered_field["key"]
+                    covered_parts.append(f"【{covered_label}】{covered}")
+            covered_context = "\n".join(covered_parts)[:7000]
             prompt = (
-                "你是会议纪要去重器。只从候选其他事项中删除已被前述专题覆盖的内容，禁止新增、改写或补充事实。"
-                "输出严格 JSON，格式为 {\"text\":\"\"}。若没有未覆盖内容，text 返回空字符串。"
+                self._custom_prompt(definition, [field])
+                + "\n\n这是第二阶段剩余事项提取。必须重新检查会议原文，只提取前述专题尚未覆盖的重要事实。"
+                "禁止复述前述专题，禁止新增原文没有的事实；没有未覆盖内容时返回空文本。\n"
+                + "前述专题内容：\n" + (covered_context or "（无）")
             )
             try:
-                result = self.request_json([
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": (
-                        "前述专题内容：\n" + "\n".join(covered_parts)[:7000]
-                        + "\n\n候选其他事项：\n" + candidate[:3000]
-                    )},
-                ], max_tokens=1024, context=f"custom residual template={definition.get(id)} field={key}")
-                body = self._custom_value_to_text(result.get("text") if isinstance(result, dict) else "")
+                chunk_limit = max(2000, self.max_chars_per_chunk - min(len(covered_context), 5000))
+                chunks = self.split_text_with_limit(source_text, chunk_limit)
+                results = []
+                for chunk_index, chunk in enumerate(chunks):
+                    results.append(self.request_json([
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": f"会议名称：{meeting_name}\n\n会议原文记录：\n{chunk}"},
+                    ], max_tokens=self._custom_output_budget([field]), context=(
+                        f"custom residual template={template_id} field={key} chunk={chunk_index}"
+                    )))
+                while len(results) > 1:
+                    merged = []
+                    for index in range(0, len(results), 2):
+                        pair = results[index:index + 2]
+                        if len(pair) == 1:
+                            merged.append(pair[0])
+                            continue
+                        merged.append(self.request_json([
+                            {"role": "system", "content": prompt + "\n合并候选结果并继续删除重复前述专题的内容。"},
+                            {"role": "user", "content": json.dumps(pair, ensure_ascii=False, separators=(",", ":"))},
+                        ], max_tokens=self._custom_output_budget([field]), context=(
+                            f"custom residual merge template={template_id} field={key}"
+                        )))
+                    results = merged
+                raw_value = (results[0] if results else {}).get(key)
+                body = self._custom_value_to_text(raw_value)
                 repaired[key] = self._normalize_custom_prose(body, field)[:3000]
             except Exception as exc:
-                logging.warning("Custom residual cleanup failed; leaving field empty: template=%s field=%s error=%s", definition.get("id"), key, exc)
+                logging.warning(
+                    "Custom residual generation failed: template=%s field=%s error=%s",
+                    template_id, key, exc,
+                )
                 repaired[key] = ""
-        return repaired
+                errors.append({
+                    "key": key,
+                    "label": field.get("label") or key,
+                    "error": str(exc)[:300],
+                })
+        return repaired, errors
 
     def _finalize_custom_data(self, custom_data, payload, definition, fields, source_text):
         custom_data = self._enrich_custom_metadata(custom_data, payload, fields)
         custom_data, text_quality_fields = self._repair_custom_text_quality(
             custom_data, payload, definition, fields, source_text
         )
-        custom_data = self._clean_residual_custom_fields(custom_data, definition, fields)
         custom_data = self._derive_custom_fields(custom_data, fields)
         custom_data = self._repair_custom_topic_lists_from_summary(custom_data, fields)
         return custom_data, text_quality_fields
@@ -1849,7 +1875,10 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             raise ValueError("custom summary template has no fields")
         self.ensure_ready()
         chunks = self.split_text(text)
-        generated_fields = [field for field in fields if not field.get("derive_from_fields")]
+        generated_fields = [
+            field for field in fields
+            if not field.get("derive_from_fields") and not field.get("residual")
+        ]
         combined = self._generate_custom_fields(payload, definition, generated_fields, chunks)
         custom_data, evidence_count, filtered = self._normalize_custom_data(combined, payload, fields)
         custom_data, text_quality_fields = self._finalize_custom_data(
@@ -1864,7 +1893,9 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                 retry_keys.update(field["key"] for field in fields if field.get("type") == "evidence_list")
             retry_fields = [
                 field for field in fields
-                if field["key"] in retry_keys and not field.get("derive_from_fields")
+                if field["key"] in retry_keys
+                and not field.get("derive_from_fields")
+                and not field.get("residual")
             ]
             if retry_fields:
                 retry_chunks = self.split_text_with_limit(
@@ -1904,6 +1935,11 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                 "总结质量不足，未保存新版本",
                 details,
             )
+        custom_data, residual_generation_errors = self._generate_residual_custom_fields(
+            custom_data, payload, definition, fields, text
+        )
+        custom_data = self._derive_custom_fields(custom_data, fields)
+        custom_data = self._repair_custom_topic_lists_from_summary(custom_data, fields)
         summary = {
             "session_id": payload.get("session_id") or "",
             "meeting_name": payload.get("meeting_name") or payload.get("client_name") or "",
@@ -1919,7 +1955,12 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             "overview": "",
             "template_data": custom_data,
             "topics": [], "decisions": [], "action_items": [], "risks": [], "follow_ups": [], "open_questions": [],
-            "summary_quality": {"source_segment_count": len(payload.get("source_segments") or []), "evidence_count": evidence_count, "filtered_unverified_count": filtered},
+            "summary_quality": {
+                "source_segment_count": len(payload.get("source_segments") or []),
+                "evidence_count": evidence_count,
+                "filtered_unverified_count": filtered,
+                "residual_generation_errors": residual_generation_errors,
+            },
         }
         self.schedule_idle_shutdown()
         return summary

@@ -200,6 +200,30 @@ class TestSummaryTemplateStore(unittest.TestCase):
         self.assertNotIn("旧示例", markdown)
         self.assertNotIn("旧待办", markdown)
 
+    def test_custom_markdown_marks_residual_generation_failure(self):
+        summary = {
+            "summary_template": "custom",
+            "session_id": "session-residual-error",
+            "meeting_name": "周例会",
+            "custom_template_name": "层级模板",
+            "custom_template_markdown": "## 其他事项\n{{other}}\n",
+            "custom_template_fields": [
+                {"key": "other", "heading": "其他事项", "type": "text"},
+            ],
+            "template_data": {"other": ""},
+            "summary_quality": {
+                "residual_generation_errors": [
+                    {"key": "other", "label": "其他事项", "error": "offline"},
+                ],
+            },
+        }
+
+        markdown = MeetingLogStore.render_summary_markdown(summary)
+
+        self.assertIn("## 其他事项", markdown)
+        self.assertIn("该专题生成失败，请重新生成总结", markdown)
+        self.assertNotIn("{{other}}", markdown)
+
     def test_custom_markdown_renders_structured_values_without_json_residue(self):
         summary = {
             "summary_template": "custom",
