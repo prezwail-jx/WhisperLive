@@ -1148,7 +1148,12 @@ class TranscriptionServer:
                 sections = self.summary_templates._extract_sections(markdown)
                 if not sections:
                     raise ValueError(empty_sections_message)
-                fields = await asyncio.to_thread(self.meeting_summary.analyze_custom_template, markdown, sections)
+                content_sections = [section for section in sections if section.get("role") != "container"]
+                fields = await asyncio.to_thread(
+                    self.meeting_summary.analyze_custom_template,
+                    markdown,
+                    content_sections,
+                )
                 return self.summary_templates.create_draft(filename, markdown, fields)
             except ValueError as exc:
                 return JSONResponse(status_code=400, content={"error": str(exc)})

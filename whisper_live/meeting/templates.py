@@ -58,17 +58,32 @@ class SummaryTemplateStore:
 
     @staticmethod
     def _extract_sections(markdown):
+        lines = str(markdown or "").splitlines()
         sections = []
-        for index, line in enumerate(str(markdown or "").splitlines()):
+        for index, line in enumerate(lines):
             match = re.match(r"^(#{2,6})\s+(.+?)\s*$", line)
             if match:
                 sections.append({"heading": match.group(2).strip(), "level": len(match.group(1)), "line_index": index})
+        for section_index, section in enumerate(sections):
+            scope_end = len(lines)
+            first_child = None
+            for candidate in sections[section_index + 1:]:
+                if candidate["level"] <= section["level"]:
+                    scope_end = candidate["line_index"]
+                    break
+                if first_child is None:
+                    first_child = candidate
+            body_end = first_child["line_index"] if first_child else scope_end
+            has_body = any(line.strip() for line in lines[section["line_index"] + 1:body_end])
+            section["role"] = "container" if first_child and not has_body else "field"
         return sections
 
     @staticmethod
     def _fallback_fields(sections):
         fields, used = [], set()
         for index, section in enumerate(sections):
+            if section.get("role") == "container":
+                continue
             if len(fields) >= SummaryTemplateStore.MAX_FIELDS:
                 break
             base = SummaryTemplateStore._field_key(section["heading"], f"field_{index + 1}")

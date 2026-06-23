@@ -167,6 +167,11 @@ input:focus, select:focus { border-color: var(--green-deep); box-shadow: 0 0 0 3
 .summary-template-editor { display: grid; gap: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
 .summary-template-fields { display: grid; gap: 10px; }
 .summary-template-field { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); }
+.summary-template-field.is-container { border-style: dashed; background: rgba(255, 255, 255, .012); }
+.summary-template-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.summary-template-section-heading strong { min-width: 0; color: var(--text); font-size: 12px; line-height: 1.4; }
+.summary-template-level { flex: 0 0 auto; color: var(--green); font-size: 10px; font-weight: 800; }
+.summary-template-container-hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .summary-template-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .summary-template-field input, .summary-template-field select { min-height: 36px; font-size: 11px; }
 .summary-template-field-options { display: flex; flex-wrap: wrap; gap: 12px; }

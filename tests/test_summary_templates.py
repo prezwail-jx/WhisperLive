@@ -21,6 +21,53 @@ class TestSummaryTemplateStore(unittest.TestCase):
                 self.assertNotIn("示例内容", file.read())
             self.assertEqual(store.list()["templates"][0]["name"], "周例会")
 
+    def test_blank_parent_with_child_headings_is_structural_container(self):
+        markdown = (
+            "# 会议纪要\n\n## 二、讨论事项综述\n\n"
+            "### 1. 创新创业大赛总体情况及领域决赛安排\n\n"
+            "### 2. 研究所筹建方案\n"
+        )
+        sections = SummaryTemplateStore._extract_sections(markdown)
+
+        self.assertEqual(
+            [(section["heading"], section["level"], section["role"]) for section in sections],
+            [
+                ("二、讨论事项综述", 2, "container"),
+                ("1. 创新创业大赛总体情况及领域决赛安排", 3, "field"),
+                ("2. 研究所筹建方案", 3, "field"),
+            ],
+        )
+
+    def test_parent_with_own_body_remains_content_field(self):
+        markdown = "## 讨论事项综述\n需要生成总体概述\n\n### 1. 专题\n示例\n"
+        sections = SummaryTemplateStore._extract_sections(markdown)
+
+        self.assertEqual(sections[0]["role"], "field")
+        self.assertEqual(sections[1]["role"], "field")
+
+    def test_confirm_keeps_structural_parent_without_placeholder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SummaryTemplateStore(directory)
+            markdown = (
+                "# 会议纪要\n\n## 二、讨论事项综述\n\n"
+                "### 1. 创新创业大赛总体情况及领域决赛安排\n\n"
+                "### 2. 研究所筹建方案\n"
+            )
+            draft = store.create_draft("hierarchy.md", markdown)
+
+            self.assertEqual(
+                [field["heading"] for field in draft["fields"]],
+                ["1. 创新创业大赛总体情况及领域决赛安排", "2. 研究所筹建方案"],
+            )
+            definition = store.confirm(draft["draft_id"], "层级模板", draft["fields"])
+            with open(os.path.join(directory, definition["id"], "template.md"), encoding="utf-8") as file:
+                saved = file.read()
+
+            self.assertIn("## 二、讨论事项综述", saved)
+            self.assertIn("### 1. 创新创业大赛总体情况及领域决赛安排", saved)
+            self.assertNotIn("## 二、讨论事项综述\n\n{{", saved)
+            self.assertEqual(saved.count("{{"), 2)
+
     def test_confirm_removes_unconfigured_nested_sample_headings(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SummaryTemplateStore(directory)

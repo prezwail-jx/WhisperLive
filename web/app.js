@@ -460,15 +460,91 @@ async function loadSummaryTemplates(preferredId = "") {
   updateSummaryTemplateDeleteButton();
 }
 
+function createSummaryTemplateField(section) {
+  const usedKeys = new Set((summaryTemplateDraft.fields || []).map((field) => field.key));
+  let suffix = (section.line_index || 0) + 1;
+  let key = `field_${suffix}`;
+  while (usedKeys.has(key)) {
+    suffix += 1;
+    key = `field_${suffix}`;
+  }
+  return {
+    key,
+    label: section.heading,
+    heading: section.heading,
+    type: /事项|要点|问题|风险|结论|议题/.test(section.heading) ? "list" : "text",
+    description: `根据会议原文填写“${section.heading}”`,
+    columns: [],
+    required: false,
+    metadata_enrichment: false,
+  };
+}
+
+function sortSummaryTemplateFields() {
+  const order = new Map((summaryTemplateDraft.sections || []).map((section, index) => [section.heading, index]));
+  summaryTemplateDraft.fields.sort((left, right) =>
+    (order.get(left.heading) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.heading) ?? Number.MAX_SAFE_INTEGER));
+}
+
 function renderSummaryTemplateFields() {
   if (!elements.summaryTemplateFields || !summaryTemplateDraft) return;
   elements.summaryTemplateFields.innerHTML = "";
-  summaryTemplateDraft.fields.forEach((field, index) => {
+  const sections = (summaryTemplateDraft.sections || []).length
+    ? summaryTemplateDraft.sections
+    : (summaryTemplateDraft.fields || []).map((field, index) => ({
+      heading: field.heading,
+      level: 2,
+      line_index: index,
+      role: "field",
+    }));
+  const fieldsByHeading = new Map((summaryTemplateDraft.fields || []).map((field) => [field.heading, field]));
+
+  sections.forEach((section) => {
+    const field = fieldsByHeading.get(section.heading);
     const card = document.createElement("div");
-    card.className = "summary-template-field";
+    card.className = `summary-template-field${field ? "" : " is-container"}`;
+
+    const headingRow = document.createElement("div");
+    headingRow.className = "summary-template-section-heading";
     const heading = document.createElement("strong");
-    heading.textContent = field.heading;
-    card.appendChild(heading);
+    heading.textContent = section.heading;
+    const level = document.createElement("span");
+    level.className = "summary-template-level";
+    level.textContent = `${section.level || 2} 级${field ? "内容字段" : "结构标题"}`;
+    headingRow.append(heading, level);
+    card.appendChild(headingRow);
+
+    const generationOptions = document.createElement("div");
+    generationOptions.className = "summary-template-field-options";
+    const generationLabel = document.createElement("label");
+    const generatesContent = document.createElement("input");
+    generatesContent.type = "checkbox";
+    generatesContent.checked = Boolean(field);
+    generatesContent.addEventListener("change", () => {
+      const fieldIndex = summaryTemplateDraft.fields.findIndex((item) => item.heading === section.heading);
+      if (generatesContent.checked && fieldIndex < 0) {
+        summaryTemplateDraft.fields.push(createSummaryTemplateField(section));
+        section.role = "field";
+        sortSummaryTemplateFields();
+      } else if (!generatesContent.checked && fieldIndex >= 0) {
+        summaryTemplateDraft.fields.splice(fieldIndex, 1);
+        section.role = "container";
+      }
+      renderSummaryTemplateFields();
+    });
+    generationLabel.append(generatesContent, document.createTextNode("生成该标题内容"));
+    generationOptions.appendChild(generationLabel);
+    card.appendChild(generationOptions);
+
+    if (!field) {
+      const hint = document.createElement("p");
+      hint.className = "summary-template-container-hint";
+      hint.textContent = "仅作为分组标题保留，不发送给总结模型。";
+      card.appendChild(hint);
+      elements.summaryTemplateFields.appendChild(card);
+      return;
+    }
+
     const grid = document.createElement("div");
     grid.className = "summary-template-field-grid";
     const label = document.createElement("input");
@@ -476,7 +552,7 @@ function renderSummaryTemplateFields() {
     label.placeholder = "字段名称";
     label.addEventListener("input", () => { field.label = label.value; });
     const key = document.createElement("input");
-    key.value = field.key || `field_${index + 1}`;
+    key.value = field.key || createSummaryTemplateField(section).key;
     key.placeholder = "field_key";
     key.addEventListener("input", () => { field.key = key.value; });
     const type = document.createElement("select");
@@ -519,22 +595,6 @@ function renderSummaryTemplateFields() {
       field.metadata_enrichment = false;
     }
     card.appendChild(options);
-    const actions = document.createElement("div");
-    actions.className = "summary-template-field-actions";
-    [["上移", -1], ["下移", 1]].forEach(([name, offset]) => {
-      const button = document.createElement("button"); button.type = "button"; button.className = "ghost-button"; button.textContent = name;
-      button.disabled = index + offset < 0 || index + offset >= summaryTemplateDraft.fields.length;
-      button.addEventListener("click", () => {
-        const target = index + offset;
-        [summaryTemplateDraft.fields[index], summaryTemplateDraft.fields[target]] = [summaryTemplateDraft.fields[target], summaryTemplateDraft.fields[index]];
-        renderSummaryTemplateFields();
-      });
-      actions.appendChild(button);
-    });
-    const remove = document.createElement("button"); remove.type = "button"; remove.className = "ghost-button"; remove.textContent = "删除";
-    remove.addEventListener("click", () => { summaryTemplateDraft.fields.splice(index, 1); renderSummaryTemplateFields(); });
-    actions.appendChild(remove);
-    card.appendChild(actions);
     elements.summaryTemplateFields.appendChild(card);
   });
 }
@@ -1614,16 +1674,9 @@ if (elements.addSummaryTemplateField) {
       setToolStatus("模板中的所有标题都已配置字段。", "error");
       return;
     }
-    summaryTemplateDraft.fields.push({
-      key: `field_${summaryTemplateDraft.fields.length + 1}`,
-      label: section.heading,
-      heading: section.heading,
-      type: "text",
-      description: `根据会议原文填写“${section.heading}”`,
-      columns: [],
-      required: false,
-      metadata_enrichment: false,
-    });
+    summaryTemplateDraft.fields.push(createSummaryTemplateField(section));
+    section.role = "field";
+    sortSummaryTemplateFields();
     renderSummaryTemplateFields();
   });
 }
