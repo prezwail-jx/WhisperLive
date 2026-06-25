@@ -59,6 +59,50 @@ class TestMeetingLogStore(unittest.TestCase):
             self.assertTrue(os.path.isfile(info["json_path"]))
             self.assertTrue(os.path.isfile(info["md_path"]))
 
+    def test_session_log_docx_export_uses_markdown_converter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({"uid": "uid-1", "session_id": "session-docx", "meeting_name": "会议"})
+            store.append_segments("session-docx", "source", [
+                {"start": "0.000", "end": "1.000", "text": "你好", "completed": True},
+            ])
+            store.finish_session("session-docx")
+
+            def fake_docx(md_path, docx_path):
+                with open(docx_path, "wb") as file:
+                    file.write(b"docx")
+
+            with mock.patch("whisper_live.meeting.logs.MeetingDocConverter.md_file_to_docx", side_effect=fake_docx) as converter:
+                result = store.get_session_file("session-docx", "docx")
+
+            self.assertEqual(result[1], DOCX_MIME_TYPE)
+            self.assertTrue(result[0].endswith(".docx"))
+            self.assertTrue(os.path.isfile(result[0]))
+            converter.assert_called_once()
+
+    def test_interleaved_session_log_pairs_source_and_translation(self):
+        payload = {
+            "meeting_name": "会议",
+            "session_id": "session-interleaved",
+            "source_segments": [
+                {"start": "0.000", "end": "2.000", "text": "你好", "utterance_id": "u1"},
+                {"start": "2.000", "end": "4.000", "text": "再见", "utterance_id": "u2"},
+            ],
+            "translation_segments": [
+                {"start": "0.000", "end": "2.000", "text": "Hello", "source_utterance_ids": ["u1"]},
+                {"start": "2.000", "end": "4.000", "text": "Goodbye", "source_utterance_ids": ["u2"]},
+            ],
+        }
+
+        markdown = MeetingLogStore.render_markdown(payload, layout="interleaved")
+
+        self.assertIn("## 中英对照记录", markdown)
+        self.assertIn("原文：你好", markdown)
+        self.assertIn("译文：Hello", markdown)
+        self.assertIn("原文：再见", markdown)
+        self.assertIn("译文：Goodbye", markdown)
+        self.assertNotIn("## 原文记录", markdown)
+
     def test_write_summary_writes_json_and_markdown(self):
         with tempfile.TemporaryDirectory() as directory:
             store = MeetingLogStore(directory)

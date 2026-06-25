@@ -13,6 +13,8 @@ const elements = {
   continueMeeting: document.getElementById("continueButton"),
   finishInterrupted: document.getElementById("finishInterruptedButton"),
   exportLog: document.getElementById("exportLogButton"),
+  exportLogDocx: document.getElementById("exportLogDocxButton"),
+  exportInterleavedLogDocx: document.getElementById("exportInterleavedLogDocxButton"),
   generateSummary: document.getElementById("generateSummaryButton"),
   downloadSummary: document.getElementById("downloadSummaryButton"),
   downloadSummaryDocx: document.getElementById("downloadSummaryDocxButton"),
@@ -387,8 +389,10 @@ function meetingLogApiUrl() {
   return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/meeting-logs`;
 }
 
-function meetingLogDownloadUrl(sessionId, format = "md") {
-  return `${meetingLogApiUrl()}/${encodeURIComponent(sessionId)}?format=${encodeURIComponent(format)}`;
+function meetingLogDownloadUrl(sessionId, format = "md", layout = "sections") {
+  const params = new URLSearchParams({ format });
+  if (layout && layout !== "sections") params.set("layout", layout);
+  return `${meetingLogApiUrl()}/${encodeURIComponent(sessionId)}?${params.toString()}`;
 }
 
 function meetingLogFinishUrl(sessionId) {
@@ -809,16 +813,24 @@ function filenameFromContentDisposition(value, fallback) {
   try { return decodeURIComponent(encoded); } catch (_error) { return encoded; }
 }
 
-async function exportMeetingLog() {
+async function exportMeetingLog(format = "md", layout = "sections") {
   if (!currentSessionId) throw new Error("当前没有可导出的后端日志 session");
-  const response = await fetch(meetingLogDownloadUrl(currentSessionId, "md"), { cache: "no-store" });
+  const normalizedFormat = format === "docx" ? "docx" : "md";
+  const normalizedLayout = layout === "interleaved" ? "interleaved" : "sections";
+  const response = await fetch(meetingLogDownloadUrl(currentSessionId, normalizedFormat, normalizedLayout), { cache: "no-store" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const blob = await response.blob();
   const filenamePrefix = safeExportFilenamePrefix((currentConfig && (currentConfig.meeting_name || currentConfig.client_name)) || elements.meetingName.value.trim());
-  const fallback = `${filenamePrefix || "meeting-log"}-${currentSessionStartedAt || new Date().toISOString()}.md`.replace(/[:.]/g, "-");
+  const suffix = normalizedLayout === "interleaved" ? `-interleaved.${normalizedFormat}` : `.${normalizedFormat}`;
+  const fallback = `${filenamePrefix || "meeting-log"}-${currentSessionStartedAt || new Date().toISOString()}${suffix}`.replace(/[:.]/g, "-").replace(/-(md|docx)$/i, ".$1");
   downloadBlob(filenameFromContentDisposition(response.headers.get("Content-Disposition"), fallback), blob);
-  setStatus("后端日志已下载", "ready");
-  setToolStatus("当前会议日志已下载。", "success");
+  if (normalizedLayout === "interleaved") {
+    setStatus("中英日志 DOCX 已下载", "ready");
+    setToolStatus("中英穿插会议日志 DOCX 已下载。", "success");
+  } else {
+    setStatus(normalizedFormat === "docx" ? "日志 DOCX 已下载" : "后端日志已下载", "ready");
+    setToolStatus(normalizedFormat === "docx" ? "当前会议日志 DOCX 已下载。" : "当前会议日志已下载。", "success");
+  }
 }
 
 function summaryErrorDetailText(error) {
@@ -1655,13 +1667,27 @@ if (elements.finishInterrupted) {
   });
 }
 
-elements.exportLog.addEventListener("click", () => {
-  exportMeetingLog().catch((error) => {
+function handleMeetingLogExport(format = "md", layout = "sections") {
+  exportMeetingLog(format, layout).catch((error) => {
     console.error(error);
     setStatus("日志导出失败", "error");
     setToolStatus(`日志导出失败：${error.message}`, "error");
   });
+}
+
+elements.exportLog.addEventListener("click", () => {
+  handleMeetingLogExport("md", "sections");
 });
+if (elements.exportLogDocx) {
+  elements.exportLogDocx.addEventListener("click", () => {
+    handleMeetingLogExport("docx", "sections");
+  });
+}
+if (elements.exportInterleavedLogDocx) {
+  elements.exportInterleavedLogDocx.addEventListener("click", () => {
+    handleMeetingLogExport("docx", "interleaved");
+  });
+}
 if (elements.analyzeSummaryTemplate) {
   elements.analyzeSummaryTemplate.addEventListener("click", () => {
     setToolStatus("正在分析 Markdown 模板…");

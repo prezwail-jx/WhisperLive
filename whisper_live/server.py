@@ -1075,8 +1075,11 @@ class TranscriptionServer:
             return self.meeting_logs.list_sessions()
 
         @app.get("/admin/meeting-logs/{session_id}")
-        async def download_admin_meeting_log(session_id: str, format: str = "md"):
-            result = self.meeting_logs.get_session_file(session_id, "json" if format.lower() == "json" else "md")
+        async def download_admin_meeting_log(session_id: str, format: str = "md", layout: str = "sections"):
+            file_format = str(format or "md").lower()
+            if file_format not in {"md", "json", "docx"}:
+                return JSONResponse(status_code=404, content={"error": "unsupported meeting log format"})
+            result = self.meeting_logs.get_session_file(session_id, file_format, layout=layout)
             if not result or not os.path.isfile(result[0]):
                 return JSONResponse(status_code=404, content={"error": "meeting log not found"})
             return FileResponse(result[0], media_type=result[1], filename=result[2])

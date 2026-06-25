@@ -361,14 +361,29 @@ class MeetingLogStore:
         sessions.sort(key=lambda item: item.get("created_at") or "", reverse=True)
         return {"sessions": sessions}
 
-    def get_session_file(self, session_id, file_format="md"):
+    def get_session_file(self, session_id, file_format="md", layout="sections"):
+        file_format = str(file_format or "md").lower()
+        layout = str(layout or "sections").lower()
         with self.lock:
             record = self.sessions.get(session_id)
             if not record:
                 return None
             if file_format == "json":
                 return record["json_path"], "application/json", record["json_filename"]
-            return record["md_path"], "text/markdown; charset=utf-8", record["md_filename"]
+            if file_format not in {"md", "docx"}:
+                return None
+            md_path = record["md_path"]
+            md_filename = record["md_filename"]
+            if layout == "interleaved":
+                stem, _ext = os.path.splitext(record["md_path"])
+                md_path = f"{stem}-interleaved.md"
+                md_filename = os.path.basename(md_path)
+                self._atomic_write(md_path, self.render_markdown(record["payload"], layout="interleaved"))
+            if file_format == "docx":
+                docx_path = os.path.splitext(md_path)[0] + ".docx"
+                MeetingDocConverter.md_file_to_docx(md_path, docx_path)
+                return docx_path, DOCX_MIME_TYPE, os.path.basename(docx_path)
+            return md_path, "text/markdown; charset=utf-8", md_filename
 
     def write_summary(self, session_id, summary):
         with self.lock:
@@ -454,7 +469,7 @@ class MeetingLogStore:
             file.write(self.render_markdown(payload))
 
     @staticmethod
-    def render_markdown(payload):
+    def render_markdown(payload, layout="sections"):
         lines = [f"# {payload.get('meeting_name') or payload.get('client_name') or 'Meeting Log'}", "", "## 会议信息",
                  f"- Session ID: {payload.get('session_id') or ''}", f"- Client: {payload.get('client_name') or ''}",
                  f"- Started: {payload.get('created_at') or ''}", f"- Updated: {payload.get('updated_at') or ''}",
@@ -469,6 +484,10 @@ class MeetingLogStore:
                 lines.append(f"- [{gap.get('start_at', '')} - {gap.get('end_at', '')}] {gap.get('reason') or 'websocket_disconnected'}，该时间段音频未记录")
         else:
             lines.append("- 无")
+        if str(layout or "sections").lower() == "interleaved":
+            lines.extend(MeetingLogStore._render_interleaved_segments(payload, {}))
+            lines.extend(["", "## AI 总结", "", "_待生成_", ""])
+            return "\n".join(lines)
         lines.extend(["", "## 原文记录"])
         for segment in payload.get("source_segments", []):
             lines.append(f"- [{segment.get('start', '')} - {segment.get('end', '')}] {segment.get('text', '')}")
@@ -477,6 +496,95 @@ class MeetingLogStore:
             lines.append(f"- [{segment.get('start', '')} - {segment.get('end', '')}] {segment.get('text', '')}")
         lines.extend(["", "## AI 总结", "", "_待生成_", ""])
         return "\n".join(lines)
+
+    @staticmethod
+    def _segment_time(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _translation_source_ids(segment):
+        ids = segment.get("source_utterance_ids")
+        if isinstance(ids, str):
+            ids = [ids]
+        elif not isinstance(ids, list):
+            ids = []
+        if segment.get("utterance_id"):
+            ids.append(segment.get("utterance_id"))
+        return {str(item).strip() for item in ids if str(item or "").strip()}
+
+    @staticmethod
+    def _time_overlap(left, right):
+        left_start = MeetingLogStore._segment_time(left.get("start"))
+        left_end = MeetingLogStore._segment_time(left.get("end"))
+        right_start = MeetingLogStore._segment_time(right.get("start"))
+        right_end = MeetingLogStore._segment_time(right.get("end"))
+        if None in (left_start, left_end, right_start, right_end):
+            return 0.0
+        return max(0.0, min(left_end, right_end) - max(left_start, right_start))
+
+    @staticmethod
+    def _find_translation_for_source(source, translations, used_indexes):
+        source_id = str(source.get("utterance_id") or "").strip()
+        if source_id:
+            for index, translation in enumerate(translations):
+                if index in used_indexes:
+                    continue
+                if source_id in MeetingLogStore._translation_source_ids(translation):
+                    return index
+        best_index = None
+        best_score = 0.0
+        source_start = MeetingLogStore._segment_time(source.get("start"))
+        for index, translation in enumerate(translations):
+            if index in used_indexes:
+                continue
+            overlap = MeetingLogStore._time_overlap(source, translation)
+            if overlap > best_score:
+                best_index = index
+                best_score = overlap
+                continue
+            if best_score > 0 or source_start is None:
+                continue
+            translation_start = MeetingLogStore._segment_time(translation.get("start"))
+            if translation_start is None:
+                continue
+            distance = abs(source_start - translation_start)
+            score = max(0.0, 3.0 - distance)
+            if score > best_score:
+                best_index = index
+                best_score = score
+        return best_index if best_score > 0 else None
+
+    @staticmethod
+    def _render_interleaved_segments(payload, speaker_names):
+        lines = ["", "## 中英对照记录"]
+        sources = list(payload.get("source_segments") or [])
+        translations = list(payload.get("translation_segments") or [])
+        used_translation_indexes = set()
+        if not sources:
+            lines.append("- 无原文记录")
+            return lines
+        for source in sources:
+            speaker = speaker_names.get(source.get("speaker_id")) or source.get("speaker")
+            prefix = f"{speaker}：" if speaker else ""
+            lines.append(f"- [{source.get('start', '')} - {source.get('end', '')}] 原文：{prefix}{source.get('text', '')}")
+            translation_index = MeetingLogStore._find_translation_for_source(source, translations, used_translation_indexes)
+            if translation_index is None:
+                continue
+            used_translation_indexes.add(translation_index)
+            translation = translations[translation_index]
+            lines.append(f"  - 译文：{translation.get('text', '')}")
+        remaining = [
+            translation for index, translation in enumerate(translations)
+            if index not in used_translation_indexes
+        ]
+        if remaining:
+            lines.extend(["", "## 未匹配翻译记录"])
+            for translation in remaining:
+                lines.append(f"- [{translation.get('start', '')} - {translation.get('end', '')}] {translation.get('text', '')}")
+        return lines
 
     @staticmethod
     def _custom_value_to_text(value):
