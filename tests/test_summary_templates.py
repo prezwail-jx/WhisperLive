@@ -341,7 +341,10 @@ class TestSummaryTemplateStore(unittest.TestCase):
                         "evidence_quote": "Artificial Intelligence has reinvented computing",
                     }
                 ],
-                "points": [{"point": "AI扩展人类潜力"}],
+                "points": [
+                    {"point": "AI扩展人类潜力"},
+                    "• {'topic': 'NVIDIA的自我革新与AI发展', 'evidence_timestamp': '[57.861 - 65.141]', 'evidence_quote': 'For 33 years, NVIDIA had reinvented itself over and over again'}",
+                ],
             },
         }
 
@@ -349,6 +352,7 @@ class TestSummaryTemplateStore(unittest.TestCase):
 
         self.assertIn("- AI对计算范式的颠覆", markdown)
         self.assertIn("- AI扩展人类潜力", markdown)
+        self.assertIn("- NVIDIA的自我革新与AI发展", markdown)
         self.assertNotIn("topic：", markdown)
         self.assertNotIn("point：", markdown)
         self.assertNotIn("evidence_timestamp", markdown)

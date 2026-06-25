@@ -1,3 +1,4 @@
+import ast
 import json
 import logging
 import os
@@ -587,6 +588,26 @@ class MeetingLogStore:
         return lines
 
     @staticmethod
+    def _custom_literal_text(value):
+        items = []
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            match = re.match(r"^[-*•·]\s*(.+)$", line)
+            literal = match.group(1).strip() if match else line
+            if literal[:1] not in ("{", "["):
+                return ""
+            try:
+                parsed = ast.literal_eval(literal)
+            except (SyntaxError, ValueError):
+                return ""
+            text = MeetingLogStore._custom_value_to_text(parsed)
+            if text and text not in items:
+                items.append(text)
+        return "\n".join(items)
+
+    @staticmethod
     def _custom_value_to_text(value):
         if value in (None, ""):
             return ""
@@ -594,6 +615,9 @@ class MeetingLogStore:
             text = value.strip()
             if not text:
                 return ""
+            literal_text = MeetingLogStore._custom_literal_text(text)
+            if literal_text:
+                return literal_text
             if text[:1] in ("{", "["):
                 try:
                     parsed = json.loads(text)

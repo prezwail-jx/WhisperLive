@@ -1,3 +1,4 @@
+import ast
 import json
 import logging
 import os
@@ -1297,6 +1298,26 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
         return titles
 
     @classmethod
+    def _custom_literal_text(cls, value):
+        items = []
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            match = re.match(r"^[-*•·]\s*(.+)$", line)
+            literal = match.group(1).strip() if match else line
+            if literal[:1] not in ("{", "["):
+                return ""
+            try:
+                parsed = ast.literal_eval(literal)
+            except (SyntaxError, ValueError):
+                return ""
+            text = cls._custom_value_to_text(parsed)
+            if text and text not in items:
+                items.append(text)
+        return "\n".join(items)
+
+    @classmethod
     def _custom_value_to_text(cls, value):
         if value in (None, ""):
             return ""
@@ -1304,6 +1325,9 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
             text = value.strip()
             if not text:
                 return ""
+            literal_text = cls._custom_literal_text(text)
+            if literal_text:
+                return literal_text
             if text[:1] in ("{", "["):
                 try:
                     parsed = json.loads(text)
