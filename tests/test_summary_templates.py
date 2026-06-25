@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-from whisper_live.meeting import MeetingLogStore, SummaryTemplateStore
+from whisper_live.meeting import MeetingLogStore, MeetingSummaryService, SummaryTemplateStore
 
 
 class TestSummaryTemplateStore(unittest.TestCase):
@@ -322,6 +322,64 @@ class TestSummaryTemplateStore(unittest.TestCase):
         self.assertIn("| 完成材料 | 本周 提交 |", markdown.replace("\n", " "))
         self.assertNotIn("{'", markdown)
         self.assertNotIn('"content"', markdown)
+
+    def test_custom_markdown_renders_topic_and_point_structures(self):
+        summary = {
+            "summary_template": "custom",
+            "session_id": "session-topic",
+            "meeting_name": "AI 演讲",
+            "custom_template_markdown": "# {{meeting_name}}\n\n## 议题\n{{topics}}\n\n## 观点\n{{points}}\n",
+            "custom_template_fields": [
+                {"key": "topics", "heading": "议题", "type": "list"},
+                {"key": "points", "heading": "观点", "type": "list"},
+            ],
+            "template_data": {
+                "topics": [
+                    {
+                        "topic": "AI对计算范式的颠覆",
+                        "evidence_timestamp": "[242.699 - 246.299]",
+                        "evidence_quote": "Artificial Intelligence has reinvented computing",
+                    }
+                ],
+                "points": [{"point": "AI扩展人类潜力"}],
+            },
+        }
+
+        markdown = MeetingLogStore.render_summary_markdown(summary)
+
+        self.assertIn("- AI对计算范式的颠覆", markdown)
+        self.assertIn("- AI扩展人类潜力", markdown)
+        self.assertNotIn("topic：", markdown)
+        self.assertNotIn("point：", markdown)
+        self.assertNotIn("evidence_timestamp", markdown)
+
+    def test_custom_evidence_list_accepts_topic_and_timestamp(self):
+        service = MeetingSummaryService()
+        payload = {
+            "source_segments": [
+                {
+                    "start": 242.699,
+                    "end": 246.299,
+                    "text": "Artificial Intelligence has reinvented computing from human coding to machine learning",
+                }
+            ]
+        }
+        items, rejected = service._evidence_items(
+            [
+                {
+                    "topic": "AI对计算范式的颠覆",
+                    "evidence_timestamp": "[242.699 - 246.299]",
+                    "evidence_quote": "Artificial Intelligence has reinvented computing",
+                }
+            ],
+            payload,
+            limit=8,
+        )
+
+        self.assertEqual(rejected, 0)
+        self.assertEqual(items[0]["text"], "AI对计算范式的颠覆")
+        self.assertEqual(items[0]["evidence_start"], 242.699)
+        self.assertEqual(items[0]["evidence_end"], 246.299)
 
     def test_custom_markdown_keeps_empty_headings_without_sample_content(self):
         summary = {

@@ -504,17 +504,17 @@ class MeetingLogStore:
                     items.append(text)
             return "\n".join(items)
         if isinstance(value, dict):
-            for title_key in ("title", "name"):
+            for title_key in ("title", "topic", "name"):
                 title = MeetingLogStore._custom_value_to_text(value.get(title_key)) if title_key in value else ""
                 if title:
                     details = []
-                    for detail_key in ("content", "summary", "text", "value", "内容"):
+                    for detail_key in ("point", "content", "summary", "text", "value", "内容"):
                         if detail_key in value:
                             detail = MeetingLogStore._custom_value_to_text(value.get(detail_key))
                             if detail and detail != title:
                                 details.append(detail)
                     return f"{title}：{'；'.join(details)}" if details else title
-            for key in ("text", "content", "summary", "value", "内容"):
+            for key in ("point", "text", "content", "summary", "value", "内容"):
                 if key in value:
                     text = MeetingLogStore._custom_value_to_text(value.get(key))
                     if text:

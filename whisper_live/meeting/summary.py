@@ -423,12 +423,26 @@ class MeetingSummaryService:
             return None
 
     @staticmethod
+    def _parse_evidence_timestamp(value):
+        match = re.search(
+            r"\[\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*\]",
+            str(value or ""),
+        )
+        if not match:
+            return None, None
+        return float(match.group(1)), float(match.group(2))
+
+    @staticmethod
     def _normalize_evidence_text(value):
         return re.sub(r"[\s，。！？!?；;：:、,.\"'（）()【】\[\]\-—]+", "", str(value or "")).lower()
 
     def _validate_evidence(self, item, payload):
         start = self._float(item.get("evidence_start"))
         end = self._float(item.get("evidence_end"))
+        if start is None or end is None:
+            timestamp_start, timestamp_end = self._parse_evidence_timestamp(item.get("evidence_timestamp"))
+            start = start if start is not None else timestamp_start
+            end = end if end is not None else timestamp_end
         quote = str(item.get("evidence_quote") or "").strip()
         if start is None or end is None or end < start or not quote:
             return None
@@ -461,7 +475,7 @@ class MeetingSummaryService:
                 filtered += 1
                 continue
             body = ""
-            for body_key in (text_key, "text", "content", "summary", "title", "name", "value", "内容"):
+            for body_key in (text_key, "point", "text", "content", "summary", "topic", "title", "name", "value", "内容"):
                 if body_key in item:
                     body = self._custom_value_to_text(item.get(body_key))
                     if body:
@@ -1308,17 +1322,17 @@ description 只能描述抽象提取范围，不得复述模板示例中的专�
                     items.append(text)
             return "\n".join(items)
         if isinstance(value, dict):
-            for title_key in ("title", "name"):
+            for title_key in ("title", "topic", "name"):
                 title = cls._custom_value_to_text(value.get(title_key)) if title_key in value else ""
                 if title:
                     detail_parts = []
-                    for detail_key in ("content", "summary", "text", "value", "内容"):
+                    for detail_key in ("point", "content", "summary", "text", "value", "内容"):
                         if detail_key in value:
                             detail = cls._custom_value_to_text(value.get(detail_key))
                             if detail and detail != title:
                                 detail_parts.append(detail)
                     return f"{title}：{'；'.join(detail_parts)}" if detail_parts else title
-            for key in ("text", "content", "summary", "value", "内容"):
+            for key in ("point", "text", "content", "summary", "value", "内容"):
                 if key in value:
                     text = cls._custom_value_to_text(value.get(key))
                     if text:
