@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>WhisperLive 中英同传</title>
-    <link rel="stylesheet" href="./style.css?v=summary-prose-1">
+    <link rel="stylesheet" href="./style.css?v=speaker-layout-1">
   </head>
   <body>
     <main class="app-shell">
@@ -69,21 +69,26 @@
 
         <form id="settingsForm" class="settings-card-stack">
           <details class="settings-card" open>
-            <summary class="card-title"><span>基础连接</span><small>地址、语言、翻译方向</small></summary>
+            <summary class="card-title"><span>基础连接</span><small>地址、语言、翻译</small></summary>
             <div class="card-body field-stack">
+              <label>会议名称<input id="meetingNameInput" type="text" maxlength="80" placeholder="如 2026产品会" autocomplete="off"></label>
               <label>WebSocket 地址<input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off"></label>
-              <label>源语言<select id="languageInput"><option value="" selected>自动识别</option><option value="zh">中文</option><option value="en">English</option></select></label>
-              <label class="toggle-field"><span><strong>启用翻译</strong><small>关闭后仅显示和记录识别原文。</small></span><input id="translationEnabledInput" type="checkbox" checked><span class="toggle" aria-hidden="true"></span></label>
-              <label id="translationDirectionField">翻译方向<select id="translationDirectionInput"><option value="auto" selected>自动中英互译</option><option value="en">中文 → English</option><option value="zh">English → 中文</option></select></label>
+              <label>源语言<select id="languageInput"><option value="zh">中文</option><option value="en">English</option></select></label>
+              <div class="compact-toggle-row">
+                <label class="toggle-field compact-toggle"><span><strong>启用翻译</strong><small>仅显示 / 记录原文</small></span><input id="translationEnabledInput" type="checkbox" checked><span class="toggle" aria-hidden="true"></span></label>
+                <label class="toggle-field compact-toggle"><span><strong>说话人识别</strong><small>写入日志与总结</small></span><input id="diarizationEnabledInput" type="checkbox"><span class="toggle" aria-hidden="true"></span></label>
+              </div>
             </div>
           </details>
 
           <details class="settings-card" open>
-            <summary class="card-title"><span>会议热词</span><small>会议名与热词快照</small></summary>
+            <summary class="card-title"><span>会议热词</span><small>本页上传，当次会议有效</small></summary>
             <div class="card-body field-stack">
-              <label>会议名称<input id="meetingNameInput" type="text" maxlength="80" placeholder="如 2026产品会" autocomplete="off"></label>
-              <label>会议热词文件<select id="meetingSelectInput"><option value="">手动填写会议名称</option></select></label>
-              <button id="refreshMeetingsButton" class="secondary-button" type="button">刷新热词列表</button>
+              <div class="hotword-upload-inline">
+                <div class="inline-tool-heading"><strong>上传热词文件</strong><span>支持 TXT / Markdown / DOCX；一行一个热词，支持 source=>target</span></div>
+                <label>热词文件<input id="hotwordFileInput" type="file" accept=".txt,.md,.docx,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
+                <button id="clearHotwordFileButton" class="ghost-button" type="button">清空热词</button>
+              </div>
             </div>
           </details>
 
@@ -119,39 +124,90 @@
         <button id="closeSummaryButton" class="icon-button" type="button" aria-label="关闭总结">×</button>
       </header>
       <div class="drawer-content clean-content">
-        <section id="summaryPanel" class="settings-card summary-card">
-          <div class="card-title static-title"><span>AI 总结与日志</span><small>生成纪要、导出文件</small></div>
-          <div class="card-body summary-tool-stack">
-            <div class="tool-group">
-              <h4>会议日志</h4>
-              <div class="button-row"><button id="exportLogButton" class="secondary-button" type="button">导出 Markdown</button><button id="exportLogDocxButton" class="secondary-button" type="button">导出 DOCX</button><button id="exportInterleavedLogDocxButton" class="secondary-button" type="button">导出中英 DOCX</button><button id="clearLogButton" class="ghost-button" type="button">清空会话状态</button></div>
+        <section id="summaryPanel" class="summary-board" aria-label="会议日志与 AI 总结">
+          <div class="summary-section meeting-picker-section">
+            <div class="summary-section-heading">
+              <div><span class="summary-section-kicker">MEETING</span><h3>会议选择</h3></div>
+              <small>选择后用于日志、校对和总结</small>
             </div>
-
-            <div class="tool-group field-stack summary-fields">
-              <h4>AI 总结</h4>
-              <label>总结会议<select id="summarySessionInput"><option value="">暂无已结束会议</option></select></label>
-              <label>总结模板<select id="summaryTemplateInput"><option value="auto" selected>自动判断</option><option value="project_meeting">项目会议</option><option value="customer_interview">客户访谈</option><option value="training_speech">培训 / 演讲</option><option value="discussion">讨论会</option></select></label>
-              <button id="deleteSummaryTemplateButton" class="ghost-button" type="button" disabled>删除自定义模板</button>
-              <button id="generateSummaryButton" class="primary-button" type="button" disabled>生成总结</button>
-              <label>下载版本<select id="summaryVersionInput" disabled><option value="">最新版</option></select></label>
-              <div class="button-row"><button id="refreshSummarySessionsButton" class="secondary-button" type="button">刷新会议</button><button id="downloadSummaryButton" class="secondary-button" type="button" disabled>下载总结</button><button id="downloadSummaryDocxButton" class="secondary-button" type="button" disabled>下载 DOCX</button></div>
+            <div class="tool-group meeting-picker-group">
+              <label>会议日志<select id="summarySessionInput"><option value="">暂无已结束会议</option></select></label>
+              <button id="refreshSummarySessionsButton" class="secondary-button" type="button">刷新会议</button>
             </div>
-
-            <details class="tool-group template-manager">
-              <summary>管理自定义模板</summary>
-              <div class="summary-template-upload">
-                <label>上传模板<input id="summaryTemplateFileInput" type="file" accept=".md,.docx,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
-                <div class="button-row"><button id="analyzeSummaryTemplateButton" class="secondary-button" type="button">分析模板</button></div>
-                <div id="summaryTemplateEditor" class="summary-template-editor" hidden>
-                  <label>模板名称<input id="summaryTemplateNameInput" type="text" maxlength="100" placeholder="例如：周例会纪要"></label>
-                  <div id="summaryTemplateFields" class="summary-template-fields"></div>
-                  <div class="template-editor-actions"><button id="addSummaryTemplateFieldButton" class="ghost-button" type="button">添加字段</button><button id="saveSummaryTemplateButton" class="primary-button" type="button">保存模板</button></div>
-                </div>
-              </div>
-            </details>
-
-            <p id="toolStatus" class="tool-status">每次生成都会保留新版本。</p>
           </div>
+
+          <div class="summary-section log-section">
+            <div class="summary-section-heading">
+              <div><span class="summary-section-kicker">LOGS</span><h3>会议日志</h3></div>
+              <small>导出原始记录与双语对照</small>
+            </div>
+            <div class="tool-group log-export-group">
+              <h4>日志导出</h4>
+              <div class="button-row"><button id="exportLogButton" class="secondary-button" type="button">Markdown 原文</button><button id="exportLogDocxButton" class="secondary-button" type="button">DOCX 原文</button><button id="exportInterleavedLogDocxButton" class="secondary-button" type="button">DOCX 中英对照</button><button id="clearLogButton" class="ghost-button" type="button">清空会话状态</button></div>
+            </div>
+          </div>
+
+          <div class="summary-section transcript-section">
+            <div class="summary-section-heading">
+              <div><span class="summary-section-kicker">REVIEW</span><h3>转写校对</h3></div>
+              <small>修正原文和说话人后再生成纪要</small>
+            </div>
+            <div class="tool-group transcript-editor-panel">
+              <div class="transcript-panel-heading">
+                <div><h4>校对内容</h4><span>加载会议原文、修正说话人和识别文本</span></div>
+                <button id="loadTranscriptEditorButton" class="secondary-button" type="button">加载校对内容</button>
+              </div>
+              <div class="transcript-editor-body">
+                <p id="transcriptEditorStatus" class="transcript-editor-status">请先在上方选择会议日志。</p>
+                <div id="speakerStats" class="speaker-stats"></div>
+                <div id="speakerRenameGuide" class="speaker-rename-guide"></div>
+                <details class="speaker-advanced-tools">
+                  <summary>高级管理</summary>
+                  <div class="speaker-create-row">
+                    <input id="newSpeakerNameInput" type="text" maxlength="80" placeholder="新增说话人姓名">
+                    <button id="addSpeakerButton" class="ghost-button" type="button">新增</button>
+                  </div>
+                  <div id="speakerManagerList" class="speaker-manager-list"></div>
+                </details>
+                <details class="transcript-segment-details">
+                  <summary>查看和编辑原文片段</summary>
+                  <div id="transcriptEditorRows" class="transcript-editor-rows"></div>
+                </details>
+              </div>
+            </div>
+          </div>
+
+          <div class="summary-section ai-summary-section">
+            <div class="summary-section-heading">
+              <div><span class="summary-section-kicker">SUMMARY</span><h3>AI 总结</h3></div>
+              <small>生成、下载、校对与模板</small>
+            </div>
+            <div class="summary-tool-stack">
+              <div class="tool-group field-stack summary-fields">
+                <h4>总结生成</h4>
+                <label>纪要模板<select id="summaryTemplateInput"><option value="auto" selected>自动判断</option><option value="project_meeting">项目会议</option><option value="customer_interview">客户访谈</option><option value="training_speech">培训 / 演讲</option><option value="discussion">讨论会</option></select></label>
+
+                <div class="summary-template-inline">
+                  <div class="inline-tool-heading"><strong>自定义纪要模板</strong><span>可上传 Markdown / DOCX 模板后选择使用</span></div>
+                  <div class="summary-template-upload">
+                    <label>上传模板<input id="summaryTemplateFileInput" type="file" accept=".md,.docx,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
+                    <div class="button-row"><button id="analyzeSummaryTemplateButton" class="secondary-button" type="button">分析模板</button></div>
+                    <div id="summaryTemplateEditor" class="summary-template-editor" hidden>
+                      <label>模板名称<input id="summaryTemplateNameInput" type="text" maxlength="100" placeholder="例如：周例会纪要"></label>
+                      <div id="summaryTemplateFields" class="summary-template-fields"></div>
+                      <div class="template-editor-actions"><button id="addSummaryTemplateFieldButton" class="ghost-button" type="button">添加字段</button><button id="saveSummaryTemplateButton" class="primary-button" type="button">保存模板</button></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="button-row summary-main-actions"><button id="generateSummaryButton" class="primary-button" type="button" disabled>生成总结</button><button id="deleteSummaryTemplateButton" class="ghost-button" type="button" disabled>删除自定义模板</button></div>
+                <label>下载版本<select id="summaryVersionInput" disabled><option value="">最新版</option></select></label>
+                <div class="button-row"><button id="downloadSummaryButton" class="secondary-button" type="button" disabled>下载 Markdown</button><button id="downloadSummaryDocxButton" class="secondary-button" type="button" disabled>下载 DOCX</button></div>
+              </div>
+
+            </div>
+          </div>
+
+          <p id="toolStatus" class="tool-status">每次生成都会保留新版本。</p>
         </section>
       </div>
     </aside>
@@ -159,6 +215,6 @@
     <script src="./reconnect-controller.js?v=reconnect-1"></script>
     <script src="./ws-client.js?v=reconnect-1"></script>
     <script src="./audio-capture.js?v=reconnect-1"></script>
-    <script src="./app.js?v=log-docx-1"></script>
+    <script src="./app.js?v=speaker-layout-1"></script>
   </body>
 </html>

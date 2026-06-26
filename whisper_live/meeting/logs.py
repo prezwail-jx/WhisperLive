@@ -16,6 +16,14 @@ from .sessions import (
     can_resume_payload,
     seconds_between,
 )
+from .transcript import (
+    create_speaker,
+    merge_speakers,
+    normalize_transcript,
+    rename_speaker,
+    transcript_view,
+    update_segment,
+)
 
 
 class MeetingLogStore:
@@ -45,6 +53,7 @@ class MeetingLogStore:
                     continue
                 if not isinstance(payload.get("source_segments"), list):
                     continue
+                normalize_transcript(payload)
                 session_id = str(payload["session_id"])
                 current = self.sessions.get(session_id)
                 if current and str(current["payload"].get("updated_at") or "") >= str(payload.get("updated_at") or ""):
@@ -128,6 +137,12 @@ class MeetingLogStore:
             "audio_gaps": [],
             "source_segments": [],
             "translation_segments": [],
+            "speakers": [],
+            "transcript_revision": 0,
+            "transcript_edits": [],
+            "transcript_updated_at": None,
+            "translation_stale": False,
+            "summary_stale": False,
         }
 
     def save(self, payload):
@@ -229,6 +244,7 @@ class MeetingLogStore:
                     continue
                 record[key_name].add(key); record["payload"][target].append(normalized); changed = True
             if changed:
+                normalize_transcript(record["payload"])
                 record["payload"]["updated_at"] = self.now_iso()
                 self._sort_segments(record["payload"][target])
                 self._write_record(record)
@@ -255,6 +271,76 @@ class MeetingLogStore:
         with self.lock:
             record = self.sessions.get(session_id)
             return self._clone_payload(record["payload"]) if record else None
+
+    def get_transcript(self, session_id):
+        with self.lock:
+            record = self.sessions.get(session_id)
+            return self._clone_payload(transcript_view(record["payload"])) if record else None
+
+    @staticmethod
+    def _require_finished(record):
+        if record["payload"].get("status") != SESSION_FINISHED:
+            raise RuntimeError("请结束会议后再校对转写")
+
+    def _save_transcript_change(self, record):
+        payload = record["payload"]
+        payload["updated_at"] = self.now_iso()
+        record["source_keys"] = {
+            self.segment_key(item)
+            for item in payload.get("source_segments") or []
+            if isinstance(item, dict)
+        }
+        self._write_record(record)
+        return self._clone_payload(transcript_view(payload))
+
+    def update_transcript_segment(self, session_id, segment_id, text, speaker_id, expected_revision):
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                raise KeyError("meeting log session not found")
+            self._require_finished(record)
+            changed = update_segment(
+                record["payload"], segment_id, text, speaker_id,
+                expected_revision, self.now_iso(),
+            )
+            if changed:
+                return self._save_transcript_change(record)
+            return self._clone_payload(transcript_view(record["payload"]))
+
+    def add_transcript_speaker(self, session_id, name, expected_revision):
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                raise KeyError("meeting log session not found")
+            self._require_finished(record)
+            create_speaker(record["payload"], name, expected_revision, self.now_iso())
+            return self._save_transcript_change(record)
+
+    def rename_transcript_speaker(self, session_id, speaker_id, name, expected_revision):
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                raise KeyError("meeting log session not found")
+            self._require_finished(record)
+            changed = rename_speaker(
+                record["payload"], speaker_id, name,
+                expected_revision, self.now_iso(),
+            )
+            if changed:
+                return self._save_transcript_change(record)
+            return self._clone_payload(transcript_view(record["payload"]))
+
+    def merge_transcript_speakers(self, session_id, source_id, target_id, expected_revision):
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                raise KeyError("meeting log session not found")
+            self._require_finished(record)
+            merge_speakers(
+                record["payload"], source_id, target_id,
+                expected_revision, self.now_iso(),
+            )
+            return self._save_transcript_change(record)
 
     @staticmethod
     def summary_paths_for_record(record):
@@ -292,6 +378,7 @@ class MeetingLogStore:
                 "custom_template_id": summary.get("custom_template_id"),
                 "meeting_type": summary.get("meeting_type") or "other",
                 "generated_at": summary.get("generated_at"),
+                "transcript_revision": int(summary.get("transcript_revision") or 0),
                 "json_filename": filename,
                 "md_filename": f"v{version:04d}.md",
             })
@@ -353,6 +440,9 @@ class MeetingLogStore:
             "interrupted_at": record["payload"].get("interrupted_at"),
             "resumed_at": record["payload"].get("resumed_at"),
             "audio_gaps": list(record["payload"].get("audio_gaps") or []),
+            "transcript_revision": int(record["payload"].get("transcript_revision") or 0),
+            "translation_stale": bool(record["payload"].get("translation_stale")),
+            "summary_stale": bool(record["payload"].get("summary_stale")),
         }
 
     def list_sessions(self):
@@ -395,6 +485,7 @@ class MeetingLogStore:
             version = max((item["version"] for item in entries), default=0) + 1
             summary = dict(summary)
             summary["version"] = version
+            summary["transcript_revision"] = int(record["payload"].get("transcript_revision") or 0)
             summary_json, summary_md = self.summary_paths_for_record(record)
             directory = self.summary_version_directory(record)
             version_json = os.path.join(directory, f"v{version:04d}.json")
@@ -405,6 +496,8 @@ class MeetingLogStore:
             self._atomic_write(version_md, markdown_content)
             self._atomic_write(summary_json, json_content)
             self._atomic_write(summary_md, markdown_content)
+            record["payload"]["summary_stale"] = False
+            self._write_record(record)
         return self.summary_info(session_id)
 
     def summary_info(self, session_id):
@@ -423,6 +516,8 @@ class MeetingLogStore:
             "has_summary": os.path.isfile(summary_json) and os.path.isfile(summary_md),
             "latest_version": latest["version"] if latest else None,
             "latest_template": latest["template"] if latest else None,
+            "transcript_revision": int(record["payload"].get("transcript_revision") or 0),
+            "summary_stale": bool(record["payload"].get("summary_stale")),
             "versions": versions,
         }
 
@@ -485,13 +580,20 @@ class MeetingLogStore:
                 lines.append(f"- [{gap.get('start_at', '')} - {gap.get('end_at', '')}] {gap.get('reason') or 'websocket_disconnected'}，该时间段音频未记录")
         else:
             lines.append("- 无")
+        speaker_names = {
+            item.get("speaker_id"): item.get("name")
+            for item in payload.get("speakers") or []
+            if isinstance(item, dict)
+        }
         if str(layout or "sections").lower() == "interleaved":
-            lines.extend(MeetingLogStore._render_interleaved_segments(payload, {}))
+            lines.extend(MeetingLogStore._render_interleaved_segments(payload, speaker_names))
             lines.extend(["", "## AI 总结", "", "_待生成_", ""])
             return "\n".join(lines)
         lines.extend(["", "## 原文记录"])
         for segment in payload.get("source_segments", []):
-            lines.append(f"- [{segment.get('start', '')} - {segment.get('end', '')}] {segment.get('text', '')}")
+            speaker = speaker_names.get(segment.get("speaker_id")) or segment.get("speaker")
+            prefix = f"{speaker}：" if speaker else ""
+            lines.append(f"- [{segment.get('start', '')} - {segment.get('end', '')}] {prefix}{segment.get('text', '')}")
         lines.extend(["", "## 翻译记录"])
         for segment in payload.get("translation_segments", []):
             lines.append(f"- [{segment.get('start', '')} - {segment.get('end', '')}] {segment.get('text', '')}")
@@ -764,7 +866,9 @@ class MeetingLogStore:
                 return
             lines.extend(["", f"## {title}"])
             for item in values:
-                lines.append(f"- {item}")
+                body = MeetingLogStore._custom_value_to_text(item)
+                if body:
+                    lines.append(f"- {body}")
 
         def append_evidence(lines, title, values, text_key="text", formatter=None):
             values = values or []

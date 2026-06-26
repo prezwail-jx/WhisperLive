@@ -196,6 +196,27 @@ class TestBackendType(unittest.TestCase):
             BackendType("invalid_backend")
 
 
+class TestHotwordUploadParsing(unittest.TestCase):
+    def test_parse_markdown_hotword_upload_strips_list_markers(self):
+        payload = """# 热词
+- 彭凯平
+* 历史终极幻觉
+1. 时间韧性
+- [x] Qwen=>Qwen
+""".encode("utf-8")
+        result = TranscriptionServer.parse_hotword_upload("hotwords.md", payload)
+        self.assertEqual(result["filename"], "hotwords.md")
+        self.assertEqual(result["count"], 4)
+        self.assertEqual(result["translation_count"], 1)
+        self.assertIn("彭凯平", result["normalized_text"])
+        self.assertIn("Qwen => Qwen", result["normalized_text"])
+        self.assertNotIn("- 彭凯平", result["normalized_text"])
+
+    def test_parse_hotword_upload_rejects_unknown_extension(self):
+        with self.assertRaises(ValueError):
+            TranscriptionServer.parse_hotword_upload("hotwords.csv", b"word")
+
+
 class TestTranscriptionServerInit(unittest.TestCase):
     def test_defaults(self):
         server = TranscriptionServer()

@@ -32,6 +32,10 @@ COPY requirements/docx.txt /tmp/docx.txt
 RUN pip install --no-cache-dir --timeout 120 --retries 10 -r /tmp/docx.txt \
     && rm /tmp/docx.txt
 
+COPY requirements/diarization.txt /tmp/diarization.txt
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -r /tmp/diarization.txt \
+    && rm /tmp/diarization.txt
+
 ENV SUMMARY_MODEL_PATH="/app/model/LLM/Qwen3-4B-AWQ" \
     SUMMARY_MODEL_NAME="qwen3-4b-awq" \
     SUMMARY_HOST="127.0.0.1" \

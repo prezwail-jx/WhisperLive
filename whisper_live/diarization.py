@@ -36,7 +36,7 @@ class SpeakerDiarizer:
         self,
         similarity_threshold=0.55,
         max_speakers=10,
-        embedding_model="pyannote/wespeaker-voxceleb-resnet34-LM",
+        embedding_model="model/LLM/wespeaker-voxceleb-resnet34-LM",
         hf_token=None,
     ):
         self.similarity_threshold = similarity_threshold

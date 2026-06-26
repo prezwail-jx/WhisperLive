@@ -1,4 +1,5 @@
 import os
+import io
 import asyncio
 import time
 import threading
@@ -39,6 +40,7 @@ from whisper_live.meeting import (
     normalize_hotword_text,
     parse_hotword_config,
 )
+from whisper_live.meeting.transcript import TranscriptRevisionConflict
 
 logging.basicConfig(level=logging.INFO)
 
@@ -315,6 +317,72 @@ class TranscriptionServer:
         self.summary_templates = SummaryTemplateStore()
         self.meeting_summary = MeetingSummaryService()
 
+    HOTWORD_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+
+    @staticmethod
+    def _decode_text_upload(content):
+        for encoding in ("utf-8-sig", "utf-8"):
+            try:
+                return content.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return content.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _extract_docx_text(content):
+        Document = MeetingDocConverter._document_class()
+        document = Document(io.BytesIO(content))
+        lines = []
+        for paragraph in document.paragraphs:
+            text = paragraph.text.strip()
+            if text:
+                lines.append(text)
+        for table in document.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if cells:
+                    lines.append("\t".join(cells))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _normalize_uploaded_hotword_line(raw_line):
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("#") or line.startswith("```"):
+            return ""
+        line = re.sub(r"^[-*+]\s+\[[ xX]\]\s+", "", line)
+        line = re.sub(r"^[-*+]\s+", "", line)
+        line = re.sub(r"^\d+[.)、．）]\s+", "", line)
+        return line.strip()
+
+    @classmethod
+    def _normalize_uploaded_hotword_text(cls, text):
+        return "\n".join(
+            line for line in (cls._normalize_uploaded_hotword_line(raw_line) for raw_line in str(text or "").splitlines())
+            if line
+        )
+
+    @classmethod
+    def parse_hotword_upload(cls, filename, content):
+        filename = os.path.basename(str(filename or "hotwords.txt"))
+        extension = os.path.splitext(filename)[1].lower()
+        if extension not in {".txt", ".md", ".docx"}:
+            raise ValueError("only .txt, .md and .docx hotword files are supported")
+        if len(content or b"") > cls.HOTWORD_UPLOAD_MAX_BYTES:
+            raise ValueError("hotword file is too large")
+        if extension == ".docx":
+            text = cls._extract_docx_text(content or b"")
+        else:
+            text = cls._decode_text_upload(content or b"")
+        normalized_upload_text = cls._normalize_uploaded_hotword_text(text)
+        parsed = parse_hotword_config(normalized_upload_text)
+        return {
+            "filename": filename,
+            "text": text,
+            "normalized_text": parsed["text"],
+            "count": parsed["count"],
+            "translation_count": parsed["translation_count"],
+        }
+
     @staticmethod
     def load_hotwords_file(path):
         if not path:
@@ -338,6 +406,8 @@ class TranscriptionServer:
         return " ".join(hotwords)
 
     def apply_meeting_hotwords(self, options):
+        if options.get("hotwords_locked") and options.get("hotwords"):
+            return
         meeting_name = options.get("meeting_name")
         if not meeting_name or not self.meeting_hotwords:
             return
@@ -359,9 +429,12 @@ class TranscriptionServer:
             options["hotwords"] = self.default_hotwords
 
     def get_admin_clients_payload(self):
+        backend = self.backend.value if isinstance(getattr(self, "backend", None), BackendType) else str(getattr(self, "backend", "") or "")
         if not self.client_manager:
-            return {"server_time": time.time(), "clients": []}
-        return self.client_manager.get_client_status_snapshot()
+            return {"server_time": time.time(), "server_backend": backend, "clients": []}
+        payload = self.client_manager.get_client_status_snapshot()
+        payload["server_backend"] = backend
+        return payload
 
     def session_timeline_offset(self, websocket):
         client = self.client_manager.get_client(websocket) if self.client_manager else None
@@ -614,6 +687,7 @@ class TranscriptionServer:
                     use_vad=self.use_vad,
                     translation_queue=translation_queue,
                     hotwords=options.get("hotwords"),
+                    diarization=self._create_diarizer(options),
                 )
                 logging.info("Running FunASR backend.")
             except Exception as e:
@@ -1057,6 +1131,19 @@ class TranscriptionServer:
             except ValueError as exc:
                 return JSONResponse(status_code=400, content={"error": str(exc)})
 
+        @app.post("/admin/hotwords/parse-upload")
+        async def parse_admin_hotword_upload(file: UploadFile):
+            try:
+                content = await file.read()
+                return self.parse_hotword_upload(file.filename, content)
+            except RuntimeError as exc:
+                return JSONResponse(status_code=501, content={"error": str(exc)})
+            except ValueError as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
+            except Exception as exc:
+                logging.error("Failed to parse uploaded hotword file: %s", exc)
+                return JSONResponse(status_code=500, content={"error": str(exc)})
+
         @app.post("/admin/meeting-logs")
         async def save_admin_meeting_log(request: Request):
             try:
@@ -1088,6 +1175,82 @@ class TranscriptionServer:
         async def get_admin_meeting_log_info(session_id: str):
             info = self.meeting_logs.session_info(session_id)
             return info if info else JSONResponse(status_code=404, content={"error": "meeting log session not found"})
+
+        @app.get("/admin/meeting-logs/{session_id}/transcript")
+        async def get_admin_meeting_transcript(session_id: str):
+            result = self.meeting_logs.get_transcript(session_id)
+            return result if result else JSONResponse(status_code=404, content={"error": "meeting log session not found"})
+
+        @app.patch("/admin/meeting-logs/{session_id}/transcript/{segment_id}")
+        async def update_admin_meeting_transcript_segment(session_id: str, segment_id: str, request: Request):
+            try:
+                body = await request.json()
+                return self.meeting_logs.update_transcript_segment(
+                    session_id,
+                    segment_id,
+                    body.get("text"),
+                    body.get("speaker_id"),
+                    body.get("expected_revision"),
+                )
+            except TranscriptRevisionConflict as exc:
+                return JSONResponse(status_code=409, content={"error": str(exc), "error_code": "transcript_revision_conflict"})
+            except KeyError as exc:
+                return JSONResponse(status_code=404, content={"error": str(exc)})
+            except RuntimeError as exc:
+                return JSONResponse(status_code=409, content={"error": str(exc)})
+            except (ValueError, json.JSONDecodeError) as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
+
+        @app.post("/admin/meeting-logs/{session_id}/speakers")
+        async def create_admin_meeting_speaker(session_id: str, request: Request):
+            try:
+                body = await request.json()
+                return self.meeting_logs.add_transcript_speaker(
+                    session_id, body.get("name"), body.get("expected_revision")
+                )
+            except TranscriptRevisionConflict as exc:
+                return JSONResponse(status_code=409, content={"error": str(exc), "error_code": "transcript_revision_conflict"})
+            except KeyError as exc:
+                return JSONResponse(status_code=404, content={"error": str(exc)})
+            except RuntimeError as exc:
+                return JSONResponse(status_code=409, content={"error": str(exc)})
+            except (ValueError, json.JSONDecodeError) as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
+
+        @app.patch("/admin/meeting-logs/{session_id}/speakers/{speaker_id}")
+        async def rename_admin_meeting_speaker(session_id: str, speaker_id: str, request: Request):
+            try:
+                body = await request.json()
+                return self.meeting_logs.rename_transcript_speaker(
+                    session_id, speaker_id, body.get("name"), body.get("expected_revision")
+                )
+            except TranscriptRevisionConflict as exc:
+                return JSONResponse(status_code=409, content={"error": str(exc), "error_code": "transcript_revision_conflict"})
+            except KeyError as exc:
+                return JSONResponse(status_code=404, content={"error": str(exc)})
+            except RuntimeError as exc:
+                return JSONResponse(status_code=409, content={"error": str(exc)})
+            except (ValueError, json.JSONDecodeError) as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
+
+        @app.post("/admin/meeting-logs/{session_id}/speakers/merge")
+        async def merge_admin_meeting_speakers(session_id: str, request: Request):
+            try:
+                body = await request.json()
+                return self.meeting_logs.merge_transcript_speakers(
+                    session_id,
+                    body.get("source_speaker_id"),
+                    body.get("target_speaker_id"),
+                    body.get("expected_revision"),
+                )
+            except TranscriptRevisionConflict as exc:
+                return JSONResponse(status_code=409, content={"error": str(exc), "error_code": "transcript_revision_conflict"})
+            except KeyError as exc:
+                return JSONResponse(status_code=404, content={"error": str(exc)})
+            except RuntimeError as exc:
+                return JSONResponse(status_code=409, content={"error": str(exc)})
+            except (ValueError, json.JSONDecodeError) as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
 
         @app.post("/admin/meeting-logs/{session_id}/finish")
         async def finish_admin_meeting_log(session_id: str, request: Request):

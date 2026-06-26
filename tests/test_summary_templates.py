@@ -372,7 +372,7 @@ class TestSummaryTemplateStore(unittest.TestCase):
             [
                 {
                     "topic": "AI对计算范式的颠覆",
-                    "evidence_timestamp": "[242.699 - 246.299]",
+                    "evidence_time": "[242.699 - 246.299]",
                     "evidence_quote": "Artificial Intelligence has reinvented computing",
                 }
             ],
@@ -384,6 +384,24 @@ class TestSummaryTemplateStore(unittest.TestCase):
         self.assertEqual(items[0]["text"], "AI对计算范式的颠覆")
         self.assertEqual(items[0]["evidence_start"], 242.699)
         self.assertEqual(items[0]["evidence_end"], 246.299)
+
+    def test_standard_markdown_renders_literal_list_items_without_dict_residue(self):
+        summary = {
+            "summary_template": "auto",
+            "session_id": "session-standard-list",
+            "meeting_name": "AI 演讲",
+            "template_data": {
+                "topics": [
+                    "• {'point': 'AI正在彻底改变计算方式。', 'evidence_time': '[242.699 - 246.299]', 'evidence_quote': 'Artificial Intelligence has reinvented computing from human coding to machine learning.'}",
+                ],
+            },
+        }
+
+        markdown = MeetingLogStore.render_summary_markdown(summary)
+
+        self.assertIn("- AI正在彻底改变计算方式。", markdown)
+        self.assertNotIn("{'point'", markdown)
+        self.assertNotIn("evidence_time", markdown)
 
     def test_custom_markdown_keeps_empty_headings_without_sample_content(self):
         summary = {

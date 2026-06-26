@@ -3,6 +3,7 @@
 
 venv
 model
+config/summary_templates
 third_party
 logs
 __pycache__

@@ -441,7 +441,9 @@ class MeetingSummaryService:
         start = self._float(item.get("evidence_start"))
         end = self._float(item.get("evidence_end"))
         if start is None or end is None:
-            timestamp_start, timestamp_end = self._parse_evidence_timestamp(item.get("evidence_timestamp"))
+            timestamp_start, timestamp_end = self._parse_evidence_timestamp(
+                item.get("evidence_timestamp") or item.get("evidence_time")
+            )
             start = start if start is not None else timestamp_start
             end = end if end is not None else timestamp_end
         quote = str(item.get("evidence_quote") or "").strip()
@@ -629,12 +631,19 @@ class MeetingSummaryService:
 
     def extract_meeting_text(self, payload):
         lines = []
+        speaker_names = {
+            item.get("speaker_id"): item.get("name")
+            for item in payload.get("speakers") or []
+            if isinstance(item, dict)
+        }
         for segment in payload.get("source_segments") or []:
             if not isinstance(segment, dict):
                 continue
             body = str(segment.get("text") or "").strip()
             if body:
-                lines.append(f"[{segment.get('start', '')} - {segment.get('end', '')}] {body}")
+                speaker = speaker_names.get(segment.get("speaker_id")) or segment.get("speaker")
+                prefix = f"{speaker}：" if speaker else ""
+                lines.append(f"[{segment.get('start', '')} - {segment.get('end', '')}] {prefix}{body}")
         return "\n".join(lines).strip()
 
     def split_text(self, text):

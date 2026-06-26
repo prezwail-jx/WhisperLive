@@ -88,6 +88,7 @@ class ServeClientFunASR(ServeClientBase):
         max_incomplete_segment_seconds=6.0,
         use_vad=True,
         vad_threshold=0.5,
+        diarization=None,
     ):
         super().__init__(
             client_uid,
@@ -97,6 +98,7 @@ class ServeClientFunASR(ServeClientBase):
             clip_audio,
             same_output_threshold,
             translation_queue,
+            diarization=diarization,
             min_segment_rms=min_segment_rms,
             max_incomplete_segment_seconds=max_incomplete_segment_seconds,
         )
@@ -358,11 +360,30 @@ class ServeClientFunASR(ServeClientBase):
         start = float(self.speech_start_time or 0.0)
         self.current_utterance_id = f"{self.client_uid}:{self.utterance_sequence}:{start:.3f}"
 
-    def _format_utterance_segment(self, start, end, text, completed):
-        segment = self.format_segment(start, end, text, completed=completed)
+    def _format_utterance_segment(self, start, end, text, completed, speaker=None):
+        segment = self.format_segment(
+            start,
+            end,
+            text,
+            completed=completed,
+            speaker=speaker,
+        )
         if self.current_utterance_id:
             segment["utterance_id"] = self.current_utterance_id
         return segment
+
+    def _identify_utterance_speaker(self, audio):
+        if self.diarization is None:
+            return None
+        try:
+            return self.diarization.identify_speaker(audio, self.RATE)
+        except Exception as exc:
+            logging.warning(
+                "FunASR diarization disabled after speaker identification failed: %s",
+                exc,
+            )
+            self.diarization = None
+            return None
 
     def _maybe_emit_partial(self):
         duration = self._speech_duration()
@@ -398,7 +419,14 @@ class ServeClientFunASR(ServeClientBase):
 
         start = self.speech_start_time
         end = start + duration
-        segment = self._format_utterance_segment(start, end, text, completed=completed)
+        speaker = self._identify_utterance_speaker(audio) if completed else None
+        segment = self._format_utterance_segment(
+            start,
+            end,
+            text,
+            completed=completed,
+            speaker=speaker,
+        )
         if completed:
             self._commit_completed_segment(segment, text, reason, duration)
             self._reset_speech_state()
@@ -459,7 +487,13 @@ class ServeClientFunASR(ServeClientBase):
         start = self.speech_start_time
         end = start + duration
         text_parts = self._split_final_text(text)
-        segments = self._segments_from_text_parts(start, end, text_parts)
+        speaker = self._identify_utterance_speaker(audio)
+        segments = self._segments_from_text_parts(
+            start,
+            end,
+            text_parts,
+            speaker=speaker,
+        )
         self._commit_completed_segments(segments, reason, duration)
         self._reset_speech_state()
 
@@ -647,7 +681,7 @@ class ServeClientFunASR(ServeClientBase):
             return sorted(punctuation_candidates)[0][1]
         return None
 
-    def _segments_from_text_parts(self, start, end, parts):
+    def _segments_from_text_parts(self, start, end, parts, speaker=None):
         parts = [part.strip() for part in parts if self._is_meaningful_text(part)]
         if not parts:
             return []
@@ -662,7 +696,15 @@ class ServeClientFunASR(ServeClientBase):
             else:
                 part_end = start + duration * (sum(lengths[:index + 1]) / total)
                 part_end = max(cursor + 0.001, min(part_end, end))
-            segments.append(self._format_utterance_segment(cursor, part_end, part, completed=True))
+            segments.append(
+                self._format_utterance_segment(
+                    cursor,
+                    part_end,
+                    part,
+                    completed=True,
+                    speaker=speaker,
+                )
+            )
             cursor = part_end
         return segments
 

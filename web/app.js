@@ -4,8 +4,8 @@ const elements = {
   form: document.getElementById("settingsForm"),
   server: document.getElementById("serverInput"),
   meetingName: document.getElementById("meetingNameInput"),
-  meetingSelect: document.getElementById("meetingSelectInput"),
-  refreshMeetings: document.getElementById("refreshMeetingsButton"),
+  hotwordFile: document.getElementById("hotwordFileInput"),
+  clearHotwordFile: document.getElementById("clearHotwordFileButton"),
   hotwordStatus: document.getElementById("hotwordStatus"),
   language: document.getElementById("languageInput"),
   start: document.getElementById("startButton"),
@@ -30,6 +30,14 @@ const elements = {
   addSummaryTemplateField: document.getElementById("addSummaryTemplateFieldButton"),
   saveSummaryTemplate: document.getElementById("saveSummaryTemplateButton"),
   refreshSummarySessions: document.getElementById("refreshSummarySessionsButton"),
+  loadTranscriptEditor: document.getElementById("loadTranscriptEditorButton"),
+  transcriptEditorStatus: document.getElementById("transcriptEditorStatus"),
+  transcriptEditorRows: document.getElementById("transcriptEditorRows"),
+  speakerManagerList: document.getElementById("speakerManagerList"),
+  speakerStats: document.getElementById("speakerStats"),
+  speakerRenameGuide: document.getElementById("speakerRenameGuide"),
+  newSpeakerName: document.getElementById("newSpeakerNameInput"),
+  addSpeaker: document.getElementById("addSpeakerButton"),
   clearLog: document.getElementById("clearLogButton"),
   status: document.getElementById("connectionStatus"),
   drawerConnectionStatus: document.getElementById("drawerConnectionStatus"),
@@ -54,8 +62,7 @@ const elements = {
   sourcePaneTitle: document.getElementById("sourcePaneTitle"),
   translationPaneTitle: document.getElementById("translationPaneTitle"),
   translationEnabled: document.getElementById("translationEnabledInput"),
-  translationDirection: document.getElementById("translationDirectionInput"),
-  translationDirectionField: document.getElementById("translationDirectionField"),
+  diarizationEnabled: document.getElementById("diarizationEnabledInput"),
   displayMode: document.getElementById("displayModeInput"),
   singleLanguage: document.getElementById("singleLanguageInput"),
   singleLanguageField: document.getElementById("singleLanguageField"),
@@ -93,7 +100,8 @@ let selectedSummarySessionStatus = null;
 let summaryVersions = [];
 let summaryTemplateDraft = null;
 let customSummaryTemplates = [];
-let lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0 };
+let transcriptEditorData = null;
+let lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0, translationGlossary: {} };
 let clientInstanceId = null;
 let displayMode = "split";
 let singleLanguageMode = "source";
@@ -228,36 +236,42 @@ function initializeDefaults() {
   clientInstanceId = getClientInstanceId();
   const savedMeeting = window.localStorage.getItem("whisperlive_meeting_name");
   const savedServer = window.localStorage.getItem("whisperlive_server_url");
-  const savedLanguage = window.localStorage.getItem("whisperlive_source_language");
   const savedTranslationEnabled = window.localStorage.getItem("whisperlive_translation_enabled");
-  const savedTranslationDirection = window.localStorage.getItem("whisperlive_translation_direction");
+  const savedDiarizationEnabled = window.localStorage.getItem("whisperlive_diarization_enabled");
   displayMode = window.localStorage.getItem("whisperlive_display_mode") || "split";
   singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "source";
   if (savedMeeting && !elements.meetingName.value) elements.meetingName.value = savedMeeting;
   if (savedServer) elements.server.value = savedServer;
-  if (savedLanguage !== null) elements.language.value = savedLanguage;
   if (savedTranslationEnabled !== null) elements.translationEnabled.checked = savedTranslationEnabled === "true";
-  if (savedTranslationDirection) elements.translationDirection.value = savedTranslationDirection;
+  if (savedDiarizationEnabled !== null) elements.diarizationEnabled.checked = savedDiarizationEnabled === "true";
   elements.displayMode.value = displayMode;
   elements.singleLanguage.value = singleLanguageMode;
   applyCaptionStyle(readCaptionStyle());
   updateTranslationControls();
   setDisplayMode(displayMode);
   updateMeetingTitle();
-  updateHotwordStatus("等待开始时加载会议热词文件");
-  loadMeetingOptions().catch(() => {
-    updateHotwordStatus("热词文件列表暂不可用，可手动填写会议号");
-  });
+  updateHotwordStatus("未上传热词");
+  applyBackendLanguageDefault().catch(() => applyBackendLanguageFallback());
   loadSummarySessions().catch(() => {});
   loadSummaryTemplates().catch(() => {});
 }
 
+function normalizeHotwordLine(rawLine) {
+  let line = String(rawLine || "").trim();
+  if (!line || line.startsWith("#") || line.startsWith("```")) return "";
+  line = line.replace(/^[-*+]\s+\[[ xX]\]\s+/, "");
+  line = line.replace(/^[-*+]\s+/, "");
+  line = line.replace(/^\d+[.)、．）]\s+/, "");
+  return line.trim();
+}
+
 function parseHotwordText(text) {
   const hotwords = [];
+  const translationGlossary = {};
   let translationCount = 0;
   String(text || "").split(/\r?\n/).forEach((rawLine) => {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) return;
+    const line = normalizeHotwordLine(rawLine);
+    if (!line) return;
     if (!line.includes("=>")) {
       hotwords.push(line);
       return;
@@ -267,9 +281,10 @@ function parseHotwordText(text) {
     const target = line.slice(separator + 2).trim();
     if (!source || !target) return;
     hotwords.push(source);
+    translationGlossary[source] = target;
     translationCount += 1;
   });
-  return { hotwords, translationCount };
+  return { hotwords, translationCount, translationGlossary };
 }
 
 function countHotwordText(text) {
@@ -357,9 +372,6 @@ function openSummaryDrawer() {
 }
 
 function updateTranslationControls() {
-  const enabled = elements.translationEnabled.checked;
-  elements.translationDirection.disabled = !enabled;
-  elements.translationDirectionField.classList.toggle("disabled", !enabled);
   updateDrawerTranslationStatus();
 }
 
@@ -377,12 +389,30 @@ function hotwordApiBaseUrl() {
   return window.location.origin === "null" ? "http://localhost:9093" : window.location.origin;
 }
 
-function hotwordListUrl() {
-  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/hotwords`;
+function hotwordUploadParseUrl() {
+  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/hotwords/parse-upload`;
 }
 
-function hotwordApiUrl(meetingName) {
-  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/hotwords/${encodeURIComponent(meetingName)}`;
+function adminClientsUrl() {
+  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/clients`;
+}
+
+function defaultLanguageForBackend(backend) {
+  const value = String(backend || "").toLowerCase();
+  if (value === "funasr") return "zh";
+  return "en";
+}
+
+function applyBackendLanguageFallback() {
+  elements.language.value = defaultLanguageForBackend(DEFAULT_BACKEND);
+}
+
+async function applyBackendLanguageDefault() {
+  const response = await fetch(adminClientsUrl(), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  const backend = data.server_backend || (data.clients && data.clients[0] && data.clients[0].backend) || DEFAULT_BACKEND;
+  elements.language.value = defaultLanguageForBackend(backend);
 }
 
 function meetingLogApiUrl() {
@@ -405,6 +435,16 @@ function summaryApiUrl(sessionId) {
 
 function summaryInfoUrl(sessionId) {
   return `${summaryApiUrl(sessionId)}/info`;
+}
+
+function transcriptApiUrl(sessionId, segmentId = "") {
+  const base = `${meetingLogApiUrl()}/${encodeURIComponent(sessionId)}/transcript`;
+  return segmentId ? `${base}/${encodeURIComponent(segmentId)}` : base;
+}
+
+function speakersApiUrl(sessionId, speakerId = "") {
+  const base = `${meetingLogApiUrl()}/${encodeURIComponent(sessionId)}/speakers`;
+  return speakerId ? `${base}/${encodeURIComponent(speakerId)}` : base;
 }
 
 function summaryDownloadUrl(sessionId, format = "md", version = "") {
@@ -739,46 +779,285 @@ async function loadSummarySessions(preferredSessionId = selectedSummarySessionId
   selectedSummarySessionId = nextId;
   selectedSummarySessionStatus = nextId ? "finished" : null;
   elements.summarySession.value = nextId || "";
+  if (!transcriptEditorData) renderTranscriptEditor();
   await loadSummaryInfo(nextId);
 }
 
 
-async function loadMeetingOptions() {
-  if (!elements.meetingSelect) return;
-  const response = await fetch(hotwordListUrl(), { cache: "no-store" });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const data = await response.json();
-  const meetings = data.meetings || [];
-  const current = elements.meetingName.value.trim();
-  elements.meetingSelect.innerHTML = '<option value="">手动填写会议号</option>';
-  meetings.forEach((item) => {
-    const option = document.createElement("option");
-    option.value = item.meeting_name;
-    option.textContent = `${item.meeting_name} (${item.count || 0})`;
-    option.dataset.filename = item.filename || "";
-    elements.meetingSelect.appendChild(option);
-  });
-  if (current && meetings.some((item) => item.meeting_name === current)) {
-    elements.meetingSelect.value = current;
-  }
-  updateHotwordStatus(meetings.length ? `已发现 ${meetings.length} 个服务器热词文件` : "服务器暂无会议热词文件，可手动填写会议号");
+function setTranscriptEditorStatus(text, state = "") {
+  if (!elements.transcriptEditorStatus) return;
+  elements.transcriptEditorStatus.textContent = text;
+  elements.transcriptEditorStatus.className = `transcript-editor-status${state ? ` ${state}` : ""}`;
 }
 
-async function fetchMeetingHotwordSnapshot(meetingName) {
-  if (!meetingName) {
-    return { hotwords: "", filename: "", count: 0, translationCount: 0 };
+function transcriptEditorIdleMessage() {
+  return selectedSummarySessionId
+    ? "已选择会议，点击“加载校对内容”。"
+    : "请先在上方选择会议日志。";
+}
+
+async function transcriptRequest(url, options = {}) {
+  const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 409 && selectedSummarySessionId) await loadTranscriptEditor(selectedSummarySessionId).catch(() => {});
+    throw new Error(data.error || `HTTP ${response.status}`);
   }
-  const response = await fetch(hotwordApiUrl(meetingName), { cache: "no-store" });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const data = await response.json();
-  const text = data.text || "";
+  transcriptEditorData = data;
+  renderTranscriptEditor();
+  return data;
+}
+
+function speakerSegmentCounts() {
+  const counts = new Map();
+  let unassigned = 0;
+  (transcriptEditorData?.segments || []).forEach((segment) => {
+    const speakerId = String(segment.speaker_id || "").trim();
+    if (!speakerId) {
+      unassigned += 1;
+      return;
+    }
+    counts.set(speakerId, (counts.get(speakerId) || 0) + 1);
+  });
+  return { counts, unassigned };
+}
+
+function renderSpeakerStats() {
+  if (!elements.speakerStats) return;
+  elements.speakerStats.replaceChildren();
+  if (!transcriptEditorData) return;
+  const speakers = transcriptEditorData.speakers || [];
+  const { counts, unassigned } = speakerSegmentCounts();
+  const items = [`未分配 ${unassigned} 段`];
+  speakers.forEach((speaker) => {
+    items.push(`${speaker.name || speaker.speaker_id} ${counts.get(speaker.speaker_id) || 0} 段`);
+  });
+  items.forEach((item) => {
+    const badge = document.createElement("span");
+    badge.textContent = item;
+    elements.speakerStats.appendChild(badge);
+  });
+}
+
+function renderSpeakerRenameGuide() {
+  if (!elements.speakerRenameGuide) return;
+  elements.speakerRenameGuide.replaceChildren();
+  if (!transcriptEditorData) return;
+  const speakers = transcriptEditorData.speakers || [];
+  const { counts } = speakerSegmentCounts();
+  const heading = document.createElement("div");
+  heading.className = "speaker-guide-heading";
+  const title = document.createElement("strong");
+  title.textContent = "快速改名";
+  const hint = document.createElement("span");
+  hint.textContent = speakers.length ? "把 Speaker 1 / Speaker 2 改成真实姓名。" : "当前日志没有自动说话人，可在高级管理中新增。";
+  heading.append(title, hint);
+  elements.speakerRenameGuide.appendChild(heading);
+  if (!speakers.length) return;
+
+  speakers.forEach((speaker) => {
+    const row = document.createElement("div");
+    row.className = "speaker-guide-row";
+    row.dataset.speakerId = speaker.speaker_id;
+    const current = document.createElement("div");
+    current.className = "speaker-guide-current";
+    const currentName = document.createElement("strong");
+    currentName.textContent = speaker.name || speaker.speaker_id;
+    const currentCount = document.createElement("small");
+    currentCount.textContent = `${counts.get(speaker.speaker_id) || 0} 段`;
+    current.append(currentName, currentCount);
+    const input = document.createElement("input");
+    input.value = speaker.name || "";
+    input.maxLength = 80;
+    input.placeholder = "填写真实姓名";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "secondary-button";
+    save.dataset.action = "rename-speaker-guide";
+    save.textContent = "保存";
+    row.append(current, input, save);
+    elements.speakerRenameGuide.appendChild(row);
+  });
+}
+
+function renderSpeakerManager() {
+  if (!elements.speakerManagerList) return;
+  elements.speakerManagerList.replaceChildren();
+  const speakers = transcriptEditorData?.speakers || [];
+  speakers.forEach((speaker) => {
+    const row = document.createElement("div");
+    row.className = "speaker-manager-row";
+    row.dataset.speakerId = speaker.speaker_id;
+    const input = document.createElement("input");
+    input.value = speaker.name || speaker.speaker_id;
+    input.maxLength = 80;
+    const rename = document.createElement("button");
+    rename.type = "button"; rename.className = "ghost-button"; rename.dataset.action = "rename-speaker"; rename.textContent = "改名";
+    const target = document.createElement("select");
+    target.innerHTML = '<option value="">合并到…</option>';
+    speakers.filter((item) => item.speaker_id !== speaker.speaker_id).forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.speaker_id; option.textContent = item.name || item.speaker_id; target.appendChild(option);
+    });
+    const merge = document.createElement("button");
+    merge.type = "button"; merge.className = "ghost-button"; merge.dataset.action = "merge-speaker"; merge.textContent = "合并";
+    merge.disabled = speakers.length < 2;
+    row.append(input, rename, target, merge);
+    elements.speakerManagerList.appendChild(row);
+  });
+}
+
+function renderTranscriptEditor() {
+  if (!elements.transcriptEditorRows) return;
+  elements.transcriptEditorRows.replaceChildren();
+  if (!transcriptEditorData) {
+    renderSpeakerStats();
+    renderSpeakerRenameGuide();
+    renderSpeakerManager();
+    setTranscriptEditorStatus(transcriptEditorIdleMessage());
+    return;
+  }
+  renderSpeakerStats();
+  renderSpeakerRenameGuide();
+  renderSpeakerManager();
+  const notices = [`修订版本 ${Number(transcriptEditorData.transcript_revision || 0)}`];
+  if (transcriptEditorData.translation_stale) notices.push("译文已过期");
+  if (transcriptEditorData.summary_stale) notices.push("总结已过期，请重新生成");
+  setTranscriptEditorStatus(notices.join(" · "), transcriptEditorData.summary_stale ? "warning" : "ready");
+  const speakers = transcriptEditorData.speakers || [];
+  (transcriptEditorData.segments || []).forEach((segment) => {
+    const row = document.createElement("article");
+    row.className = "transcript-editor-row"; row.dataset.segmentId = segment.segment_id;
+    const meta = document.createElement("div");
+    meta.className = "transcript-editor-meta"; meta.textContent = `${segment.start || "0"} - ${segment.end || "0"}`;
+    const speaker = document.createElement("select");
+    speaker.innerHTML = '<option value="">未分配说话人</option>';
+    speakers.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.speaker_id; option.textContent = item.name || item.speaker_id; speaker.appendChild(option);
+    });
+    speaker.value = segment.speaker_id || "";
+    const text = document.createElement("textarea");
+    text.rows = 3; text.maxLength = 10000; text.value = segment.text || "";
+    const actions = document.createElement("div");
+    actions.className = "transcript-editor-actions";
+    const restore = document.createElement("button");
+    restore.type = "button"; restore.className = "ghost-button"; restore.dataset.action = "restore-segment"; restore.textContent = "恢复原文";
+    restore.disabled = (segment.text || "") === (segment.original_text || "");
+    const save = document.createElement("button");
+    save.type = "button"; save.className = "secondary-button"; save.dataset.action = "save-segment"; save.textContent = "保存";
+    actions.append(restore, save); row.append(meta, speaker, text, actions); elements.transcriptEditorRows.appendChild(row);
+  });
+}
+
+async function loadTranscriptEditor(sessionId = selectedSummarySessionId) {
+  if (!sessionId) throw new Error("请先在上方选择会议日志");
+  setTranscriptEditorStatus("正在加载校对内容…");
+  const response = await fetch(transcriptApiUrl(sessionId), { cache: "no-store" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  transcriptEditorData = data;
+  renderTranscriptEditor();
+}
+
+async function saveTranscriptEditorRow(row, restoreOriginal = false) {
+  const segmentId = row.dataset.segmentId;
+  const segment = (transcriptEditorData?.segments || []).find((item) => item.segment_id === segmentId);
+  const textarea = row.querySelector("textarea");
+  if (restoreOriginal && segment) textarea.value = segment.original_text || "";
+  setTranscriptEditorStatus("正在保存校对…");
+  await transcriptRequest(transcriptApiUrl(selectedSummarySessionId, segmentId), {
+    method: "PATCH",
+    body: JSON.stringify({
+      text: textarea.value,
+      speaker_id: row.querySelector("select").value || null,
+      expected_revision: transcriptEditorData.transcript_revision,
+    }),
+  });
+  await loadSummaryInfo(selectedSummarySessionId);
+}
+
+async function addTranscriptSpeaker() {
+  const name = elements.newSpeakerName.value.trim();
+  if (!name) throw new Error("请输入说话人姓名");
+  await transcriptRequest(speakersApiUrl(selectedSummarySessionId), {
+    method: "POST",
+    body: JSON.stringify({ name, expected_revision: transcriptEditorData.transcript_revision }),
+  });
+  elements.newSpeakerName.value = "";
+}
+
+async function renameTranscriptSpeaker(row) {
+  await transcriptRequest(speakersApiUrl(selectedSummarySessionId, row.dataset.speakerId), {
+    method: "PATCH",
+    body: JSON.stringify({ name: row.querySelector("input").value, expected_revision: transcriptEditorData.transcript_revision }),
+  });
+  await loadSummaryInfo(selectedSummarySessionId);
+}
+
+async function renameTranscriptSpeakerFromGuide(row) {
+  const name = row.querySelector("input").value.trim();
+  if (!name) throw new Error("请输入真实姓名");
+  setTranscriptEditorStatus("正在保存说话人名称…");
+  await transcriptRequest(speakersApiUrl(selectedSummarySessionId, row.dataset.speakerId), {
+    method: "PATCH",
+    body: JSON.stringify({ name, expected_revision: transcriptEditorData.transcript_revision }),
+  });
+  await loadSummaryInfo(selectedSummarySessionId);
+}
+
+async function mergeTranscriptSpeaker(row) {
+  const targetId = row.querySelector("select").value;
+  if (!targetId) throw new Error("请选择要合并到的说话人");
+  await transcriptRequest(`${speakersApiUrl(selectedSummarySessionId)}/merge`, {
+    method: "POST",
+    body: JSON.stringify({
+      source_speaker_id: row.dataset.speakerId,
+      target_speaker_id: targetId,
+      expected_revision: transcriptEditorData.transcript_revision,
+    }),
+  });
+  await loadSummaryInfo(selectedSummarySessionId);
+}
+
+
+async function readHotwordFileText(file) {
+  if (!file) return { text: "", filename: "" };
+  if (/\.(txt|md)$/i.test(file.name)) {
+    return { text: await file.text(), filename: file.name };
+  }
+  if (/\.docx$/i.test(file.name)) {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch(hotwordUploadParseUrl(), { method: "POST", body: form });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    return { text: result.text || "", filename: result.filename || file.name };
+  }
+  throw new Error("只支持上传 .txt、.md 或 .docx 热词文件");
+}
+
+async function loadUploadedHotwords(file) {
+  const { text, filename } = await readHotwordFileText(file);
   const parsed = parseHotwordText(text);
-  return {
+  lockedHotwords = {
     hotwords: parsed.hotwords.join(" "),
-    filename: data.filename || "",
-    count: Number(data.count || parsed.hotwords.length),
-    translationCount: Number(data.translation_count || parsed.translationCount),
+    filename,
+    count: parsed.hotwords.length,
+    translationCount: parsed.translationCount,
+    translationGlossary: parsed.translationGlossary,
   };
+  updateHotwordStatus(
+    filename
+      ? `${filename} · ${lockedHotwords.count} 个热词 · ${lockedHotwords.translationCount} 条固定翻译`
+      : "未上传热词"
+  );
+}
+
+function clearUploadedHotwords() {
+  lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0, translationGlossary: {} };
+  if (elements.hotwordFile) elements.hotwordFile.value = "";
+  updateHotwordStatus("未上传热词");
 }
 
 function setStatus(text, state = "idle") {
@@ -1375,6 +1654,8 @@ function sendConfig(event) {
     hotwords_count: lockedHotwords.count || 0,
     hotwords_file: lockedHotwords.filename || "",
     hotwords_locked: true,
+    translation_glossary: lockedHotwords.translationGlossary || {},
+    translation_glossary_count: lockedHotwords.translationCount || 0,
     backend: DEFAULT_BACKEND,
     language: selectedLanguage,
     task: "transcribe",
@@ -1391,8 +1672,9 @@ function sendConfig(event) {
     same_output_threshold: 5,
     min_segment_rms: 0.002,
     max_incomplete_segment_seconds: 0.0,
+    enable_diarization: elements.diarizationEnabled.checked,
     enable_translation: elements.translationEnabled.checked,
-    target_language: elements.translationDirection.value || "auto",
+    target_language: "auto",
     translation_provider: "helsinki_zh_en",
     zh_en_model_path: "model/opus-mt-zh-en",
     en_zh_model_path: "model/opus-mt-en-zh",
@@ -1411,10 +1693,10 @@ function setConnectionInputsDisabled(disabled) {
     elements.language,
     elements.meetingName,
     elements.translationEnabled,
-    elements.translationDirection,
-    elements.meetingSelect,
+    elements.diarizationEnabled,
+    elements.hotwordFile,
+    elements.clearHotwordFile,
   ].filter(Boolean).forEach((item) => { item.disabled = disabled; });
-  if (elements.refreshMeetings) elements.refreshMeetings.disabled = disabled;
   updateTranslationControls();
 }
 
@@ -1484,17 +1766,11 @@ async function startCapture() {
     window.localStorage.setItem("whisperlive_meeting_name", meetingName);
   }
   updateMeetingTitle();
-  try {
-    lockedHotwords = await fetchMeetingHotwordSnapshot(meetingName);
-    updateHotwordStatus(
-      lockedHotwords.filename
-        ? `${lockedHotwords.filename} · ${lockedHotwords.count} 个热词 · ${lockedHotwords.translationCount} 条固定翻译`
-        : "使用默认热词"
-    );
-  } catch (error) {
-    lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0 };
-    updateHotwordStatus("热词预取不可用，将由服务端按会议号匹配");
-  }
+  updateHotwordStatus(
+    lockedHotwords.filename
+      ? `${lockedHotwords.filename} · ${lockedHotwords.count} 个热词 · ${lockedHotwords.translationCount} 条固定翻译`
+      : "未上传热词"
+  );
 
   mediaStream = await requestMicrophoneStream();
 
@@ -1567,6 +1843,44 @@ function stopCapture(sendEnd = true) {
   setConnectionInputsDisabled(false);
 }
 
+
+if (elements.loadTranscriptEditor) {
+  elements.loadTranscriptEditor.addEventListener("click", () => {
+    loadTranscriptEditor().catch((error) => setTranscriptEditorStatus(`加载失败：${error.message}`, "error"));
+  });
+}
+if (elements.addSpeaker) {
+  elements.addSpeaker.addEventListener("click", () => {
+    addTranscriptSpeaker().catch((error) => setTranscriptEditorStatus(`新增失败：${error.message}`, "error"));
+  });
+}
+if (elements.speakerRenameGuide) {
+  elements.speakerRenameGuide.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-action='rename-speaker-guide']");
+    const row = button && button.closest(".speaker-guide-row");
+    if (!button || !row) return;
+    renameTranscriptSpeakerFromGuide(row).catch((error) => setTranscriptEditorStatus(`保存失败：${error.message}`, "error"));
+  });
+}
+if (elements.speakerManagerList) {
+  elements.speakerManagerList.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-action]");
+    const row = button && button.closest(".speaker-manager-row");
+    if (!button || !row) return;
+    const action = button.dataset.action === "rename-speaker" ? renameTranscriptSpeaker : mergeTranscriptSpeaker;
+    action(row).catch((error) => setTranscriptEditorStatus(`操作失败：${error.message}`, "error"));
+  });
+}
+if (elements.transcriptEditorRows) {
+  elements.transcriptEditorRows.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-action]");
+    const row = button && button.closest(".transcript-editor-row");
+    if (!button || !row) return;
+    saveTranscriptEditorRow(row, button.dataset.action === "restore-segment")
+      .catch((error) => setTranscriptEditorStatus(`保存失败：${error.message}`, "error"));
+  });
+}
+
 if (elements.summaryQuick) elements.summaryQuick.addEventListener("click", openSummaryDrawer);
 elements.settingsButton.addEventListener("click", openSettings);
 elements.closeSettings.addEventListener("click", closeSettings);
@@ -1594,11 +1908,13 @@ elements.translationEnabled.addEventListener("change", () => {
   updateTranslationControls();
   renderTranscriptViews();
 });
-elements.translationDirection.addEventListener("change", () => {
-  window.localStorage.setItem("whisperlive_translation_direction", elements.translationDirection.value);
+elements.diarizationEnabled.addEventListener("change", () => {
+  window.localStorage.setItem("whisperlive_diarization_enabled", String(elements.diarizationEnabled.checked));
 });
-elements.server.addEventListener("change", () => window.localStorage.setItem("whisperlive_server_url", elements.server.value.trim()));
-elements.language.addEventListener("change", () => window.localStorage.setItem("whisperlive_source_language", elements.language.value));
+elements.server.addEventListener("change", () => {
+  window.localStorage.setItem("whisperlive_server_url", elements.server.value.trim());
+  applyBackendLanguageDefault().catch(() => applyBackendLanguageFallback());
+});
 
 async function continueInterruptedMeeting() {
   if (!currentSessionId) return;
@@ -1766,6 +2082,8 @@ if (elements.summarySession) {
     selectedSummarySessionId = elements.summarySession.value || null;
     const selected = elements.summarySession.selectedOptions[0];
     selectedSummarySessionStatus = selectedSummarySessionId ? (selected.dataset.status || "finished") : null;
+    transcriptEditorData = null;
+    renderTranscriptEditor();
     loadSummaryInfo(selectedSummarySessionId).catch((error) => {
       console.error(error);
       setStatus("总结信息加载失败", "error");
@@ -1785,30 +2103,27 @@ elements.clearLog.addEventListener("click", clearMeetingLog);
 elements.meetingName.addEventListener("change", () => {
   const meetingName = elements.meetingName.value.trim();
   window.localStorage.setItem("whisperlive_meeting_name", meetingName);
-  if (elements.meetingSelect) {
-    const exists = Array.from(elements.meetingSelect.options).some((option) => option.value === meetingName);
-    elements.meetingSelect.value = meetingName && exists ? meetingName : "";
-  }
   updateMeetingTitle();
-  updateHotwordStatus("等待开始时加载会议热词文件");
 });
 
-if (elements.meetingSelect) {
-  elements.meetingSelect.addEventListener("change", () => {
-    if (!elements.meetingSelect.value) return;
-    elements.meetingName.value = elements.meetingSelect.value;
-    window.localStorage.setItem("whisperlive_meeting_name", elements.meetingName.value.trim());
-    updateMeetingTitle();
-    updateHotwordStatus("等待开始时加载会议热词文件");
+if (elements.hotwordFile) {
+  elements.hotwordFile.addEventListener("change", () => {
+    const file = elements.hotwordFile.files && elements.hotwordFile.files[0];
+    if (!file) {
+      clearUploadedHotwords();
+      return;
+    }
+    updateHotwordStatus("正在解析热词文件…");
+    loadUploadedHotwords(file).catch((error) => {
+      console.error(error);
+      clearUploadedHotwords();
+      updateHotwordStatus(`热词文件解析失败：${error.message}`);
+    });
   });
 }
 
-if (elements.refreshMeetings) {
-  elements.refreshMeetings.addEventListener("click", () => {
-    loadMeetingOptions().catch((error) => {
-      updateHotwordStatus(`热词文件列表加载失败：${error}`);
-    });
-  });
+if (elements.clearHotwordFile) {
+  elements.clearHotwordFile.addEventListener("click", clearUploadedHotwords);
 }
 
 

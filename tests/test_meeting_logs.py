@@ -59,6 +59,75 @@ class TestMeetingLogStore(unittest.TestCase):
             self.assertTrue(os.path.isfile(info["json_path"]))
             self.assertTrue(os.path.isfile(info["md_path"]))
 
+    def test_finished_transcript_can_be_corrected_with_revision_tracking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({"uid": "uid-1", "session_id": "session-edit", "meeting_name": "会议"})
+            store.append_segments("session-edit", "source", [
+                {"start": "0.000", "end": "1.000", "text": "原始文本", "completed": True},
+            ])
+            store.finish_session("session-edit")
+
+            transcript = store.get_transcript("session-edit")
+            segment_id = transcript["segments"][0]["segment_id"]
+            updated = store.update_transcript_segment(
+                "session-edit", segment_id, "校对文本", None, transcript["transcript_revision"]
+            )
+
+            self.assertEqual(updated["transcript_revision"], 1)
+            self.assertEqual(updated["segments"][0]["original_text"], "原始文本")
+            self.assertEqual(updated["segments"][0]["text"], "校对文本")
+            self.assertTrue(updated["translation_stale"])
+            self.assertTrue(updated["summary_stale"])
+            with self.assertRaises(ValueError):
+                store.update_transcript_segment("session-edit", segment_id, "冲突文本", None, 0)
+
+            restored = MeetingLogStore(directory)
+            restored_transcript = restored.get_transcript("session-edit")
+            self.assertEqual(restored_transcript["segments"][0]["segment_id"], segment_id)
+            self.assertEqual(restored_transcript["segments"][0]["text"], "校对文本")
+
+    def test_manual_speaker_management_updates_segments_and_summary_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({"uid": "uid-1", "session_id": "session-speakers", "meeting_name": "会议"})
+            store.append_segments("session-speakers", "source", [
+                {"start": "0.000", "end": "1.000", "text": "第一段", "completed": True},
+            ])
+            store.finish_session("session-speakers")
+            transcript = store.get_transcript("session-speakers")
+            alice = store.add_transcript_speaker("session-speakers", "张三", transcript["transcript_revision"])
+            alice_id = alice["speakers"][0]["speaker_id"]
+            bob = store.add_transcript_speaker("session-speakers", "李四", alice["transcript_revision"])
+            bob_id = next(item["speaker_id"] for item in bob["speakers"] if item["name"] == "李四")
+            assigned = store.update_transcript_segment(
+                "session-speakers",
+                bob["segments"][0]["segment_id"],
+                bob["segments"][0]["text"],
+                alice_id,
+                bob["transcript_revision"],
+            )
+            renamed = store.rename_transcript_speaker(
+                "session-speakers", alice_id, "张经理", assigned["transcript_revision"]
+            )
+            merged = store.merge_transcript_speakers(
+                "session-speakers", alice_id, bob_id, renamed["transcript_revision"]
+            )
+
+            self.assertEqual(len(merged["speakers"]), 1)
+            self.assertEqual(merged["segments"][0]["speaker_id"], bob_id)
+            self.assertFalse(merged["translation_stale"])
+            self.assertTrue(merged["summary_stale"])
+
+            info = store.write_summary("session-speakers", {
+                "session_id": "session-speakers",
+                "meeting_name": "会议",
+                "generated_at": "2026-06-24T10:00:00",
+                "overview": "总结",
+            })
+            self.assertFalse(info["summary_stale"])
+            self.assertEqual(info["versions"][0]["transcript_revision"], merged["transcript_revision"])
+
     def test_session_log_docx_export_uses_markdown_converter(self):
         with tempfile.TemporaryDirectory() as directory:
             store = MeetingLogStore(directory)
