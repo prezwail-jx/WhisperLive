@@ -8,6 +8,7 @@ const elements = {
   clearHotwordFile: document.getElementById("clearHotwordFileButton"),
   hotwordStatus: document.getElementById("hotwordStatus"),
   language: document.getElementById("languageInput"),
+  translationTarget: document.getElementById("translationTargetInput"),
   start: document.getElementById("startButton"),
   stop: document.getElementById("stopButton"),
   continueMeeting: document.getElementById("continueButton"),
@@ -237,12 +238,14 @@ function initializeDefaults() {
   const savedMeeting = window.localStorage.getItem("whisperlive_meeting_name");
   const savedServer = window.localStorage.getItem("whisperlive_server_url");
   const savedTranslationEnabled = window.localStorage.getItem("whisperlive_translation_enabled");
+  const savedTranslationTarget = window.localStorage.getItem("whisperlive_translation_target");
   const savedDiarizationEnabled = window.localStorage.getItem("whisperlive_diarization_enabled");
   displayMode = window.localStorage.getItem("whisperlive_display_mode") || "split";
   singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "source";
   if (savedMeeting && !elements.meetingName.value) elements.meetingName.value = savedMeeting;
   if (savedServer) elements.server.value = savedServer;
   if (savedTranslationEnabled !== null) elements.translationEnabled.checked = savedTranslationEnabled === "true";
+  if (savedTranslationTarget && elements.translationTarget) elements.translationTarget.value = savedTranslationTarget;
   if (savedDiarizationEnabled !== null) elements.diarizationEnabled.checked = savedDiarizationEnabled === "true";
   elements.displayMode.value = displayMode;
   elements.singleLanguage.value = singleLanguageMode;
@@ -400,6 +403,7 @@ function adminClientsUrl() {
 function defaultLanguageForBackend(backend) {
   const value = String(backend || "").toLowerCase();
   if (value === "funasr") return "zh";
+  if (value === "faster_whisper" || value === "whisper") return "en";
   return "en";
 }
 
@@ -1639,7 +1643,11 @@ function sendConfig(event) {
   }
 
   uid = createUid();
-  const selectedLanguage = elements.language.value || null;
+  let selectedLanguage = elements.language.value || defaultLanguageForBackend(DEFAULT_BACKEND);
+  if (!["zh", "en"].includes(selectedLanguage)) {
+    selectedLanguage = defaultLanguageForBackend(DEFAULT_BACKEND);
+  }
+  const selectedTranslationTarget = elements.translationTarget?.value || "auto";
   const meetingName = elements.meetingName.value.trim();
   const payload = {
     uid,
@@ -1674,7 +1682,7 @@ function sendConfig(event) {
     max_incomplete_segment_seconds: 0.0,
     enable_diarization: elements.diarizationEnabled.checked,
     enable_translation: elements.translationEnabled.checked,
-    target_language: "auto",
+    target_language: selectedTranslationTarget,
     translation_provider: "helsinki_zh_en",
     zh_en_model_path: "model/opus-mt-zh-en",
     en_zh_model_path: "model/opus-mt-en-zh",
@@ -1908,6 +1916,11 @@ elements.translationEnabled.addEventListener("change", () => {
   updateTranslationControls();
   renderTranscriptViews();
 });
+if (elements.translationTarget) {
+  elements.translationTarget.addEventListener("change", () => {
+    window.localStorage.setItem("whisperlive_translation_target", elements.translationTarget.value || "auto");
+  });
+}
 elements.diarizationEnabled.addEventListener("change", () => {
   window.localStorage.setItem("whisperlive_diarization_enabled", String(elements.diarizationEnabled.checked));
 });

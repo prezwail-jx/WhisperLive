@@ -7,7 +7,7 @@
 - 不要回滚用户已有改动；如果工作区已有无关修改，保持原样。
 - 不要随意重构无关模块，改动应聚焦当前需求。
 - 不要提交或新增模型、日志、音频、压缩包、镜像包等大文件。
-- 测试时不能自己拉起服务或安装依赖，除非用户明确要求；优先使用语法检查、静态检查等现有环境可执行的验证。
+- 测试时不能自己拉起服务或安装依赖，除非用户明确要求；所有 Python/Node 相关测试和语法检查优先在已运行的 `whisperlive-server` 容器中通过 `docker exec` 执行，不在宿主机下载或安装任何依赖。
 
 ## 项目结构与职责
 
@@ -51,7 +51,7 @@
 
 ## 近期已知环境与排查捷径
 
-- 当前宿主机运行 FunASR/翻译单元测试时可能缺少 `numpy`、`torch`。若导入阶段明确报缺依赖，记录一次后停止，不重复运行、不安装依赖；改做 `py_compile`、`node --check` 和 `git diff --check`。
+- 当前宿主机运行 FunASR/翻译单元测试时可能缺少 `numpy`、`torch`。不要在宿主机补依赖；需要运行 Python/Node 测试、`py_compile` 或 `node --check` 时，优先使用 `docker exec whisperlive-server ...` 在容器内执行。
 - 若工具报 `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`，这是执行沙箱故障，不是项目错误。普通命令和 `apply_patch` 各确认一次即可，随后使用已授权命令继续；写文件只能做精确局部替换，并立即检查 `git diff`。
 - 查看容器日志时不要直接输出大段 `docker logs`。优先使用时间范围、关键词和 `tail`，例如筛选 `ERROR`、`FINAL_REFINE`、`SEGMENT_COMPLETE`、`CUDA out of memory`。
 - `whisperlive-server` 容器的 PID 1 可能只是 `bash`，`docker restart` 后不会自动拉起 ASR。除非用户明确要求，不要自行重启；确需重启时先确认无活动客户端，并在重启后检查 Python 进程和 Admin API。
@@ -62,17 +62,17 @@
 
 - 验证范围按改动风险选择，不要每次固定运行全部检查或全量测试。
 - 只修改文档、注释、示例、`.gitignore` 时，仅运行 `git diff --check`，不运行项目测试。
-- 修改单个 Python 模块时，只对改动文件运行 `py_compile`，并最多运行一个直接相关的测试模块。
+- 修改单个 Python 模块时，只对改动文件运行容器内 `py_compile`，并最多运行一个直接相关的测试模块。
 - 修改启动参数或服务入口时，才同步检查 `run_server.py` 和 `whisper_live/server.py`：
 
 ```bash
-python3 -m py_compile whisper_live/server.py run_server.py
+docker exec whisperlive-server python3 -m py_compile whisper_live/server.py run_server.py
 ```
 
 - 修改前端 JavaScript 时只检查实际改动文件：
 
 ```bash
-node --check web/app.js
+docker exec whisperlive-server node --check web/app.js
 ```
 
 - 前端静态改动不自行启动浏览器、Nginx、ASR 或 Admin API；只有用户明确要求联调时才运行服务级检查。
@@ -89,8 +89,8 @@ node --check web/app.js
 ### 失败停止规则
 
 - 同一个验证命令只尝试一次。明确因缺少依赖、GPU、容器、系统工具或版本冲突失败后立即停止。
-- 不为通过测试临时安装、升级、降级或卸载依赖，不启动临时容器，不注入 stub，除非用户明确要求处理环境。
-- 若缺少 `fastapi`、`torch`、`pytest`、`numpy` 等依赖，记录第一个明确原因后改做现有环境可执行的静态检查。
+- 不为通过测试临时安装、升级、降级或卸载依赖，不在宿主机下载依赖，不启动临时容器，不注入 stub，除非用户明确要求处理环境。
+- 若容器内仍缺少 `fastapi`、`torch`、`pytest`、`numpy` 等依赖，记录第一个明确原因后停止；不要回退到宿主机安装依赖。
 - 遇到已知 `bwrap` 故障，普通通道确认一次后直接使用授权通道；不要并行重复执行一组必然失败的命令。
 
 ### 结果输出

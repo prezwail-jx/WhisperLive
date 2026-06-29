@@ -48,6 +48,7 @@ mic_test.wav
 mic_test_resampled.wav
 *.mp4
 *.wav
+test_audio/
 
 # Local model, cache, and vendored source directories
 models/

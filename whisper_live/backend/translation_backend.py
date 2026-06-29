@@ -548,8 +548,22 @@ class ServeClientTranslation(ServeClientBase):
         )
         return translated_text, source_language, "zh"
 
+    @staticmethod
+    def infer_text_language(text):
+        text = str(text or "")
+        cjk_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
+        latin_count = len(re.findall(r"[A-Za-z]", text))
+        if cjk_count > 0:
+            return "zh"
+        if latin_count >= 4:
+            return "en"
+        return None
+
     def get_segment_source_language(self, segment):
-        return HelsinkiZhEnTranslator.normalize_language(segment.get("language"))
+        source_language = HelsinkiZhEnTranslator.normalize_language(segment.get("language"))
+        if source_language in ("zh", "en"):
+            return source_language
+        return self.infer_text_language(segment.get("text"))
 
     def get_buffer_source_language(self):
         for segment in self.translation_buffer:
@@ -623,6 +637,8 @@ class ServeClientTranslation(ServeClientBase):
             self.flush_translation_buffer(force=True)
 
         segment = segment.copy()
+        if incoming_language:
+            segment["language"] = incoming_language
         previous_text = self._previous_source_text_for_dedupe()
         if previous_text and incoming_language == "en":
             segment["text"] = self._dedupe_leading_word_overlap(previous_text, segment.get("text", ""))

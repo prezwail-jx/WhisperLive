@@ -630,6 +630,83 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         )
         self.assertNotIn("utterance_id", segment)
 
+    def test_auto_language_chinese_segment_is_inferred_for_auto_translation(self):
+        client = self.make_client()
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "我们讨论预算。",
+            "completed": True,
+            "language": "auto",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "translated:我们讨论预算。")
+        self.assertEqual(segment["source_language"], "zh")
+        self.assertEqual(segment["target_language"], "en")
+        client.translate_text.assert_called_once_with("我们讨论预算。", "zh")
+
+    def test_auto_language_chinese_segment_with_english_terms_stays_chinese(self):
+        client = self.make_client()
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "我们 review revenue forecast。",
+            "completed": True,
+            "language": "auto",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "translated:我们 review revenue forecast。")
+        self.assertEqual(segment["source_language"], "zh")
+        self.assertEqual(segment["target_language"], "en")
+        client.translate_text.assert_called_once_with("我们 review revenue forecast。", "zh")
+
+    def test_auto_language_english_segment_is_inferred_for_auto_translation(self):
+        client = self.make_client()
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "The next topic is revenue.",
+            "completed": True,
+            "language": "auto",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "translated:The next topic is revenue.")
+        self.assertEqual(segment["source_language"], "en")
+        self.assertEqual(segment["target_language"], "zh")
+        client.translate_text.assert_called_once_with("The next topic is revenue.", "en")
+
+    def test_auto_language_change_flushes_translation_buffer(self):
+        client = self.make_client(translation_min_chars=100, translation_max_chars=100)
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "我们讨论预算",
+            "completed": True,
+            "language": "auto",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "0.500",
+            "end": "1.000",
+            "text": "The next topic is revenue.",
+            "completed": True,
+            "language": "auto",
+        })
+        client.flush_translation_buffer(force=True)
+
+        self.assertEqual(client.translate_text.call_args_list[0].args, ("我们讨论预算", "zh"))
+        self.assertEqual(client.translate_text.call_args_list[1].args, ("The next topic is revenue.", "en"))
+        self.assertEqual(client.translated_segments[0]["source_language"], "zh")
+        self.assertEqual(client.translated_segments[1]["source_language"], "en")
+
     def test_english_segments_are_joined_with_spaces(self):
         client = self.make_client(translation_max_chars=10)
         client.add_segment_to_translation_buffer({
