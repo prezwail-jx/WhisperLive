@@ -72,6 +72,13 @@ TRANSLATION_MODELS = {
         "modelscope": None,
         "huggingface": "Helsinki-NLP/opus-mt-en-zh",
     },
+    "nllb-200-distilled-600M": {
+        "local_dir": "NLLB-200-600M",
+        "modelscope": None,
+        "huggingface": "facebook/nllb-200-distilled-600M",
+        "required": ("config.json", "tokenizer_config.json"),
+        "required_any": ("pytorch_model.bin", "model.safetensors"),
+    },
 }
 
 ASR_REQUIRED = ("config.json",)
@@ -90,15 +97,20 @@ def load_manifest_override(path):
             target[name].update(values)
 
 
-def validate_model(path, model_type):
+def validate_model(path, model_type, spec=None):
     path = Path(path)
     if not path.is_dir():
         return False
+    spec = spec or {}
     if model_type == "asr":
-        return all((path / item).exists() for item in ASR_REQUIRED) and any(
-            (path / item).exists() for item in ASR_REQUIRED_ANY
-        )
-    return all((path / item).exists() for item in TRANSLATION_REQUIRED)
+        required = spec.get("required", ASR_REQUIRED)
+        required_any = spec.get("required_any", ASR_REQUIRED_ANY)
+    else:
+        required = spec.get("required", TRANSLATION_REQUIRED)
+        required_any = spec.get("required_any", ())
+    if not all((path / item).exists() for item in required):
+        return False
+    return not required_any or any((path / item).exists() for item in required_any)
 
 
 def ensure_clean_target(path, force):
@@ -133,7 +145,7 @@ def download_from_huggingface(repo_id, target_dir):
 
 def download_one(name, spec, model_root, model_type, source, force):
     target_dir = model_root / spec["local_dir"]
-    if validate_model(target_dir, model_type) and not force:
+    if validate_model(target_dir, model_type, spec) and not force:
         print(f"[skip] {name}: already exists at {target_dir}")
         return
 
@@ -152,7 +164,7 @@ def download_one(name, spec, model_root, model_type, source, force):
             else:
                 raise ValueError(f"Unsupported source: {selected_source}")
 
-            if validate_model(target_dir, model_type):
+            if validate_model(target_dir, model_type, spec):
                 print(f"[ready] {name}: {target_dir}")
                 return
             raise RuntimeError(f"Downloaded files do not look like a valid {model_type} model")

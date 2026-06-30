@@ -74,7 +74,8 @@
               <label>会议名称<input id="meetingNameInput" type="text" maxlength="80" placeholder="如 2026产品会" autocomplete="off"></label>
               <label>WebSocket 地址<input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off"></label>
               <label>源语言<select id="languageInput"><option value="zh">中文</option><option value="en">English</option></select></label>
-              <label>翻译目标<select id="translationTargetInput"><option value="auto">自动互译</option><option value="zh">中文</option><option value="en">English</option></select></label>
+              <label>翻译模型<select id="translationProviderInput"><option value="helsinki_zh_en">Helsinki 轻量实时</option><option value="nllb_200_600m">NLLB-200 600M 高质量</option></select></label>
+              <p id="translationModeHint" class="tool-status">翻译方向按源语言自动切换：中文 ↔ English</p>
               <div class="compact-toggle-row">
                 <label class="toggle-field compact-toggle"><span><strong>启用翻译</strong><small>仅显示 / 记录原文</small></span><input id="translationEnabledInput" type="checkbox" checked><span class="toggle" aria-hidden="true"></span></label>
                 <label class="toggle-field compact-toggle"><span><strong>说话人识别</strong><small>写入日志与总结</small></span><input id="diarizationEnabledInput" type="checkbox"><span class="toggle" aria-hidden="true"></span></label>
@@ -216,6 +217,6 @@
     <script src="./reconnect-controller.js?v=reconnect-1"></script>
     <script src="./ws-client.js?v=reconnect-1"></script>
     <script src="./audio-capture.js?v=reconnect-1"></script>
-    <script src="./app.js?v=speaker-layout-1"></script>
+    <script src="./app.js?v=nllb-path-1"></script>
   </body>
 </html>

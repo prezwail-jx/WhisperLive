@@ -557,6 +557,7 @@ class TranscriptionServer:
                 zh_en_model_path=options.get("zh_en_model_path", "model/opus-mt-zh-en"),
                 translation_device=translation_device,
                 en_zh_model_path=options.get("en_zh_model_path", "model/opus-mt-en-zh"),
+                nllb_model_path=options.get("nllb_model_path", "model/NLLB-200-600M"),
                 translation_glossary=options.get("translation_glossary"),
             )
             

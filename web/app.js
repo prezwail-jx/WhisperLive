@@ -8,7 +8,8 @@ const elements = {
   clearHotwordFile: document.getElementById("clearHotwordFileButton"),
   hotwordStatus: document.getElementById("hotwordStatus"),
   language: document.getElementById("languageInput"),
-  translationTarget: document.getElementById("translationTargetInput"),
+  translationModeHint: document.getElementById("translationModeHint"),
+  translationProvider: document.getElementById("translationProviderInput"),
   start: document.getElementById("startButton"),
   stop: document.getElementById("stopButton"),
   continueMeeting: document.getElementById("continueButton"),
@@ -93,6 +94,7 @@ const translatedSourceIds = new Set();
 let currentSessionId = null;
 let currentSessionStartedAt = null;
 let currentConfig = null;
+let currentServerBackend = null;
 let hasStoppedCurrentSession = false;
 let summaryGenerated = false;
 let summaryGenerating = false;
@@ -238,14 +240,14 @@ function initializeDefaults() {
   const savedMeeting = window.localStorage.getItem("whisperlive_meeting_name");
   const savedServer = window.localStorage.getItem("whisperlive_server_url");
   const savedTranslationEnabled = window.localStorage.getItem("whisperlive_translation_enabled");
-  const savedTranslationTarget = window.localStorage.getItem("whisperlive_translation_target");
+  const savedTranslationProvider = window.localStorage.getItem("whisperlive_translation_provider");
   const savedDiarizationEnabled = window.localStorage.getItem("whisperlive_diarization_enabled");
   displayMode = window.localStorage.getItem("whisperlive_display_mode") || "split";
   singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "source";
   if (savedMeeting && !elements.meetingName.value) elements.meetingName.value = savedMeeting;
   if (savedServer) elements.server.value = savedServer;
   if (savedTranslationEnabled !== null) elements.translationEnabled.checked = savedTranslationEnabled === "true";
-  if (savedTranslationTarget && elements.translationTarget) elements.translationTarget.value = savedTranslationTarget;
+  if (savedTranslationProvider && elements.translationProvider) elements.translationProvider.value = savedTranslationProvider;
   if (savedDiarizationEnabled !== null) elements.diarizationEnabled.checked = savedDiarizationEnabled === "true";
   elements.displayMode.value = displayMode;
   elements.singleLanguage.value = singleLanguageMode;
@@ -310,7 +312,11 @@ function updateMeetingTitle() {
 
 function updateDrawerTranslationStatus() {
   if (!elements.drawerTranslationStatus || !elements.translationEnabled) return;
-  elements.drawerTranslationStatus.textContent = elements.translationEnabled.checked ? "已启用" : "已关闭";
+  if (!elements.translationEnabled.checked) {
+    elements.drawerTranslationStatus.textContent = "已关闭";
+    return;
+  }
+  elements.drawerTranslationStatus.textContent = translationModeLabel();
 }
 
 function setToolStatus(text, state = "") {
@@ -374,7 +380,13 @@ function openSummaryDrawer() {
   if (elements.summaryQuick) elements.summaryQuick.setAttribute("aria-expanded", "true");
 }
 
-function updateTranslationControls() {
+function updateTranslationControls(forceConnectionLocked = false) {
+  if (elements.language) {
+    elements.language.disabled = Boolean(forceConnectionLocked);
+  }
+  if (elements.translationModeHint) {
+    elements.translationModeHint.textContent = `当前翻译模式：${translationModeLabel()}`;
+  }
   updateDrawerTranslationStatus();
 }
 
@@ -400,15 +412,39 @@ function adminClientsUrl() {
   return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/clients`;
 }
 
+function normalizeBackend(value) {
+  const backend = String(value || "").toLowerCase();
+  if (backend.includes("funasr")) return "funasr";
+  if (backend.includes("whisper")) return "faster_whisper";
+  return DEFAULT_BACKEND;
+}
+
+function isWhisperBackend(backend) {
+  return normalizeBackend(backend) === "faster_whisper";
+}
+
 function defaultLanguageForBackend(backend) {
-  const value = String(backend || "").toLowerCase();
-  if (value === "funasr") return "zh";
-  if (value === "faster_whisper" || value === "whisper") return "en";
-  return "en";
+  return normalizeBackend(backend) === "funasr" ? "zh" : "en";
+}
+
+function lockedTranslationTargetForBackend(backend, language) {
+  return normalizeLanguage(language) === "en" ? "zh" : "en";
+}
+
+function translationModeLabel(backend = currentServerBackend || DEFAULT_BACKEND, language = elements.language?.value) {
+  const source = normalizeLanguage(language) === "zh" ? "中文" : "English";
+  const target = lockedTranslationTargetForBackend(backend, language) === "zh" ? "中文" : "English";
+  return `${source} → ${target}`;
+}
+
+function applyBackendLanguage(backend) {
+  currentServerBackend = normalizeBackend(backend);
+  elements.language.value = defaultLanguageForBackend(currentServerBackend);
+  updateTranslationControls();
 }
 
 function applyBackendLanguageFallback() {
-  elements.language.value = defaultLanguageForBackend(DEFAULT_BACKEND);
+  applyBackendLanguage(DEFAULT_BACKEND);
 }
 
 async function applyBackendLanguageDefault() {
@@ -416,7 +452,7 @@ async function applyBackendLanguageDefault() {
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const data = await response.json();
   const backend = data.server_backend || (data.clients && data.clients[0] && data.clients[0].backend) || DEFAULT_BACKEND;
-  elements.language.value = defaultLanguageForBackend(backend);
+  applyBackendLanguage(backend);
 }
 
 function meetingLogApiUrl() {
@@ -1643,11 +1679,12 @@ function sendConfig(event) {
   }
 
   uid = createUid();
-  let selectedLanguage = elements.language.value || defaultLanguageForBackend(DEFAULT_BACKEND);
+  const backend = currentServerBackend || DEFAULT_BACKEND;
+  let selectedLanguage = elements.language.value || defaultLanguageForBackend(backend);
   if (!["zh", "en"].includes(selectedLanguage)) {
-    selectedLanguage = defaultLanguageForBackend(DEFAULT_BACKEND);
+    selectedLanguage = defaultLanguageForBackend(backend);
   }
-  const selectedTranslationTarget = elements.translationTarget?.value || "auto";
+  const selectedTranslationTarget = lockedTranslationTargetForBackend(backend, selectedLanguage);
   const meetingName = elements.meetingName.value.trim();
   const payload = {
     uid,
@@ -1664,28 +1701,29 @@ function sendConfig(event) {
     hotwords_locked: true,
     translation_glossary: lockedHotwords.translationGlossary || {},
     translation_glossary_count: lockedHotwords.translationCount || 0,
-    backend: DEFAULT_BACKEND,
+    backend: currentServerBackend || DEFAULT_BACKEND,
     language: selectedLanguage,
     task: "transcribe",
     model: DEFAULT_MODEL,
     use_vad: true,
     vad_parameters: {
       threshold: 0.5,
-      min_silence_duration_ms: 600,
+      min_silence_duration_ms: 900,
       speech_pad_ms: 300,
     },
     send_last_n_segments: DEFAULT_DISPLAY_SEGMENTS,
     no_speech_thresh: 0.45,
     clip_audio: false,
-    same_output_threshold: 5,
+    same_output_threshold: 7,
     min_segment_rms: 0.002,
-    max_incomplete_segment_seconds: 0.0,
+    max_incomplete_segment_seconds: 8.0,
     enable_diarization: elements.diarizationEnabled.checked,
     enable_translation: elements.translationEnabled.checked,
     target_language: selectedTranslationTarget,
-    translation_provider: "helsinki_zh_en",
+    translation_provider: elements.translationProvider?.value || "helsinki_zh_en",
     zh_en_model_path: "model/opus-mt-zh-en",
     en_zh_model_path: "model/opus-mt-en-zh",
+    nllb_model_path: "model/NLLB-200-600M",
   };
   currentConfig = payload;
   targetSocket.send(JSON.stringify(payload));
@@ -1701,11 +1739,12 @@ function setConnectionInputsDisabled(disabled) {
     elements.language,
     elements.meetingName,
     elements.translationEnabled,
+    elements.translationProvider,
     elements.diarizationEnabled,
     elements.hotwordFile,
     elements.clearHotwordFile,
   ].filter(Boolean).forEach((item) => { item.disabled = disabled; });
-  updateTranslationControls();
+  updateTranslationControls(disabled);
 }
 
 function openMeetingSocket(resume = false) {
@@ -1916,11 +1955,15 @@ elements.translationEnabled.addEventListener("change", () => {
   updateTranslationControls();
   renderTranscriptViews();
 });
-if (elements.translationTarget) {
-  elements.translationTarget.addEventListener("change", () => {
-    window.localStorage.setItem("whisperlive_translation_target", elements.translationTarget.value || "auto");
+if (elements.translationProvider) {
+  elements.translationProvider.addEventListener("change", () => {
+    window.localStorage.setItem("whisperlive_translation_provider", elements.translationProvider.value || "helsinki_zh_en");
   });
 }
+elements.language.addEventListener("change", () => {
+  updateTranslationControls();
+  renderTranscriptViews();
+});
 elements.diarizationEnabled.addEventListener("change", () => {
   window.localStorage.setItem("whisperlive_diarization_enabled", String(elements.diarizationEnabled.checked));
 });

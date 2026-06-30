@@ -300,6 +300,94 @@ class HelsinkiZhEnTranslator:
         self.tokenizers.clear()
 
 
+class NLLBTranslator(HelsinkiZhEnTranslator):
+    """Local zh<->en translator backed by NLLB-200 distilled 600M."""
+
+    LANGUAGE_CODES = {
+        "zh": "zho_Hans",
+        "en": "eng_Latn",
+    }
+
+    def __init__(self, model_path="model/NLLB-200-600M", device="cpu"):
+        self.model_path = model_path
+        self.device = self.resolve_device(device)
+        self.tokenizer = None
+        self.model = None
+
+    def load(self):
+        logging.info("Loading NLLB translation model: %s on device: %s", self.model_path, self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_path, local_files_only=True).to(self.device)
+        logging.info("NLLB translation model loaded successfully")
+
+    def resolve_direction(self, source_language: Optional[str], target_language: str):
+        source_language = self.normalize_language(source_language)
+        target_language = self.normalize_language(target_language) or "auto"
+
+        if target_language not in self.SUPPORTED_TARGETS:
+            logging.warning("Unsupported target language for NLLB translator: %s", target_language)
+            return None
+        if source_language == "zh" and target_language in ("auto", "en"):
+            return "zh", "en"
+        if source_language == "en" and target_language in ("auto", "zh"):
+            return "en", "zh"
+        if source_language in ("zh", "en") and target_language == source_language:
+            return None
+
+        logging.warning("Unsupported source language for NLLB translator: %s", source_language)
+        return None
+
+    def language_token_id(self, language_code: str) -> int:
+        if hasattr(self.tokenizer, "lang_code_to_id"):
+            token_id = self.tokenizer.lang_code_to_id.get(language_code)
+        else:
+            token_id = self.tokenizer.convert_tokens_to_ids(language_code)
+        if token_id is None or token_id == self.tokenizer.unk_token_id:
+            raise ValueError(f"NLLB language token not found: {language_code}")
+        return token_id
+
+    def translate(self, text: str, source_language: Optional[str], target_language: str):
+        direction = self.resolve_direction(source_language, target_language)
+        if direction is None:
+            return text, self.normalize_language(source_language), self.normalize_language(target_language)
+
+        source_language, resolved_target_language = direction
+        source_code = self.LANGUAGE_CODES[source_language]
+        target_code = self.LANGUAGE_CODES[resolved_target_language]
+
+        protected_terms = {}
+        text_to_translate = text
+        if source_language == "zh":
+            text_to_translate, protected_terms = self.protect_english_terms_with_natural_placeholders(text)
+            if protected_terms:
+                logging.info(
+                    "[NLLB_MIXED_LANG_PROTECT] direction=zh-en natural_terms=%d text_len=%d",
+                    len(protected_terms),
+                    len(text),
+                )
+
+        self.tokenizer.src_lang = source_code
+        encoded_input = self.tokenizer(text_to_translate, return_tensors="pt", truncation=True).to(self.device)
+        forced_bos_token_id = self.language_token_id(target_code)
+        with torch.no_grad():
+            generated_tokens = self.model.generate(
+                **encoded_input,
+                forced_bos_token_id=forced_bos_token_id,
+                max_new_tokens=256,
+                num_beams=1,
+            )
+        output = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+        translated_text = output[0] if output else text
+        if protected_terms:
+            translated_text = self.restore_natural_term_placeholders(translated_text, protected_terms)
+            translated_text = self.restore_english_terms(translated_text, protected_terms)
+        return translated_text, source_language, resolved_target_language
+
+    def cleanup(self):
+        self.model = None
+        self.tokenizer = None
+
+
 class ServeClientTranslation(ServeClientBase):
     """
     Handles translation of completed transcription segments in a separate thread.
@@ -330,6 +418,7 @@ class ServeClientTranslation(ServeClientBase):
         model_name="helsinki_zh_en",
         zh_en_model_path="model/opus-mt-zh-en",
         en_zh_model_path="model/opus-mt-en-zh",
+        nllb_model_path="model/NLLB-200-600M",
         translation_device="cpu",
         translation_min_chars=12,
         translation_max_chars=130,
@@ -353,6 +442,7 @@ class ServeClientTranslation(ServeClientBase):
         self.model_name = model_name
         self.zh_en_model_path = zh_en_model_path
         self.en_zh_model_path = en_zh_model_path
+        self.nllb_model_path = nllb_model_path
         self.translation_device = HelsinkiZhEnTranslator.normalize_device_name(translation_device)
         self.translation_min_chars = translation_min_chars
         self.translation_max_chars = translation_max_chars
@@ -374,22 +464,29 @@ class ServeClientTranslation(ServeClientBase):
             self.model_name,
             self.zh_en_model_path,
             self.en_zh_model_path,
+            self.nllb_model_path,
             self.translation_device,
         )
 
     def load_translation_model(self):
         """Load the translation model and tokenizer."""
         try:
-            if self.model_name != "helsinki_zh_en":
-                raise ValueError(f"Unsupported translation model provider: {self.model_name}")
             cache_key = self.get_translation_cache_key()
             with self._TRANSLATOR_CACHE_LOCK:
                 if cache_key not in self._TRANSLATOR_CACHE:
-                    translator = HelsinkiZhEnTranslator(
-                        zh_en_model_path=self.zh_en_model_path,
-                        en_zh_model_path=self.en_zh_model_path,
-                        device=self.translation_device,
-                    )
+                    if self.model_name == "helsinki_zh_en":
+                        translator = HelsinkiZhEnTranslator(
+                            zh_en_model_path=self.zh_en_model_path,
+                            en_zh_model_path=self.en_zh_model_path,
+                            device=self.translation_device,
+                        )
+                    elif self.model_name in ("nllb_200_600m", "nllb"):
+                        translator = NLLBTranslator(
+                            model_path=self.nllb_model_path,
+                            device=self.translation_device,
+                        )
+                    else:
+                        raise ValueError(f"Unsupported translation model provider: {self.model_name}")
                     translator.load()
                     self._TRANSLATOR_CACHE[cache_key] = translator
                     self._TRANSLATOR_INFERENCE_LOCKS[cache_key] = threading.Lock()
@@ -397,7 +494,11 @@ class ServeClientTranslation(ServeClientBase):
                 self.translator = self._TRANSLATOR_CACHE[cache_key]
                 self.translator_lock = self._TRANSLATOR_INFERENCE_LOCKS[cache_key]
             self.model_loaded = True
-            logging.info(f"Translation model loaded successfully. Target language: {self.target_language}")
+            logging.info(
+                "Translation model loaded successfully. Provider: %s Target language: %s",
+                self.model_name,
+                self.target_language,
+            )
         except Exception as e:
             logging.error(f"Failed to load translation model: {e}")
             self.translator = None
