@@ -407,6 +407,15 @@ class ServeClientTranslation(ServeClientBase):
         "mm": "嗯",
         "ah": "啊",
     }
+    _FIXED_SHORT_ZH_TRANSLATIONS = {
+        "大家好": "Hello everyone.",
+        "你好": "Hello.",
+        "对": "Yes.",
+        "好的": "Okay.",
+        "谢谢": "Thank you.",
+    }
+    _SHORT_ZH_BUFFER_CJK_CHARS = 5
+    _SHORT_ZH_BUFFER_WAIT_SECONDS = 3.5
 
     def __init__(
         self,
@@ -425,6 +434,8 @@ class ServeClientTranslation(ServeClientBase):
         translation_max_wait_seconds=2.0,
         translation_sentence_endings="。！？.!?",
         translation_glossary=None,
+        translation_terms=None,
+        translation_mode="standard",
     ):
         """
         Initialize the translation client.
@@ -449,6 +460,8 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_max_wait_seconds = translation_max_wait_seconds
         self.translation_sentence_endings = translation_sentence_endings
         self.translation_glossary = self.normalize_translation_glossary(translation_glossary)
+        self.translation_terms = list(translation_terms or [])
+        self.translation_mode = str(translation_mode or "standard")
         self.translation_buffer = []
         self.translation_buffer_started_at = None
         self.translated_segments = []
@@ -654,17 +667,45 @@ class ServeClientTranslation(ServeClientBase):
         text = str(text or "")
         cjk_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
         latin_count = len(re.findall(r"[A-Za-z]", text))
+        if latin_count >= 4 and cjk_count == 0:
+            return "en"
         if cjk_count > 0:
             return "zh"
         if latin_count >= 4:
             return "en"
         return None
 
+    @staticmethod
+    def _count_cjk(text):
+        return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", str(text or "")))
+
+    @staticmethod
+    def _normalized_short_text(text):
+        return re.sub(r"^[\W_]+|[\W_]+$", "", str(text or "").strip())
+
+    def should_infer_segment_language(self):
+        return self.translation_mode == "mixed_interpretation"
+
     def get_segment_source_language(self, segment):
+        if self.should_infer_segment_language():
+            inferred_language = self.infer_text_language(segment.get("text"))
+            if inferred_language:
+                return inferred_language
         source_language = HelsinkiZhEnTranslator.normalize_language(segment.get("language"))
         if source_language in ("zh", "en"):
             return source_language
         return self.infer_text_language(segment.get("text"))
+
+    def translate_fixed_short_phrase(self, text: str, source_language: Optional[str]):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        if source_language != "zh" or self._resolved_target_language(source_language) != "en":
+            return None
+        normalized_text = self._normalized_short_text(text)
+        translated = self._FIXED_SHORT_ZH_TRANSLATIONS.get(normalized_text)
+        if translated is None:
+            return None
+        logging.info("[TRANSLATION_FIXED_SHORT] source=%r translated=%r", text, translated)
+        return translated, "zh", "en"
 
     def get_buffer_source_language(self):
         for segment in self.translation_buffer:
@@ -690,13 +731,24 @@ class ServeClientTranslation(ServeClientBase):
         text = self.join_translation_buffer_text().strip()
         if not text:
             return False
+        elapsed = 0.0
+        if self.translation_buffer_started_at is not None:
+            elapsed = time.monotonic() - self.translation_buffer_started_at
+        source_language = self.get_buffer_source_language()
+        if (
+            self.translation_mode == "mixed_interpretation"
+            and source_language == "zh"
+            and self._count_cjk(text) < self._SHORT_ZH_BUFFER_CJK_CHARS
+            and elapsed < self._SHORT_ZH_BUFFER_WAIT_SECONDS
+        ):
+            return False
         if text.endswith(tuple(self.translation_sentence_endings)):
             return True
         if len(text) >= self.translation_max_chars:
             return True
         if (
             self.translation_buffer_started_at is not None
-            and time.monotonic() - self.translation_buffer_started_at >= self.translation_max_wait_seconds
+            and elapsed >= self.translation_max_wait_seconds
         ):
             return True
         return False
@@ -763,7 +815,9 @@ class ServeClientTranslation(ServeClientBase):
         if not original_text:
             return
 
-        translation_result = self.translate_with_glossary(original_text, source_language)
+        translation_result = self.translate_fixed_short_phrase(original_text, source_language)
+        if translation_result is None:
+            translation_result = self.translate_with_glossary(original_text, source_language)
         if translation_result is None:
             translation_result = self.translate_standalone_interjection(
                 original_text,
@@ -780,6 +834,7 @@ class ServeClientTranslation(ServeClientBase):
             "end": buffered_segments[-1]["end"],
             "text": translated_text,
             "completed": True,
+            "source_text": original_text,
             "source_language": source_language,
             "target_language": target_language,
             "translation_model": self.model_name,

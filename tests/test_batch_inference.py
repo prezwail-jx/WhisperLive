@@ -30,7 +30,12 @@ class TestBatchInferenceWorker(unittest.TestCase):
         fake_info = MagicMock()
         self.mock_transcriber.transcribe.return_value = ([fake_segment], fake_info)
 
-        req = BatchRequest(audio=self._make_audio(), language="en", use_vad=False)
+        req = BatchRequest(
+            audio=self._make_audio(),
+            language="en",
+            use_vad=False,
+            hotwords="FunASR WhisperLive",
+        )
         self.worker.submit(req)
         req.future.wait(timeout=5)
 
@@ -39,6 +44,10 @@ class TestBatchInferenceWorker(unittest.TestCase):
         self.assertEqual(req.result, [fake_segment])
         self.assertEqual(req.info, fake_info)
         self.mock_transcriber.transcribe.assert_called_once()
+        self.assertEqual(
+            self.mock_transcriber.transcribe.call_args.kwargs.get("hotwords"),
+            "FunASR WhisperLive",
+        )
 
     @mock.patch('whisper_live.batch_inference.get_suppressed_tokens', return_value=[-1])
     @mock.patch('whisper_live.batch_inference.Tokenizer')
@@ -78,9 +87,15 @@ class TestBatchInferenceWorker(unittest.TestCase):
             None,
         )
 
+        hotwords = ["FunASR", "WhisperLive", "WebSocket"]
         requests = [
-            BatchRequest(audio=self._make_audio(), language="en", use_vad=False)
-            for _ in range(3)
+            BatchRequest(
+                audio=self._make_audio(),
+                language="en",
+                use_vad=False,
+                hotwords=term,
+            )
+            for term in hotwords
         ]
         for req in requests:
             self.worker.submit(req)
@@ -95,6 +110,10 @@ class TestBatchInferenceWorker(unittest.TestCase):
         # Verify the batched encode path was used (not transcribe)
         self.mock_transcriber.encode.assert_called()
         self.mock_transcriber.transcribe.assert_not_called()
+        self.assertEqual(
+            [call.kwargs.get("hotwords") for call in self.mock_transcriber.get_prompt.call_args_list],
+            hotwords,
+        )
 
     def test_error_propagation(self):
         """Transcriber errors should propagate to the request without crashing the worker."""

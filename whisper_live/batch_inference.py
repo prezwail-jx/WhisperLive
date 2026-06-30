@@ -61,6 +61,7 @@ class BatchRequest:
         language: ISO language code or None for auto-detection.
         task: ``"transcribe"`` or ``"translate"``.
         initial_prompt: Optional prompt for Whisper conditioning.
+        hotwords: Optional prompt terms for Whisper hotword conditioning.
         use_vad: Whether to apply Voice Activity Detection.
         vad_parameters: Parameters forwarded to ``VadOptions``.
         word_timestamps: Whether to extract word-level timestamps.
@@ -73,6 +74,7 @@ class BatchRequest:
     language: Optional[str] = None
     task: str = "transcribe"
     initial_prompt: Optional[str] = None
+    hotwords: Optional[str] = None
     use_vad: bool = True
     vad_parameters: Optional[Dict] = None
     word_timestamps: bool = False
@@ -211,6 +213,7 @@ class BatchInferenceWorker:
                 language=req.language,
                 task=req.task,
                 initial_prompt=req.initial_prompt,
+                hotwords=req.hotwords,
                 vad_filter=req.use_vad,
                 vad_parameters=req.vad_parameters if req.use_vad else None,
                 word_timestamps=req.word_timestamps,
@@ -306,6 +309,7 @@ class BatchInferenceWorker:
                     tokenizer,
                     previous_tokens=previous_tokens,
                     without_timestamps=False,
+                    hotwords=req.hotwords,
                 )
                 tokenizers_list.append(tokenizer)
                 prompts.append(prompt)

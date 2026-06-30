@@ -10,6 +10,9 @@ const elements = {
   language: document.getElementById("languageInput"),
   translationModeHint: document.getElementById("translationModeHint"),
   translationProvider: document.getElementById("translationProviderInput"),
+  faceToFaceEnabled: document.getElementById("faceToFaceEnabledInput"),
+  faceToFaceMode: document.getElementById("faceToFaceModeInput"),
+  translationTarget: document.getElementById("translationTargetInput"),
   start: document.getElementById("startButton"),
   stop: document.getElementById("stopButton"),
   continueMeeting: document.getElementById("continueButton"),
@@ -241,6 +244,9 @@ function initializeDefaults() {
   const savedServer = window.localStorage.getItem("whisperlive_server_url");
   const savedTranslationEnabled = window.localStorage.getItem("whisperlive_translation_enabled");
   const savedTranslationProvider = window.localStorage.getItem("whisperlive_translation_provider");
+  const savedFaceToFaceEnabled = window.localStorage.getItem("whisperlive_face_to_face_enabled");
+  const savedFaceToFaceMode = window.localStorage.getItem("whisperlive_face_to_face_mode");
+  const savedTranslationTarget = window.localStorage.getItem("whisperlive_translation_target");
   const savedDiarizationEnabled = window.localStorage.getItem("whisperlive_diarization_enabled");
   displayMode = window.localStorage.getItem("whisperlive_display_mode") || "split";
   singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "source";
@@ -248,6 +254,9 @@ function initializeDefaults() {
   if (savedServer) elements.server.value = savedServer;
   if (savedTranslationEnabled !== null) elements.translationEnabled.checked = savedTranslationEnabled === "true";
   if (savedTranslationProvider && elements.translationProvider) elements.translationProvider.value = savedTranslationProvider;
+  if (savedFaceToFaceEnabled !== null && elements.faceToFaceEnabled) elements.faceToFaceEnabled.checked = savedFaceToFaceEnabled === "true";
+  if (savedFaceToFaceMode && elements.faceToFaceMode) elements.faceToFaceMode.value = savedFaceToFaceMode;
+  if (savedTranslationTarget && elements.translationTarget) elements.translationTarget.value = savedTranslationTarget;
   if (savedDiarizationEnabled !== null) elements.diarizationEnabled.checked = savedDiarizationEnabled === "true";
   elements.displayMode.value = displayMode;
   elements.singleLanguage.value = singleLanguageMode;
@@ -384,6 +393,15 @@ function updateTranslationControls(forceConnectionLocked = false) {
   if (elements.language) {
     elements.language.disabled = Boolean(forceConnectionLocked);
   }
+  if (elements.translationTarget) {
+    elements.translationTarget.disabled = Boolean(forceConnectionLocked || !faceToFaceEnabled() || faceToFaceMode() === "interpretation");
+  }
+  if (elements.faceToFaceMode) {
+    elements.faceToFaceMode.disabled = Boolean(forceConnectionLocked || !faceToFaceEnabled());
+  }
+  if (elements.faceToFaceEnabled) {
+    elements.faceToFaceEnabled.disabled = Boolean(forceConnectionLocked);
+  }
   if (elements.translationModeHint) {
     elements.translationModeHint.textContent = `当前翻译模式：${translationModeLabel()}`;
   }
@@ -431,10 +449,31 @@ function lockedTranslationTargetForBackend(backend, language) {
   return normalizeLanguage(language) === "en" ? "zh" : "en";
 }
 
-function translationModeLabel(backend = currentServerBackend || DEFAULT_BACKEND, language = elements.language?.value) {
-  const source = normalizeLanguage(language) === "zh" ? "中文" : "English";
-  const target = lockedTranslationTargetForBackend(backend, language) === "zh" ? "中文" : "English";
-  return `${source} → ${target}`;
+function faceToFaceEnabled() {
+  return Boolean(elements.faceToFaceEnabled?.checked);
+}
+
+function faceToFaceMode() {
+  return elements.faceToFaceMode?.value || "interpretation";
+}
+
+function selectedFaceToFaceTarget() {
+  if (faceToFaceMode() === "interpretation") return "auto";
+  const target = normalizeLanguage(elements.translationTarget?.value) || "zh";
+  return target === "en" ? "en" : "zh";
+}
+
+function translationModeLabel() {
+  if (!faceToFaceEnabled()) {
+    const source = normalizeLanguage(elements.language?.value) === "zh" ? "中文" : "English";
+    const target = lockedTranslationTargetForBackend(currentServerBackend || DEFAULT_BACKEND, elements.language?.value) === "zh" ? "中文" : "English";
+    return `普通模式：${source} → ${target}`;
+  }
+  if (faceToFaceMode() === "interpretation") {
+    return "面对面同传：自动识别中英文，相互翻译";
+  }
+  const target = selectedFaceToFaceTarget() === "zh" ? "中文" : "English";
+  return `面对面会议记录：自动识别中英文，统一翻译为${target}`;
 }
 
 function applyBackendLanguage(backend) {
@@ -1680,11 +1719,17 @@ function sendConfig(event) {
 
   uid = createUid();
   const backend = currentServerBackend || DEFAULT_BACKEND;
+  const faceModeEnabled = faceToFaceEnabled();
   let selectedLanguage = elements.language.value || defaultLanguageForBackend(backend);
-  if (!["zh", "en"].includes(selectedLanguage)) {
+  if (faceModeEnabled) {
+    selectedLanguage = null;
+  } else if (!["zh", "en"].includes(selectedLanguage)) {
     selectedLanguage = defaultLanguageForBackend(backend);
   }
-  const selectedTranslationTarget = lockedTranslationTargetForBackend(backend, selectedLanguage);
+  const selectedTranslationTarget = faceModeEnabled
+    ? selectedFaceToFaceTarget()
+    : lockedTranslationTargetForBackend(backend, selectedLanguage);
+  const translationMode = faceModeEnabled ? "mixed_interpretation" : "standard";
   const meetingName = elements.meetingName.value.trim();
   const payload = {
     uid,
@@ -1720,6 +1765,7 @@ function sendConfig(event) {
     enable_diarization: elements.diarizationEnabled.checked,
     enable_translation: elements.translationEnabled.checked,
     target_language: selectedTranslationTarget,
+    translation_mode: translationMode,
     translation_provider: elements.translationProvider?.value || "helsinki_zh_en",
     zh_en_model_path: "model/opus-mt-zh-en",
     en_zh_model_path: "model/opus-mt-en-zh",
@@ -1740,6 +1786,9 @@ function setConnectionInputsDisabled(disabled) {
     elements.meetingName,
     elements.translationEnabled,
     elements.translationProvider,
+    elements.faceToFaceEnabled,
+    elements.faceToFaceMode,
+    elements.translationTarget,
     elements.diarizationEnabled,
     elements.hotwordFile,
     elements.clearHotwordFile,
@@ -1958,6 +2007,24 @@ elements.translationEnabled.addEventListener("change", () => {
 if (elements.translationProvider) {
   elements.translationProvider.addEventListener("change", () => {
     window.localStorage.setItem("whisperlive_translation_provider", elements.translationProvider.value || "helsinki_zh_en");
+  });
+}
+if (elements.faceToFaceEnabled) {
+  elements.faceToFaceEnabled.addEventListener("change", () => {
+    window.localStorage.setItem("whisperlive_face_to_face_enabled", String(faceToFaceEnabled()));
+    updateTranslationControls();
+  });
+}
+if (elements.faceToFaceMode) {
+  elements.faceToFaceMode.addEventListener("change", () => {
+    window.localStorage.setItem("whisperlive_face_to_face_mode", faceToFaceMode());
+    updateTranslationControls();
+  });
+}
+if (elements.translationTarget) {
+  elements.translationTarget.addEventListener("change", () => {
+    window.localStorage.setItem("whisperlive_translation_target", selectedFaceToFaceTarget());
+    updateTranslationControls();
   });
 }
 elements.language.addEventListener("change", () => {

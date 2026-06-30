@@ -51,6 +51,10 @@ class ServeClientBase(object):
         "bye",
         "bye bye",
         "you",
+        "oh",
+        ".",
+        "看我了",
+        "我看你了",
     }
     GRATITUDE_HALLUCINATION_PHRASES = {
         "thank you",
@@ -184,7 +188,10 @@ class ServeClientBase(object):
                 t0 = time.time()
                 result = self.transcribe_audio(input_sample)
 
-                if result is None or self.language is None:
+                if result is None or (
+                    self.language is None
+                    and not getattr(self, "allow_language_auto_per_chunk", False)
+                ):
                     self.timestamp_offset += duration
                     time.sleep(0.25)    # wait for voice activity, result is None when no voice activity
                     continue
@@ -224,7 +231,7 @@ class ServeClientBase(object):
             'end': "{:.3f}".format(end),
             'text': self.normalize_asr_text(text),
             'completed': completed,
-            'language': getattr(self, "language", None)
+            'language': getattr(self, "current_language", None) or getattr(self, "language", None)
         }
         if speaker is not None:
             seg['speaker'] = speaker

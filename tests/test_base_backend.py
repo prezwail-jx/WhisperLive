@@ -65,6 +65,32 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertIs(client.translation_queue, q)
 
 
+class AutoLanguageClient(ConcreteServeClient):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.output_calls = []
+
+    def transcribe_audio(self, input_sample):
+        self.exit = True
+        return ["segment"]
+
+    def handle_transcription_output(self, result, duration):
+        self.output_calls.append((result, duration))
+
+
+class TestSpeechToTextLanguageGate(unittest.TestCase):
+    def test_auto_language_per_chunk_does_not_drop_result(self):
+        client = AutoLanguageClient(client_uid="test", websocket=MagicMock())
+        client.language = None
+        client.allow_language_auto_per_chunk = True
+        client.frames_np = np.zeros(16000, dtype=np.float32)
+
+        client.speech_to_text()
+
+        self.assertEqual(len(client.output_calls), 1)
+        self.assertEqual(client.output_calls[0][0], ["segment"])
+
+
 class TestAddFrames(unittest.TestCase):
     def setUp(self):
         self.ws = MagicMock()

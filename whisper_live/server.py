@@ -384,6 +384,50 @@ class TranscriptionServer:
         }
 
     @staticmethod
+    def extract_translation_terms(value):
+        terms = []
+        if isinstance(value, dict):
+            iterable = list(value.keys()) + list(value.values())
+        elif isinstance(value, str):
+            if "\n" in value or "\r" in value:
+                try:
+                    parsed = parse_hotword_config(value)
+                    iterable = parsed.get("hotwords") or []
+                except Exception:
+                    iterable = re.split(r"[\s,;；]+", value)
+            else:
+                iterable = re.split(r"[\s,;；]+", value)
+        else:
+            iterable = value or []
+        for item in iterable:
+            term = str(item or "").strip()
+            if term and "=>" not in term and re.search(r"[A-Za-z0-9]", term):
+                terms.append(term)
+        return list(dict.fromkeys(terms))
+
+    @staticmethod
+    def hotwords_preview(value, limit=10):
+        if not value:
+            return []
+        text = str(value or "")
+        if "\n" in text or "\r" in text:
+            try:
+                terms = parse_hotword_config(text).get("hotwords") or []
+            except Exception:
+                terms = []
+        else:
+            terms = re.split(r"[\s,;；]+", text)
+
+        preview = []
+        for term in terms:
+            term = str(term or "").strip()
+            if term and term not in preview:
+                preview.append(term)
+            if limit is not None and len(preview) >= limit:
+                break
+        return preview
+
+    @staticmethod
     def load_hotwords_file(path):
         if not path:
             return None
@@ -407,6 +451,7 @@ class TranscriptionServer:
 
     def apply_meeting_hotwords(self, options):
         if options.get("hotwords_locked") and options.get("hotwords"):
+            options["translation_terms"] = self.extract_translation_terms(options.get("hotwords"))
             return
         meeting_name = options.get("meeting_name")
         if not meeting_name or not self.meeting_hotwords:
@@ -421,6 +466,7 @@ class TranscriptionServer:
             options["hotwords_locked"] = True
             options["translation_glossary"] = dict(stored.get("translation_glossary") or {})
             options["translation_glossary_count"] = int(stored.get("translation_count") or 0)
+            options["translation_terms"] = self.extract_translation_terms(stored.get("text"))
 
     def apply_default_hotwords(self, options):
         if options.get("hotwords"):
@@ -446,9 +492,27 @@ class TranscriptionServer:
     def offset_client_segments(self, websocket, segments):
         return apply_timeline_offset_to_segments(segments, self.session_timeline_offset(websocket))
 
-    def process_client_segment(self, websocket, base_processor, segment):
+    @staticmethod
+    def infer_segment_text_language(text):
+        text = str(text or "")
+        cjk_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
+        latin_count = len(re.findall(r"[A-Za-z]", text))
+        if latin_count >= 4 and cjk_count == 0:
+            return "en"
+        if cjk_count > 0:
+            return "zh"
+        if latin_count >= 4:
+            return "en"
+        return None
+
+    def process_client_segment(self, websocket, base_processor, translation_mode, segment):
         if base_processor is not None:
             segment = base_processor(segment) or segment
+        if translation_mode == "mixed_interpretation":
+            inferred_language = self.infer_segment_text_language(segment.get("text"))
+            if inferred_language:
+                segment = segment.copy()
+                segment["language"] = inferred_language
         return self.offset_client_segment(websocket, segment)
 
     def handle_client_segments(self, websocket, message_type, segments):
@@ -534,6 +598,9 @@ class TranscriptionServer:
     ):
         client: Optional[ServeClientBase] = None
 
+        if options.get("translation_mode") == "mixed_interpretation" and self.backend.is_faster_whisper():
+            options["language"] = None
+
         # Check if client wants translation
         enable_translation = options.get("enable_translation", False)
         
@@ -559,6 +626,8 @@ class TranscriptionServer:
                 en_zh_model_path=options.get("en_zh_model_path", "model/opus-mt-en-zh"),
                 nllb_model_path=options.get("nllb_model_path", "model/NLLB-200-600M"),
                 translation_glossary=options.get("translation_glossary"),
+                translation_terms=options.get("translation_terms") or self.extract_translation_terms(options.get("hotwords")),
+                translation_mode=options.get("translation_mode", "standard"),
             )
             
             # Start translation thread
@@ -732,6 +801,7 @@ class TranscriptionServer:
                     hotwords=options.get("hotwords"),
                     diarization=self._create_diarizer(options),
                     word_timestamps=options.get("word_timestamps", False),
+                    mixed_interpretation=options.get("translation_mode") == "mixed_interpretation",
                 )
 
                 logging.info("Running faster_whisper backend.")
@@ -785,6 +855,7 @@ class TranscriptionServer:
             self.process_client_segment,
             websocket,
             base_segment_processor,
+            options.get("translation_mode", "standard"),
         )
         if translation_client:
             translation_client.segment_post_processor = functools.partial(self.offset_client_segment, websocket)
@@ -853,6 +924,19 @@ class TranscriptionServer:
             options = json.loads(options)
             self.apply_meeting_hotwords(options)
             self.apply_default_hotwords(options)
+
+            hotwords_all = self.hotwords_preview(options.get("hotwords"), limit=None)
+            hotwords_preview = hotwords_all[:10]
+            hotwords_count = int(options.get("hotwords_count") or len(hotwords_all))
+            logging.info(
+                "Client hotwords: uid=%s translation_mode=%s count=%s file=%s preview=%s batch_inference=%s",
+                options.get("uid"),
+                options.get("translation_mode", "standard"),
+                hotwords_count,
+                options.get("hotwords_file") or "",
+                hotwords_preview,
+                self.batch_config is not None,
+            )
 
             self.use_vad = options.get('use_vad')
             if self.client_manager.is_server_full(websocket, options):

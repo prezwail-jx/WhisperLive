@@ -97,5 +97,35 @@ class TestServeClientFasterWhisperSingleModelInit(unittest.TestCase):
         self.assertIsNone(ServeClientFasterWhisper.SINGLE_MODEL)
 
 
+    @mock.patch("whisper_live.backend.faster_whisper_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.faster_whisper_backend.torch.cuda.is_available", return_value=False)
+    def test_mixed_interpretation_keeps_language_auto_per_chunk(self, mock_cuda_available):
+        info = mock.Mock(language="zh", language_probability=0.99)
+
+        def fake_create_model(client, device):
+            client.transcriber = mock.Mock()
+            client.transcriber.transcribe.return_value = ([], info)
+
+        with mock.patch.object(
+            ServeClientFasterWhisper,
+            "create_model",
+            autospec=True,
+            side_effect=fake_create_model,
+        ):
+            client = ServeClientFasterWhisper(
+                websocket=mock.Mock(),
+                model="model/asr/small",
+                client_uid="client",
+                language=None,
+                single_model=False,
+                mixed_interpretation=True,
+            )
+
+        client.transcribe_audio([])
+
+        self.assertIsNone(client.transcriber.transcribe.call_args.kwargs.get("language"))
+        self.assertIsNone(client.language)
+
+
 if __name__ == "__main__":
     unittest.main()

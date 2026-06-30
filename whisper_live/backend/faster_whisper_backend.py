@@ -40,6 +40,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         word_timestamps=False,
         min_segment_rms=0.0015,
         max_incomplete_segment_seconds=0.0,
+        mixed_interpretation=False,
     ):
         """
         Initialize a ServeClient instance.
@@ -90,6 +91,9 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.initial_prompt = initial_prompt
         self.vad_parameters = vad_parameters or {"threshold": 0.5}
         self.hotwords = hotwords
+        self.mixed_interpretation = bool(mixed_interpretation)
+        self.allow_language_auto_per_chunk = self.mixed_interpretation
+        self.current_language = None
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cuda":
@@ -223,9 +227,10 @@ class ServeClientFasterWhisper(ServeClientBase):
             from whisper_live.batch_inference import BatchRequest
             request = BatchRequest(
                 audio=input_sample,
-                language=self.language,
+                language=None if self.mixed_interpretation else self.language,
                 task=self.task,
                 initial_prompt=self.initial_prompt,
+                hotwords=self.hotwords,
                 use_vad=self.use_vad,
                 vad_parameters=self.vad_parameters if self.use_vad else None,
                 word_timestamps=self.word_timestamps,
@@ -234,7 +239,9 @@ class ServeClientFasterWhisper(ServeClientBase):
             request.future.wait(timeout=30)
             if request.error:
                 raise request.error
-            if self.language is None and request.info is not None:
+            if self.mixed_interpretation:
+                self.current_language = getattr(request.info, "language", None) if request.info is not None else None
+            if not self.mixed_interpretation and self.language is None and request.info is not None:
                 self.set_language(request.info)
             return request.result
 
@@ -244,7 +251,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         result, info = self.transcriber.transcribe(
             input_sample,
             initial_prompt=self.initial_prompt,
-            language=self.language,
+            language=None if self.mixed_interpretation else self.language,
             task=self.task,
             vad_filter=self.use_vad,
             vad_parameters=self.vad_parameters if self.use_vad else None,
@@ -253,7 +260,9 @@ class ServeClientFasterWhisper(ServeClientBase):
         if ServeClientFasterWhisper.SINGLE_MODEL:
             ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
 
-        if self.language is None and info is not None:
+        if self.mixed_interpretation:
+            self.current_language = getattr(info, "language", None) if info is not None else None
+        if not self.mixed_interpretation and self.language is None and info is not None:
             self.set_language(info)
         return result
 

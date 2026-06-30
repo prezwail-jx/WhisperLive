@@ -168,6 +168,7 @@ input:focus, select:focus { border-color: var(--green-deep); box-shadow: 0 0 0 3
 .secondary-button { border: 1px solid var(--line-strong); background: var(--surface-raised); color: #d5dcd8; }
 .primary-button { border: 1px solid var(--green); background: var(--green); color: #03180e; }
 .ghost-button { border: 1px solid transparent; background: transparent; color: var(--muted); }
+.ghost-button.active { border-color: var(--green); background: var(--green-soft); color: var(--green); }
 .tool-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
 .summary-fields { padding-top: 16px; border-top: 1px dashed var(--line); }
 .summary-template-upload { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, .015); }
