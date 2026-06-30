@@ -192,10 +192,32 @@ class BatchInferenceWorker:
     # Batch processing
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _prompt_signature(req: BatchRequest):
+        return (req.initial_prompt or "", req.hotwords or "")
+
     def _process_batch(self, batch: List[BatchRequest]):
         """Dispatch to single or multi-item processing."""
         if len(batch) == 1:
             self._process_single(batch[0])
+            return
+
+        groups = {}
+        for req in batch:
+            groups.setdefault(self._prompt_signature(req), []).append(req)
+
+        if len(groups) > 1:
+            logging.info(
+                "[BatchInference] Splitting batch of %d by prompt compatibility into %d groups",
+                len(batch),
+                len(groups),
+            )
+            for group in groups.values():
+                if len(group) == 1:
+                    self._process_single(group[0])
+                else:
+                    logging.info(f"[BatchInference] Processing batch of {len(group)}")
+                    self._process_multi(group)
             return
 
         logging.info(f"[BatchInference] Processing batch of {len(batch)}")

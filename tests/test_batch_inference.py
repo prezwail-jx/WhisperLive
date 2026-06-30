@@ -87,7 +87,7 @@ class TestBatchInferenceWorker(unittest.TestCase):
             None,
         )
 
-        hotwords = ["FunASR", "WhisperLive", "WebSocket"]
+        hotwords = ["FunASR WhisperLive"] * 3
         requests = [
             BatchRequest(
                 audio=self._make_audio(),
@@ -114,6 +114,29 @@ class TestBatchInferenceWorker(unittest.TestCase):
             [call.kwargs.get("hotwords") for call in self.mock_transcriber.get_prompt.call_args_list],
             hotwords,
         )
+
+    def test_mixed_hotwords_fall_back_to_single_requests(self):
+        """Prompt-incompatible requests should avoid CTranslate2 batched generate."""
+        fake_segment = MagicMock()
+        fake_info = MagicMock()
+        self.mock_transcriber.transcribe.return_value = ([fake_segment], fake_info)
+
+        requests = [
+            BatchRequest(audio=self._make_audio(), language="en", use_vad=False, hotwords="FunASR"),
+            BatchRequest(audio=self._make_audio(), language="en", use_vad=False, hotwords="WhisperLive"),
+        ]
+        for req in requests:
+            self.worker.submit(req)
+        for req in requests:
+            req.future.wait(timeout=5)
+
+        for req in requests:
+            self.assertTrue(req.future.is_set())
+            self.assertIsNone(req.error)
+            self.assertEqual(req.result, [fake_segment])
+
+        self.assertEqual(self.mock_transcriber.transcribe.call_count, 2)
+        self.mock_transcriber.encode.assert_not_called()
 
     def test_error_propagation(self):
         """Transcriber errors should propagate to the request without crashing the worker."""

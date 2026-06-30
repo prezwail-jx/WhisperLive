@@ -40,6 +40,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         word_timestamps=False,
         min_segment_rms=0.0015,
         max_incomplete_segment_seconds=0.0,
+        min_transcription_chunk_seconds=1.0,
         mixed_interpretation=False,
     ):
         """
@@ -75,6 +76,7 @@ class ServeClientFasterWhisper(ServeClientBase):
             word_timestamps,
             min_segment_rms=min_segment_rms,
             max_incomplete_segment_seconds=max_incomplete_segment_seconds,
+            min_transcription_chunk_seconds=min_transcription_chunk_seconds,
             stable_utterance_ids=True,
         )
         self.cache_path = cache_path

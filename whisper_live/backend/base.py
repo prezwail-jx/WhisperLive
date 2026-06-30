@@ -80,6 +80,7 @@ class ServeClientBase(object):
         word_timestamps=False,
         min_segment_rms=0.0015,
         max_incomplete_segment_seconds=0.0,
+        min_transcription_chunk_seconds=1.0,
         stable_utterance_ids=False,
     ):
         self.client_uid = client_uid
@@ -94,6 +95,9 @@ class ServeClientBase(object):
         if max_incomplete_segment_seconds is None:
             max_incomplete_segment_seconds = 0.0
         self.max_incomplete_segment_seconds = max(0.0, float(max_incomplete_segment_seconds))
+        if min_transcription_chunk_seconds is None:
+            min_transcription_chunk_seconds = 1.0
+        self.min_transcription_chunk_seconds = max(0.1, float(min_transcription_chunk_seconds))
         self.diarization = diarization
         self.word_timestamps = word_timestamps
 
@@ -180,7 +184,7 @@ class ServeClientBase(object):
                 self.clip_audio_if_no_valid_segment()
 
             input_bytes, duration = self.get_audio_chunk_for_processing()
-            if duration < 1.0:
+            if duration < self.min_transcription_chunk_seconds:
                 time.sleep(0.1)     # wait for audio chunks to arrive
                 continue
             try:

@@ -796,6 +796,7 @@ class TranscriptionServer:
                     same_output_threshold=options.get("same_output_threshold", 10),
                     min_segment_rms=options.get("min_segment_rms", 0.0015),
                     max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 0.0),
+                    min_transcription_chunk_seconds=options.get("min_transcription_chunk_seconds", 1.0),
                     cache_path=self.cache_path,
                     translation_queue=translation_queue,
                     hotwords=options.get("hotwords"),

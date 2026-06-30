@@ -242,7 +242,6 @@ function initializeDefaults() {
   clientInstanceId = getClientInstanceId();
   const savedMeeting = window.localStorage.getItem("whisperlive_meeting_name");
   const savedServer = window.localStorage.getItem("whisperlive_server_url");
-  const savedTranslationEnabled = window.localStorage.getItem("whisperlive_translation_enabled");
   const savedTranslationProvider = window.localStorage.getItem("whisperlive_translation_provider");
   const savedFaceToFaceEnabled = window.localStorage.getItem("whisperlive_face_to_face_enabled");
   const savedFaceToFaceMode = window.localStorage.getItem("whisperlive_face_to_face_mode");
@@ -252,7 +251,8 @@ function initializeDefaults() {
   singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "source";
   if (savedMeeting && !elements.meetingName.value) elements.meetingName.value = savedMeeting;
   if (savedServer) elements.server.value = savedServer;
-  if (savedTranslationEnabled !== null) elements.translationEnabled.checked = savedTranslationEnabled === "true";
+  if (elements.translationEnabled) elements.translationEnabled.checked = true;
+  window.localStorage.removeItem("whisperlive_translation_enabled");
   if (savedTranslationProvider && elements.translationProvider) elements.translationProvider.value = savedTranslationProvider;
   if (savedFaceToFaceEnabled !== null && elements.faceToFaceEnabled) elements.faceToFaceEnabled.checked = savedFaceToFaceEnabled === "true";
   if (savedFaceToFaceMode && elements.faceToFaceMode) elements.faceToFaceMode.value = savedFaceToFaceMode;
@@ -1761,9 +1761,10 @@ function sendConfig(event) {
     clip_audio: false,
     same_output_threshold: 7,
     min_segment_rms: 0.002,
-    max_incomplete_segment_seconds: 8.0,
+    min_transcription_chunk_seconds: 2.5,
+    max_incomplete_segment_seconds: 10.0,
     enable_diarization: elements.diarizationEnabled.checked,
-    enable_translation: elements.translationEnabled.checked,
+    enable_translation: true,
     target_language: selectedTranslationTarget,
     translation_mode: translationMode,
     translation_provider: elements.translationProvider?.value || "helsinki_zh_en",
@@ -1784,7 +1785,6 @@ function setConnectionInputsDisabled(disabled) {
     elements.server,
     elements.language,
     elements.meetingName,
-    elements.translationEnabled,
     elements.translationProvider,
     elements.faceToFaceEnabled,
     elements.faceToFaceMode,
@@ -1999,11 +1999,6 @@ elements.singleLanguage.addEventListener("change", () => {
     input.addEventListener("input", () => applyCaptionStyle(currentCaptionStyleFromControls(), true));
   });
 elements.resetCaptionStyle.addEventListener("click", resetCaptionStyle);
-elements.translationEnabled.addEventListener("change", () => {
-  window.localStorage.setItem("whisperlive_translation_enabled", String(elements.translationEnabled.checked));
-  updateTranslationControls();
-  renderTranscriptViews();
-});
 if (elements.translationProvider) {
   elements.translationProvider.addEventListener("change", () => {
     window.localStorage.setItem("whisperlive_translation_provider", elements.translationProvider.value || "helsinki_zh_en");

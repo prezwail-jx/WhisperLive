@@ -39,6 +39,7 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertFalse(client.clip_audio)
         self.assertEqual(client.same_output_threshold, 10)
         self.assertAlmostEqual(client.min_segment_rms, 0.0015)
+        self.assertAlmostEqual(client.min_transcription_chunk_seconds, 1.0)
         self.assertIsNone(client.frames_np)
         self.assertAlmostEqual(client.timestamp_offset, 0.0)
         self.assertFalse(client.exit)
@@ -55,6 +56,7 @@ class TestServeClientBaseInit(unittest.TestCase):
             clip_audio=True,
             same_output_threshold=20,
             min_segment_rms=0.002,
+            min_transcription_chunk_seconds=2.5,
             translation_queue=q,
         )
         self.assertEqual(client.send_last_n_segments, 5)
@@ -62,6 +64,7 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertTrue(client.clip_audio)
         self.assertEqual(client.same_output_threshold, 20)
         self.assertAlmostEqual(client.min_segment_rms, 0.002)
+        self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
         self.assertIs(client.translation_queue, q)
 
 
@@ -79,6 +82,16 @@ class AutoLanguageClient(ConcreteServeClient):
 
 
 class TestSpeechToTextLanguageGate(unittest.TestCase):
+    def test_min_transcription_chunk_waits_for_configured_duration(self):
+        client = AutoLanguageClient(client_uid="test", websocket=MagicMock())
+        client.min_transcription_chunk_seconds = 2.5
+        client.frames_np = np.zeros(16000, dtype=np.float32)
+
+        with patch("whisper_live.backend.base.time.sleep", side_effect=lambda _seconds: setattr(client, "exit", True)):
+            client.speech_to_text()
+
+        self.assertEqual(client.output_calls, [])
+
     def test_auto_language_per_chunk_does_not_drop_result(self):
         client = AutoLanguageClient(client_uid="test", websocket=MagicMock())
         client.language = None

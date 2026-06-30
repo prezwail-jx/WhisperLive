@@ -127,5 +127,28 @@ class TestServeClientFasterWhisperSingleModelInit(unittest.TestCase):
         self.assertIsNone(client.language)
 
 
+    @mock.patch("whisper_live.backend.faster_whisper_backend.threading.Thread", DummyThread)
+    @mock.patch("whisper_live.backend.faster_whisper_backend.torch.cuda.is_available", return_value=False)
+    def test_min_transcription_chunk_seconds_is_configurable(self, mock_cuda_available):
+        def fake_create_model(client, device):
+            client.transcriber = object()
+
+        with mock.patch.object(
+            ServeClientFasterWhisper,
+            "create_model",
+            autospec=True,
+            side_effect=fake_create_model,
+        ):
+            client = ServeClientFasterWhisper(
+                websocket=mock.Mock(),
+                model="model/asr/small",
+                client_uid="client",
+                single_model=False,
+                min_transcription_chunk_seconds=2.5,
+            )
+
+        self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
+
+
 if __name__ == "__main__":
     unittest.main()
