@@ -427,6 +427,10 @@ class ServeClientTranslation(ServeClientBase):
     _OUTPUT_GUARD_MIN_REPEAT_WORDS = 24
     _OUTPUT_GUARD_MAX_UNIQUE_WORD_RATIO = 0.28
     _OUTPUT_GUARD_MAX_REPEATED_BIGRAM_COUNT = 8
+    _BACKLOG_DROP_THRESHOLD = 5
+    _BACKLOG_KEEP_LATEST = 3
+    _REALTIME_MAX_EN_CHARS = 100
+    _REALTIME_MAX_ZH_CHARS = 80
 
     def __init__(
         self,
@@ -542,14 +546,26 @@ class ServeClientTranslation(ServeClientBase):
         if not self.model_loaded or not self.translator or not text.strip():
             return text, source_language, self.target_language
 
+        if self.exit:
+            return text, source_language, self.target_language
+
         started_at = time.monotonic()
+        lock_wait_ms = 0.0
+        generate_ms = 0.0
         try:
-            with self.translator_lock:
+            lock_started_at = time.monotonic()
+            self.translator_lock.acquire()
+            lock_wait_ms = (time.monotonic() - lock_started_at) * 1000.0
+            try:
+                generate_started_at = time.monotonic()
                 translated_text, resolved_source_language, target_language = self.translator.translate(
                     text,
                     source_language,
                     self.target_language,
                 )
+                generate_ms = (time.monotonic() - generate_started_at) * 1000.0
+            finally:
+                self.translator_lock.release()
             translated_text = self.guard_translation_output(
                 text,
                 translated_text,
@@ -564,12 +580,15 @@ class ServeClientTranslation(ServeClientBase):
             elapsed_ms = (time.monotonic() - started_at) * 1000.0
             logging.info(
                 "[TRANSLATION_LATENCY] uid=%s model=%s device=%s source_language=%s "
-                "source_len=%d elapsed_ms=%.1f queue_size=%s source_preview=%r",
+                "source_len=%d lock_wait_ms=%.1f generate_ms=%.1f total_ms=%.1f "
+                "queue_size=%s source_preview=%r",
                 self.client_uid,
                 self.model_name,
                 self.translation_device,
                 source_language,
                 len(str(text or "")),
+                lock_wait_ms,
+                generate_ms,
                 elapsed_ms,
                 self.translation_queue_size(),
                 str(text or "").strip()[:80],
@@ -834,6 +853,66 @@ class ServeClientTranslation(ServeClientBase):
             return "".join(texts)
         return " ".join(texts)
 
+    def realtime_max_source_chars(self, source_language):
+        if source_language == "zh":
+            return min(self.translation_max_chars, self._REALTIME_MAX_ZH_CHARS)
+        if source_language == "en":
+            return min(self.translation_max_chars, self._REALTIME_MAX_EN_CHARS)
+        return self.translation_max_chars
+
+    def split_realtime_segment(self, segment):
+        text = str(segment.get("text", "") or "").strip()
+        if not text:
+            return []
+        source_language = self.get_segment_source_language(segment)
+        max_chars = self.realtime_max_source_chars(source_language)
+        if len(text) <= max_chars:
+            return [segment]
+
+        if source_language == "zh":
+            parts = [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+        else:
+            parts = []
+            current = []
+            current_len = 0
+            for word in text.split():
+                extra = len(word) + (1 if current else 0)
+                if current and current_len + extra > max_chars:
+                    parts.append(" ".join(current))
+                    current = [word]
+                    current_len = len(word)
+                else:
+                    current.append(word)
+                    current_len += extra
+            if current:
+                parts.append(" ".join(current))
+        if len(parts) <= 1:
+            return [segment]
+
+        start = float(segment.get("start", 0.0) or 0.0)
+        end = float(segment.get("end", start) or start)
+        duration = max(end - start, 0.0)
+        total_chars = max(sum(len(part) for part in parts), 1)
+        cursor = start
+        split_segments = []
+        for index, part in enumerate(parts):
+            next_cursor = end if index == len(parts) - 1 else cursor + duration * (len(part) / total_chars)
+            split_segment = segment.copy()
+            split_segment["text"] = part
+            split_segment["start"] = cursor
+            split_segment["end"] = next_cursor
+            split_segments.append(split_segment)
+            cursor = next_cursor
+        logging.info(
+            "[TRANSLATION_SPLIT] uid=%s source_language=%s source_len=%d parts=%d max_chars=%d",
+            self.client_uid,
+            source_language,
+            len(text),
+            len(split_segments),
+            max_chars,
+        )
+        return split_segments
+
     def should_flush_translation_buffer(self, force=False):
         if not self.translation_buffer:
             return False
@@ -856,7 +935,7 @@ class ServeClientTranslation(ServeClientBase):
             return False
         if text.endswith(tuple(self.translation_sentence_endings)):
             return True
-        if len(text) >= self.translation_max_chars:
+        if len(text) >= self.realtime_max_source_chars(source_language):
             return True
         if (
             self.translation_buffer_started_at is not None
@@ -980,6 +1059,55 @@ class ServeClientTranslation(ServeClientBase):
         segments_to_send = self.prepare_translated_segments()
         self.send_translation_to_client(segments_to_send)
 
+    def drain_translation_backlog(self, first_segment):
+        queue_size = self.translation_queue_size()
+        if not isinstance(queue_size, int) or queue_size <= self._BACKLOG_DROP_THRESHOLD:
+            return [first_segment], False
+
+        drained = []
+        saw_exit_signal = False
+        while True:
+            try:
+                item = self.translation_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                saw_exit_signal = True
+            else:
+                drained.append(item)
+            self.translation_queue.task_done()
+
+        candidates = [first_segment] + drained
+        kept = candidates[-self._BACKLOG_KEEP_LATEST:]
+        dropped = max(len(candidates) - len(kept), 0)
+        if dropped:
+            logging.warning(
+                "[TRANSLATION_BACKLOG_DROP] uid=%s queue_size=%s dropped=%d kept=%d",
+                self.client_uid,
+                queue_size,
+                dropped,
+                len(kept),
+            )
+        return kept, saw_exit_signal
+
+    def process_translation_segment(self, segment):
+        if not segment.get("completed", False):
+            return
+
+        logging.info(
+            "[TRANSLATION_QUEUE_SEGMENT] uid=%s queue_size=%s start=%s end=%s text_preview=%r",
+            self.client_uid,
+            self.translation_queue_size(),
+            segment.get("start"),
+            segment.get("end"),
+            str(segment.get("text", "")).strip()[:80],
+        )
+        for split_segment in self.split_realtime_segment(segment):
+            if self.exit:
+                break
+            self.add_segment_to_translation_buffer(split_segment)
+            self.flush_translation_buffer()
+
     def process_translation_queue(self):
         """
         Process segments from the translation queue.
@@ -989,32 +1117,28 @@ class ServeClientTranslation(ServeClientBase):
 
         while not self.exit:
             try:
-                # Get segment from queue with timeout
                 segment = self.translation_queue.get(timeout=1.0)
 
-                # Check for exit signal
                 if segment is None:
+                    self.translation_queue.task_done()
                     logging.info(f"Received exit signal for translation client {self.client_uid}")
                     self.flush_translation_buffer(force=True)
                     break
 
-                # Only translate completed segments
-                if not segment.get("completed", False):
+                segments_to_process, saw_exit_signal = self.drain_translation_backlog(segment)
+                if segments_to_process == [segment] and not saw_exit_signal:
+                    try:
+                        self.process_translation_segment(segment)
+                    finally:
+                        self.translation_queue.task_done()
+                else:
                     self.translation_queue.task_done()
-                    continue
-
-                logging.info(
-                    "[TRANSLATION_QUEUE_SEGMENT] uid=%s queue_size=%s start=%s end=%s text_preview=%r",
-                    self.client_uid,
-                    self.translation_queue_size(),
-                    segment.get("start"),
-                    segment.get("end"),
-                    str(segment.get("text", "")).strip()[:80],
-                )
-                self.add_segment_to_translation_buffer(segment)
-                self.flush_translation_buffer()
-
-                self.translation_queue.task_done()
+                    for pending_segment in segments_to_process:
+                        self.process_translation_segment(pending_segment)
+                    if saw_exit_signal:
+                        logging.info(f"Received exit signal for translation client {self.client_uid}")
+                        self.flush_translation_buffer(force=True)
+                        break
 
             except queue.Empty:
                 self.flush_translation_buffer()
@@ -1053,6 +1177,11 @@ class ServeClientTranslation(ServeClientBase):
                     logging.error(f"[ERROR]: translation segment_post_processor failed: {e}")
                     processed.append(seg)
             translated_segments = processed
+        if self.admin_status_callback:
+            try:
+                self.admin_status_callback(translated_segments)
+            except Exception as e:
+                logging.error(f"[ERROR]: admin translation status update failed: {e}")
         try:
             self.websocket.send(
                 json.dumps({
@@ -1060,13 +1189,9 @@ class ServeClientTranslation(ServeClientBase):
                     "translated_segments": translated_segments,
                 })
             )
-            if self.admin_status_callback:
-                try:
-                    self.admin_status_callback(translated_segments)
-                except Exception as e:
-                    logging.error(f"[ERROR]: admin translation status update failed: {e}")
         except Exception as e:
             logging.error(f"[ERROR]: Sending translation data to client: {e}")
+            self.exit = True
 
     def speech_to_text(self):
         """

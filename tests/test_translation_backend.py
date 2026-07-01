@@ -881,3 +881,44 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         payload = self.get_last_payload(client)
         segment = payload["translated_segments"][0]
         self.assertEqual(segment["text"], "translated:thank you")
+
+    def test_long_english_segment_is_split_for_realtime_translation(self):
+        client = self.make_client()
+        segment = {
+            "start": 0.0,
+            "end": 10.0,
+            "text": " ".join(["word"] * 30),
+            "completed": True,
+            "language": "en",
+        }
+
+        split_segments = client.split_realtime_segment(segment)
+
+        self.assertGreater(len(split_segments), 1)
+        self.assertTrue(all(len(item["text"]) <= client._REALTIME_MAX_EN_CHARS for item in split_segments))
+        self.assertEqual(split_segments[0]["start"], 0.0)
+        self.assertEqual(split_segments[-1]["end"], 10.0)
+
+    def test_translation_backlog_drops_old_segments_and_keeps_latest(self):
+        client = self.make_client()
+        first_segment = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "first",
+            "completed": True,
+            "language": "en",
+        }
+        for index in range(1, 7):
+            client.translation_queue.put({
+                "start": float(index),
+                "end": float(index + 1),
+                "text": f"seg{index}",
+                "completed": True,
+                "language": "en",
+            })
+
+        kept, saw_exit_signal = client.drain_translation_backlog(first_segment)
+
+        self.assertFalse(saw_exit_signal)
+        self.assertEqual([segment["text"] for segment in kept], ["seg4", "seg5", "seg6"])
+        self.assertEqual(client.translation_queue.qsize(), 0)
