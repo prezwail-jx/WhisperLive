@@ -15,6 +15,7 @@ class HelsinkiZhEnTranslator:
     """Local zh<->en translator backed by two Marian/Helsinki models."""
 
     SUPPORTED_TARGETS = {"auto", "zh", "en"}
+    MAX_NEW_TOKENS = 96
     ENGLISH_TERM_PATTERN = re.compile(
         r"(?<![A-Za-z0-9])"
         r"(?:[A-Za-z][A-Za-z0-9+#._/-]*"
@@ -283,7 +284,11 @@ class HelsinkiZhEnTranslator:
 
         encoded_input = tokenizer(text_to_translate, return_tensors="pt", truncation=True).to(self.device)
         with torch.no_grad():
-            generated_tokens = model.generate(**encoded_input)
+            generated_tokens = model.generate(
+                **encoded_input,
+                max_new_tokens=self.MAX_NEW_TOKENS,
+                num_beams=1,
+            )
         output = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
         translated_text = output[0] if output else text
         if protected_terms:
@@ -373,7 +378,7 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
             generated_tokens = self.model.generate(
                 **encoded_input,
                 forced_bos_token_id=forced_bos_token_id,
-                max_new_tokens=256,
+                max_new_tokens=self.MAX_NEW_TOKENS,
                 num_beams=1,
             )
         output = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
@@ -416,6 +421,12 @@ class ServeClientTranslation(ServeClientBase):
     }
     _SHORT_ZH_BUFFER_CJK_CHARS = 5
     _SHORT_ZH_BUFFER_WAIT_SECONDS = 3.5
+    _OUTPUT_GUARD_MAX_LENGTH_RATIO = 4.0
+    _OUTPUT_GUARD_MIN_LONG_OUTPUT_CHARS = 160
+    _OUTPUT_GUARD_UNDERSCORE_RUN = 20
+    _OUTPUT_GUARD_MIN_REPEAT_WORDS = 24
+    _OUTPUT_GUARD_MAX_UNIQUE_WORD_RATIO = 0.28
+    _OUTPUT_GUARD_MAX_REPEATED_BIGRAM_COUNT = 8
 
     def __init__(
         self,
@@ -531,12 +542,113 @@ class ServeClientTranslation(ServeClientBase):
         if not self.model_loaded or not self.translator or not text.strip():
             return text, source_language, self.target_language
 
+        started_at = time.monotonic()
         try:
             with self.translator_lock:
-                return self.translator.translate(text, source_language, self.target_language)
+                translated_text, resolved_source_language, target_language = self.translator.translate(
+                    text,
+                    source_language,
+                    self.target_language,
+                )
+            translated_text = self.guard_translation_output(
+                text,
+                translated_text,
+                resolved_source_language,
+                target_language,
+            )
+            return translated_text, resolved_source_language, target_language
         except Exception as e:
             logging.error(f"Translation failed for text '{text}': {e}")
             return text, source_language, self.target_language
+        finally:
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            logging.info(
+                "[TRANSLATION_LATENCY] uid=%s model=%s device=%s source_language=%s "
+                "source_len=%d elapsed_ms=%.1f queue_size=%s source_preview=%r",
+                self.client_uid,
+                self.model_name,
+                self.translation_device,
+                source_language,
+                len(str(text or "")),
+                elapsed_ms,
+                self.translation_queue_size(),
+                str(text or "").strip()[:80],
+            )
+
+    def translation_queue_size(self):
+        try:
+            return self.translation_queue.qsize()
+        except Exception:
+            return "unknown"
+
+    @classmethod
+    def _output_words(cls, text):
+        return [match.group(0).lower() for match in cls._word_spans(text)]
+
+    @classmethod
+    def _has_repeated_ngram(cls, words, ngram_size=2):
+        if len(words) < ngram_size * cls._OUTPUT_GUARD_MAX_REPEATED_BIGRAM_COUNT:
+            return False
+        repeated_count = 1
+        previous = None
+        for index in range(0, len(words) - ngram_size + 1, ngram_size):
+            current = tuple(words[index:index + ngram_size])
+            if current == previous:
+                repeated_count += 1
+                if repeated_count >= cls._OUTPUT_GUARD_MAX_REPEATED_BIGRAM_COUNT:
+                    return True
+            else:
+                repeated_count = 1
+                previous = current
+        return False
+
+    @classmethod
+    def translation_output_guard_reason(cls, source_text, translated_text):
+        source_text = str(source_text or "")
+        translated_text = str(translated_text or "")
+        if re.search(rf"_{{{cls._OUTPUT_GUARD_UNDERSCORE_RUN},}}", translated_text):
+            return "underscore_run"
+
+        if (
+            len(translated_text) >= cls._OUTPUT_GUARD_MIN_LONG_OUTPUT_CHARS
+            and len(translated_text) > max(len(source_text), 1) * cls._OUTPUT_GUARD_MAX_LENGTH_RATIO
+        ):
+            return "length_ratio"
+
+        words = cls._output_words(translated_text)
+        if len(words) >= cls._OUTPUT_GUARD_MIN_REPEAT_WORDS:
+            unique_ratio = len(set(words)) / max(1, len(words))
+            if unique_ratio <= cls._OUTPUT_GUARD_MAX_UNIQUE_WORD_RATIO:
+                return "low_unique_word_ratio"
+            if cls._has_repeated_ngram(words):
+                return "repeated_ngram"
+        return None
+
+    def guard_translation_output(
+        self,
+        source_text: str,
+        translated_text: str,
+        source_language: Optional[str],
+        target_language: Optional[str],
+    ):
+        reason = self.translation_output_guard_reason(source_text, translated_text)
+        if not reason:
+            return translated_text
+
+        logging.warning(
+            "[TRANSLATION_OUTPUT_GUARD] uid=%s reason=%s model=%s source_language=%s "
+            "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
+            self.client_uid,
+            reason,
+            self.model_name,
+            source_language,
+            target_language,
+            len(str(source_text or "")),
+            len(str(translated_text or "")),
+            str(source_text or "").strip()[:120],
+            str(translated_text or "").strip()[:160],
+        )
+        return source_text
 
     @staticmethod
     def normalize_translation_glossary(glossary):
@@ -809,6 +921,7 @@ class ServeClientTranslation(ServeClientBase):
         buffered_segments = self.translation_buffer
         original_text = self.join_translation_buffer_text().strip()
         source_language = self.get_buffer_source_language()
+        flush_started_at = time.monotonic()
         self.translation_buffer = []
         self.translation_buffer_started_at = None
 
@@ -828,6 +941,20 @@ class ServeClientTranslation(ServeClientBase):
             translation_result = self.translate_text(original_text, source_language)
         translated_text, source_language, target_language = translation_result
         self.last_translated_source_text = original_text
+        logging.info(
+            "[TRANSLATION_FLUSH] uid=%s model=%s source_language=%s target_language=%s "
+            "source_len=%d translated_len=%d elapsed_ms=%.1f queue_size=%s start=%s end=%s",
+            self.client_uid,
+            self.model_name,
+            source_language,
+            target_language,
+            len(original_text),
+            len(str(translated_text or "")),
+            (time.monotonic() - flush_started_at) * 1000.0,
+            self.translation_queue_size(),
+            buffered_segments[0].get("start"),
+            buffered_segments[-1].get("end"),
+        )
 
         translated_segment = {
             "start": buffered_segments[0]["start"],
@@ -876,6 +1003,14 @@ class ServeClientTranslation(ServeClientBase):
                     self.translation_queue.task_done()
                     continue
 
+                logging.info(
+                    "[TRANSLATION_QUEUE_SEGMENT] uid=%s queue_size=%s start=%s end=%s text_preview=%r",
+                    self.client_uid,
+                    self.translation_queue_size(),
+                    segment.get("start"),
+                    segment.get("end"),
+                    str(segment.get("text", "")).strip()[:80],
+                )
                 self.add_segment_to_translation_buffer(segment)
                 self.flush_translation_buffer()
 

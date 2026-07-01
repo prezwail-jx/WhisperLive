@@ -5,7 +5,7 @@ from unittest import mock
 
 import torch
 
-from whisper_live.backend.translation_backend import HelsinkiZhEnTranslator, ServeClientTranslation
+from whisper_live.backend.translation_backend import HelsinkiZhEnTranslator, NLLBTranslator, ServeClientTranslation
 
 
 class FakeTensorBatch(dict):
@@ -14,18 +14,28 @@ class FakeTensorBatch(dict):
 
 
 class FakeTokenizer:
+    lang_code_to_id = {"eng_Latn": 1, "zho_Hans": 2}
+    unk_token_id = 0
+
     def __call__(self, text, return_tensors=None, truncation=None):
         return FakeTensorBatch(input_ids=[1, 2, 3])
+
+    def convert_tokens_to_ids(self, token):
+        return self.lang_code_to_id.get(token, self.unk_token_id)
 
     def batch_decode(self, generated_tokens, skip_special_tokens=True):
         return ["translated"]
 
 
 class FakeModel:
+    def __init__(self):
+        self.last_generate_kwargs = None
+
     def to(self, device):
         return self
 
     def generate(self, **kwargs):
+        self.last_generate_kwargs = kwargs
         return [[1, 2, 3]]
 
 
@@ -128,6 +138,42 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
         self.assertIn("第二个术语", tokenizer.last_text)
         self.assertNotIn("Docker", tokenizer.last_text)
         self.assertNotIn("ZZX0ZZ", tokenizer.last_text)
+
+    def test_helsinki_generate_uses_realtime_length_limit(self):
+        translator = HelsinkiZhEnTranslator()
+        translator.tokenizers["en-zh"] = FakeTokenizer()
+        model = FakeModel()
+        translator.models["en-zh"] = model
+
+        translated, source_language, target_language = translator.translate(
+            "hello everyone",
+            "en",
+            "zh",
+        )
+
+        self.assertEqual(translated, "translated")
+        self.assertEqual(source_language, "en")
+        self.assertEqual(target_language, "zh")
+        self.assertEqual(model.last_generate_kwargs["max_new_tokens"], HelsinkiZhEnTranslator.MAX_NEW_TOKENS)
+        self.assertEqual(model.last_generate_kwargs["num_beams"], 1)
+
+    def test_nllb_generate_uses_realtime_length_limit(self):
+        translator = NLLBTranslator()
+        translator.tokenizer = FakeTokenizer()
+        translator.model = FakeModel()
+
+        translated, source_language, target_language = translator.translate(
+            "hello everyone",
+            "en",
+            "zh",
+        )
+
+        self.assertEqual(translated, "translated")
+        self.assertEqual(source_language, "en")
+        self.assertEqual(target_language, "zh")
+        self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], HelsinkiZhEnTranslator.MAX_NEW_TOKENS)
+        self.assertEqual(translator.model.last_generate_kwargs["num_beams"], 1)
+        self.assertEqual(translator.model.last_generate_kwargs["forced_bos_token_id"], 2)
 
     def test_pure_chinese_has_no_terms_to_protect(self):
         protected_text, terms = HelsinkiZhEnTranslator.protect_english_terms(
@@ -271,6 +317,66 @@ class TestServeClientTranslationModelCache(unittest.TestCase):
         self.assertEqual(mock_load.call_count, 3)
 
 
+class TestServeClientTranslationOutputGuard(unittest.TestCase):
+    def make_client(self):
+        with mock.patch.object(ServeClientTranslation, "load_translation_model"):
+            client = ServeClientTranslation(
+                client_uid="client-guard",
+                websocket=mock.Mock(),
+                translation_queue=queue.Queue(),
+            )
+        return client
+
+    def test_guard_rejects_underscore_run(self):
+        client = self.make_client()
+        translated = "English Technology" + "_" * 30
+
+        guarded = client.guard_translation_output("技术词", translated, "zh", "en")
+
+        self.assertEqual(guarded, "技术词")
+        self.assertEqual(
+            ServeClientTranslation.translation_output_guard_reason("技术词", translated),
+            "underscore_run",
+        )
+
+    def test_guard_rejects_too_long_output(self):
+        client = self.make_client()
+        translated = "word " * 50
+
+        guarded = client.guard_translation_output("短句", translated, "zh", "en")
+
+        self.assertEqual(guarded, "短句")
+        self.assertEqual(
+            ServeClientTranslation.translation_output_guard_reason("短句", translated),
+            "length_ratio",
+        )
+
+    def test_guard_rejects_repetitive_output(self):
+        client = self.make_client()
+        translated = "yes " * 30
+
+        guarded = client.guard_translation_output("对对对", translated, "zh", "en")
+
+        self.assertEqual(guarded, "对对对")
+        self.assertEqual(
+            ServeClientTranslation.translation_output_guard_reason("对对对", translated),
+            "low_unique_word_ratio",
+        )
+
+    def test_guard_allows_normal_output(self):
+        client = self.make_client()
+
+        guarded = client.guard_translation_output(
+            "From my side, the main concern is stability.",
+            "从我的角度来看，主要关注点是稳定性。",
+            "en",
+            "zh",
+        )
+
+        self.assertEqual(guarded, "从我的角度来看，主要关注点是稳定性。")
+        self.assertIsNone(ServeClientTranslation.translation_output_guard_reason("hello", "你好"))
+
+
 class TestServeClientTranslationBuffer(unittest.TestCase):
     def make_client(self, **kwargs):
         with mock.patch.object(ServeClientTranslation, "load_translation_model"):
@@ -299,7 +405,7 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         client.add_segment_to_translation_buffer({
             "start": "0.000",
             "end": "0.500",
-            "text": "你好",
+            "text": "明天见",
             "completed": True,
             "language": "zh",
         })
@@ -313,7 +419,7 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         client.add_segment_to_translation_buffer({
             "start": "0.000",
             "end": "1.000",
-            "text": "你好。",
+            "text": "今天开会。",
             "completed": True,
             "language": "zh",
         })
@@ -323,7 +429,7 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         segment = payload["translated_segments"][0]
         self.assertEqual(segment["start"], "0.000")
         self.assertEqual(segment["end"], "1.000")
-        self.assertEqual(segment["text"], "translated:你好。")
+        self.assertEqual(segment["text"], "translated:今天开会。")
         self.assertEqual(segment["source_language"], "zh")
         self.assertEqual(segment["target_language"], "en")
         self.assertEqual(client.translation_buffer, [])
@@ -348,7 +454,7 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         client.add_segment_to_translation_buffer({
             "start": "0.000",
             "end": "1.000",
-            "text": "你好",
+            "text": "明天见",
             "completed": True,
             "language": "zh",
         })
@@ -357,7 +463,7 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
 
         payload = self.get_last_payload(client)
         segment = payload["translated_segments"][0]
-        self.assertEqual(segment["text"], "translated:你好")
+        self.assertEqual(segment["text"], "translated:明天见")
 
     def test_exit_signal_flushes_remaining_buffer(self):
         client = self.make_client()

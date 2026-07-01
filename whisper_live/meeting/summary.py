@@ -209,11 +209,11 @@ class MeetingSummaryService:
 6. 忽略明显重复、口头语和无意义残句，但不得因此改变原意。"""
 
 
-    def __init__(self, base_url="http://127.0.0.1:8001/v1", model="qwen3-4b-awq",
+    def __init__(self, base_url="http://127.0.0.1:8001/v1", model="qwen3-32b-awq",
                  startup_command="bash scripts/start_summary_llm_service.sh", timeout=600,
                  ready_timeout=300, max_chars_per_chunk=8000, idle_shutdown_seconds=600):
         self.base_url = str(base_url or "").rstrip("/")
-        self.model = model or "qwen3-4b-awq"
+        self.model = model or "qwen3-32b-awq"
         self.startup_command = startup_command or ""
         self.timeout = int(timeout or 600)
         self.ready_timeout = int(ready_timeout or 300)
