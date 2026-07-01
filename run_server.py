@@ -144,6 +144,12 @@ if __name__ == "__main__":
         help='Device for server-side translation models. Defaults to CPU so ASR can keep the GPU.'
     )
     parser.add_argument(
+        '--translation_pool_size',
+        type=int,
+        default=4,
+        help='Number of server-side translation model instances per provider/device cache key. Defaults to 4.'
+    )
+    parser.add_argument(
         '--meeting_hotwords_dir',
         type=str,
         default='config/hotwords.d',
@@ -204,6 +210,7 @@ if __name__ == "__main__":
         metrics_port=args.metrics_port,
         hotwords_file=args.hotwords_file,
         translation_device=args.translation_device,
+        translation_pool_size=args.translation_pool_size,
         meeting_hotwords_dir=args.meeting_hotwords_dir,
         meeting_logs_dir=args.meeting_logs_dir,
         summary_base_url=args.summary_base_url,

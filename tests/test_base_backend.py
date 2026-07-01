@@ -585,6 +585,40 @@ class TestUpdateSegments(unittest.TestCase):
         self.assertIsNotNone(last)
         self.assertIn("build relationships", last["text"])
 
+    def test_long_trailing_thank_you_is_dropped(self):
+        self.client.frames_np = np.full(16000 * 8, 0.02, dtype=np.float32)
+        segs = [self._make_segment(0.0, 4.0, " Thank you.")]
+        last = self.client.update_segments(segs, duration=5.0)
+        self.assertIsNone(last)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_japanese_video_ending_phrase_is_dropped(self):
+        self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
+        segs = [self._make_segment(0.0, 2.0, "ご视聴ありがとうございました")]
+        last = self.client.update_segments(segs, duration=3.0)
+        self.assertIsNone(last)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_repetitive_loop_text_is_dropped(self):
+        self.client.frames_np = np.full(16000 * 10, 0.02, dtype=np.float32)
+        text = " ".join(["I am going to show you what"] * 8)
+        segs = [self._make_segment(0.0, 8.0, text)]
+        last = self.client.update_segments(segs, duration=8.0)
+        self.assertIsNone(last)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_short_text_with_unexpected_language_is_dropped(self):
+        self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
+        self.client.current_language = "ja"
+        segs = [self._make_segment(0.0, 2.0, "ok")]
+        last = self.client.update_segments(segs, duration=3.0)
+        self.assertIsNone(last)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
     def test_trailing_normal_thank_you_is_kept_as_incomplete(self):
         self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
         segs = [self._make_segment(0.0, 1.0, " Thank you.")]

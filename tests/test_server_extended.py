@@ -255,6 +255,11 @@ class TestTranscriptionServerInit(unittest.TestCase):
         with self.assertRaises(ValueError):
             server.run(host="localhost", port=9090, max_connection_time=0)
 
+    def test_run_translation_pool_size_zero_raises(self):
+        server = TranscriptionServer()
+        with self.assertRaises(ValueError):
+            server.run(host="localhost", port=9090, translation_pool_size=0)
+
     def test_run_batch_max_size_zero_raises(self):
         server = TranscriptionServer()
         with self.assertRaises(ValueError):

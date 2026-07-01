@@ -159,14 +159,16 @@ class TestServeClientTranslationModelCache(unittest.TestCase):
     def setUp(self):
         ServeClientTranslation._TRANSLATOR_CACHE.clear()
         ServeClientTranslation._TRANSLATOR_INFERENCE_LOCKS.clear()
+        ServeClientTranslation._TRANSLATOR_INDEX.clear()
 
     def tearDown(self):
         ServeClientTranslation._TRANSLATOR_CACHE.clear()
         ServeClientTranslation._TRANSLATOR_INFERENCE_LOCKS.clear()
+        ServeClientTranslation._TRANSLATOR_INDEX.clear()
 
     @mock.patch("whisper_live.backend.translation_backend.AutoModelForSeq2SeqLM.from_pretrained")
     @mock.patch("whisper_live.backend.translation_backend.AutoTokenizer.from_pretrained")
-    def test_clients_with_same_config_share_translator(self, mock_tokenizer, mock_model):
+    def test_clients_with_same_config_share_translator_pool(self, mock_tokenizer, mock_model):
         mock_tokenizer.return_value = FakeTokenizer()
         mock_model.return_value = FakeModel()
 
@@ -174,22 +176,49 @@ class TestServeClientTranslationModelCache(unittest.TestCase):
             client_uid="client-a",
             websocket=mock.Mock(),
             translation_queue=queue.Queue(),
+            translation_pool_size=2,
         )
         client_b = ServeClientTranslation(
             client_uid="client-b",
             websocket=mock.Mock(),
             translation_queue=queue.Queue(),
+            translation_pool_size=2,
+        )
+
+        self.assertIsNot(client_a.translator, client_b.translator)
+        self.assertIsNot(client_a.translator_lock, client_b.translator_lock)
+        self.assertEqual(len(ServeClientTranslation._TRANSLATOR_CACHE[client_a.get_translation_cache_key()]), 2)
+        self.assertEqual(mock_tokenizer.call_count, 4)
+        self.assertEqual(mock_model.call_count, 4)
+
+        translated, source_language, target_language = client_b.translate_text("hello", "en")
+        self.assertEqual(translated, "translated")
+        self.assertEqual(source_language, "en")
+        self.assertEqual(target_language, "zh")
+
+    @mock.patch("whisper_live.backend.translation_backend.AutoModelForSeq2SeqLM.from_pretrained")
+    @mock.patch("whisper_live.backend.translation_backend.AutoTokenizer.from_pretrained")
+    def test_pool_size_one_keeps_single_shared_translator(self, mock_tokenizer, mock_model):
+        mock_tokenizer.return_value = FakeTokenizer()
+        mock_model.return_value = FakeModel()
+
+        client_a = ServeClientTranslation(
+            client_uid="client-a",
+            websocket=mock.Mock(),
+            translation_queue=queue.Queue(),
+            translation_pool_size=1,
+        )
+        client_b = ServeClientTranslation(
+            client_uid="client-b",
+            websocket=mock.Mock(),
+            translation_queue=queue.Queue(),
+            translation_pool_size=1,
         )
 
         self.assertIs(client_a.translator, client_b.translator)
         self.assertIs(client_a.translator_lock, client_b.translator_lock)
         self.assertEqual(mock_tokenizer.call_count, 2)
         self.assertEqual(mock_model.call_count, 2)
-
-        translated, source_language, target_language = client_b.translate_text("hello", "en")
-        self.assertEqual(translated, "translated")
-        self.assertEqual(source_language, "en")
-        self.assertEqual(target_language, "zh")
 
     @mock.patch("whisper_live.backend.translation_backend.AutoModelForSeq2SeqLM.from_pretrained")
     @mock.patch("whisper_live.backend.translation_backend.AutoTokenizer.from_pretrained")
@@ -201,11 +230,13 @@ class TestServeClientTranslationModelCache(unittest.TestCase):
             client_uid="client-a",
             websocket=mock.Mock(),
             translation_queue=queue.Queue(),
+            translation_pool_size=1,
         )
         client_b = ServeClientTranslation(
             client_uid="client-b",
             websocket=mock.Mock(),
             translation_queue=queue.Queue(),
+            translation_pool_size=1,
         )
 
         shared_translator = client_b.translator
@@ -229,6 +260,7 @@ class TestServeClientTranslationModelCache(unittest.TestCase):
             translation_queue=queue.Queue(),
             zh_en_model_path="model/opus-mt-zh-en",
             en_zh_model_path="model/opus-mt-en-zh",
+            translation_pool_size=1,
         )
         client_b = ServeClientTranslation(
             client_uid="client-b",
@@ -236,6 +268,7 @@ class TestServeClientTranslationModelCache(unittest.TestCase):
             translation_queue=queue.Queue(),
             zh_en_model_path="model/custom-zh-en",
             en_zh_model_path="model/custom-en-zh",
+            translation_pool_size=1,
         )
 
         self.assertIsNot(client_a.translator, client_b.translator)
@@ -249,18 +282,21 @@ class TestServeClientTranslationModelCache(unittest.TestCase):
             websocket=mock.Mock(),
             translation_queue=queue.Queue(),
             translation_device="cpu",
+            translation_pool_size=1,
         )
         client_cuda = ServeClientTranslation(
             client_uid="client-cuda",
             websocket=mock.Mock(),
             translation_queue=queue.Queue(),
             translation_device="cuda",
+            translation_pool_size=1,
         )
         client_auto = ServeClientTranslation(
             client_uid="client-auto",
             websocket=mock.Mock(),
             translation_queue=queue.Queue(),
             translation_device="auto",
+            translation_pool_size=1,
         )
 
         self.assertIsNot(client_cpu.translator, client_cuda.translator)
