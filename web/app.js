@@ -110,7 +110,7 @@ let transcriptEditorData = null;
 let lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0, translationGlossary: {} };
 let clientInstanceId = null;
 let displayMode = "split";
-let singleLanguageMode = "source";
+let singleLanguageMode = "translation";
 let detectedSourceLanguage = null;
 let resumeNextConnection = false;
 let intentionallyClosingSocket = false;
@@ -248,7 +248,7 @@ function initializeDefaults() {
   const savedTranslationTarget = window.localStorage.getItem("whisperlive_translation_target");
   const savedDiarizationEnabled = window.localStorage.getItem("whisperlive_diarization_enabled");
   displayMode = window.localStorage.getItem("whisperlive_display_mode") || "split";
-  singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "source";
+  singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "translation";
   if (savedMeeting && !elements.meetingName.value) elements.meetingName.value = savedMeeting;
   if (savedServer) elements.server.value = savedServer;
   if (elements.translationEnabled) elements.translationEnabled.checked = true;
@@ -391,7 +391,7 @@ function openSummaryDrawer() {
 
 function updateTranslationControls(forceConnectionLocked = false) {
   if (elements.language) {
-    elements.language.disabled = Boolean(forceConnectionLocked);
+    elements.language.disabled = Boolean(forceConnectionLocked || faceToFaceEnabled());
   }
   if (elements.translationTarget) {
     elements.translationTarget.disabled = Boolean(forceConnectionLocked || !faceToFaceEnabled() || faceToFaceMode() === "interpretation");
@@ -1638,7 +1638,10 @@ function setDisplayMode(mode) {
   displayMode = ["split", "interleaved", "single"].includes(mode) ? mode : "split";
   window.localStorage.setItem("whisperlive_display_mode", displayMode);
   elements.displayMode.value = displayMode;
-  elements.singleLanguageField.hidden = displayMode !== "single";
+  singleLanguageMode = displayMode === "single" ? "translation" : singleLanguageMode;
+  if (elements.singleLanguage) elements.singleLanguage.value = singleLanguageMode;
+  window.localStorage.setItem("whisperlive_single_language", singleLanguageMode);
+  elements.singleLanguageField.hidden = true;
   elements.transcriptWorkspace.className = `transcript-workspace mode-${displayMode}`;
   elements.viewModeButtons.forEach((button) => button.classList.toggle("active", button.dataset.viewMode === displayMode));
   renderTranscriptViews();
