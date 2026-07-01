@@ -628,7 +628,6 @@ class TranscriptionServer:
                 translation_glossary=options.get("translation_glossary"),
                 translation_terms=options.get("translation_terms") or self.extract_translation_terms(options.get("hotwords")),
                 translation_mode=options.get("translation_mode", "standard"),
-                translation_pool_size=self.translation_pool_size,
             )
             
             # Start translation thread
@@ -1083,7 +1082,6 @@ class TranscriptionServer:
             metrics_port: int = 0,
             hotwords_file=None,
             translation_device="cpu",
-            translation_pool_size=4,
             meeting_hotwords_dir="config/hotwords.d",
             meeting_logs_dir="logs",
             summary_base_url="http://127.0.0.1:8001/v1",
@@ -1119,7 +1117,6 @@ class TranscriptionServer:
         self.cache_path = cache_path
         self.raw_pcm_input = raw_pcm_input
         self.translation_device = translation_device
-        self.translation_pool_size = max(1, int(translation_pool_size or 1))
         self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
         self.meeting_logs = MeetingLogStore(meeting_logs_dir)
         self.summary_templates = SummaryTemplateStore(summary_templates_dir)
@@ -1140,8 +1137,6 @@ class TranscriptionServer:
             raise ValueError(f"max_clients must be >= 1, got {max_clients}")
         if max_connection_time <= 0:
             raise ValueError(f"max_connection_time must be > 0, got {max_connection_time}")
-        if translation_pool_size < 1:
-            raise ValueError(f"translation_pool_size must be >= 1, got {translation_pool_size}")
         if batch_enabled and batch_max_size < 1:
             raise ValueError(f"batch_max_size must be >= 1, got {batch_max_size}")
         if batch_enabled and batch_window_ms < 0:

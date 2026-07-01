@@ -55,10 +55,6 @@ class ServeClientBase(object):
         ".",
         "看我了",
         "我看你了",
-        "ご视聴ありがとうございました",
-        "ご視聴ありがとうございました",
-        "ご清聴ありがとうございました",
-        "ご清听ありがとうございました",
     }
     GRATITUDE_HALLUCINATION_PHRASES = {
         "thank you",
@@ -70,9 +66,6 @@ class ServeClientBase(object):
     }
     MAX_BOUNDARY_DEDUPE_WORDS = 6
     MAX_SHORT_GRATITUDE_SECONDS = 0.5
-    MAX_LONG_GRATITUDE_SECONDS = 3.0
-    REPETITIVE_HALLUCINATION_MIN_WORDS = 16
-    REPETITIVE_HALLUCINATION_MAX_UNIQUE_RATIO = 0.35
 
     def __init__(
         self,
@@ -509,8 +502,6 @@ class ServeClientBase(object):
         duration = max(0.0, float(rel_end or 0.0) - float(rel_start or 0.0))
         if duration < self.MAX_SHORT_GRATITUDE_SECONDS:
             reason = "short"
-        elif duration >= self.MAX_LONG_GRATITUDE_SECONDS:
-            reason = "long"
         elif has_following_segment:
             reason = "middle"
         else:
@@ -524,54 +515,6 @@ class ServeClientBase(object):
             str(text or "").strip()[:80],
         )
         return True
-
-    def _is_repetitive_hallucination_text(self, text):
-        words = [match.group(0).lower() for match in self._word_spans(text)]
-        if len(words) < self.REPETITIVE_HALLUCINATION_MIN_WORDS:
-            return False
-        unique_ratio = len(set(words)) / max(1, len(words))
-        if unique_ratio > self.REPETITIVE_HALLUCINATION_MAX_UNIQUE_RATIO:
-            return False
-        logging.info(
-            "[REPETITIVE_HALLUCINATION_DROP] uid=%s words=%d unique_ratio=%.3f text=%r",
-            self.client_uid,
-            len(words),
-            unique_ratio,
-            str(text or "").strip()[:120],
-        )
-        return True
-
-    def _is_unexpected_language_short_hallucination(self, text):
-        language = getattr(self, "current_language", None) or getattr(self, "language", None)
-        if language in (None, "zh", "en"):
-            return False
-        normalized = self._normalized_phrase(text)
-        if normalized not in {"ok", "okay", "you"}:
-            return False
-        logging.info(
-            "[SHORT_LANGUAGE_HALLUCINATION_DROP] uid=%s language=%s text=%r",
-            self.client_uid,
-            language,
-            str(text or "").strip()[:80],
-        )
-        return True
-
-    def _is_probable_text_hallucination(self, text, rel_start, rel_end, has_following_segment):
-        if self._is_probable_gratitude_hallucination(text, rel_start, rel_end, has_following_segment):
-            return True
-        if self._is_silence_hallucination_phrase(text) and not self._is_gratitude_hallucination_phrase(text):
-            logging.info(
-                "[SILENCE_PHRASE_HALLUCINATION_DROP] uid=%s text=%r",
-                self.client_uid,
-                str(text or "").strip()[:80],
-            )
-            return True
-        if self._is_repetitive_hallucination_text(text):
-            return True
-        if self._is_unexpected_language_short_hallucination(text):
-            return True
-        return False
-
 
     @staticmethod
     def _word_spans(text):
@@ -699,7 +642,7 @@ class ServeClientBase(object):
                     continue
                 if self.get_segment_no_speech_prob(s) > self.no_speech_thresh:
                     continue
-                if self._is_probable_text_hallucination(text_, rel_start, rel_end, has_following_segment):
+                if self._is_probable_gratitude_hallucination(text_, rel_start, rel_end, has_following_segment):
                     offset = rel_end
                     continue
                 if self._is_low_energy_range(rel_start, rel_end, duration, text_):
@@ -732,7 +675,7 @@ class ServeClientBase(object):
         if self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
             rel_start = self.get_segment_start(segments[-1])
             rel_end = min(duration, self.get_segment_end(segments[-1]))
-            if self._is_probable_text_hallucination(segments[-1].text, rel_start, rel_end, False):
+            if self._is_probable_gratitude_hallucination(segments[-1].text, rel_start, rel_end, False):
                 offset = rel_end
             elif self._is_low_energy_range(rel_start, rel_end, duration, segments[-1].text):
                 offset = rel_end
@@ -770,8 +713,7 @@ class ServeClientBase(object):
         if self.same_output_count > self.same_output_threshold:
             repeated_end = min(duration, self.end_time_for_same_output)
             low_energy_repeated = self._is_low_energy_range(0.0, repeated_end, duration, self.current_out)
-            hallucination_repeated = self._is_probable_text_hallucination(self.current_out, 0.0, repeated_end, False)
-            if not low_energy_repeated and not hallucination_repeated and (not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower()):
+            if not low_energy_repeated and (not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower()):
                 completed_text = self._dedupe_completed_text(self.current_out)
                 if not completed_text.strip():
                     completed_text = ""
@@ -822,7 +764,7 @@ class ServeClientBase(object):
                     self.current_out.strip()[:80],
                 )
                 completed_text = self._dedupe_completed_text(self.current_out)
-                if completed_text.strip() and not self._is_probable_text_hallucination(completed_text, 0.0, repeated_end, False):
+                if completed_text.strip():
                     with self.lock:
                         completed_segment = self.format_segment(
                             self.timestamp_offset,

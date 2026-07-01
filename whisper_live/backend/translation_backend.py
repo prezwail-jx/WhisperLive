@@ -396,7 +396,6 @@ class ServeClientTranslation(ServeClientBase):
     """
     _TRANSLATOR_CACHE = {}
     _TRANSLATOR_INFERENCE_LOCKS = {}
-    _TRANSLATOR_INDEX = {}
     _TRANSLATOR_CACHE_LOCK = threading.Lock()
     _STANDALONE_ENGLISH_INTERJECTIONS = {
         "oh": "哦",
@@ -437,7 +436,6 @@ class ServeClientTranslation(ServeClientBase):
         translation_glossary=None,
         translation_terms=None,
         translation_mode="standard",
-        translation_pool_size=4,
     ):
         """
         Initialize the translation client.
@@ -464,7 +462,6 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_glossary = self.normalize_translation_glossary(translation_glossary)
         self.translation_terms = list(translation_terms or [])
         self.translation_mode = str(translation_mode or "standard")
-        self.translation_pool_size = max(1, int(translation_pool_size or 1))
         self.translation_buffer = []
         self.translation_buffer_started_at = None
         self.translated_segments = []
@@ -490,49 +487,36 @@ class ServeClientTranslation(ServeClientBase):
             cache_key = self.get_translation_cache_key()
             with self._TRANSLATOR_CACHE_LOCK:
                 if cache_key not in self._TRANSLATOR_CACHE:
-                    translators = []
-                    locks = []
-                    for _ in range(self.translation_pool_size):
-                        translator = self.create_translator()
-                        translator.load()
-                        translators.append(translator)
-                        locks.append(threading.Lock())
-                    self._TRANSLATOR_CACHE[cache_key] = translators
-                    self._TRANSLATOR_INFERENCE_LOCKS[cache_key] = locks
-                    self._TRANSLATOR_INDEX[cache_key] = 0
+                    if self.model_name == "helsinki_zh_en":
+                        translator = HelsinkiZhEnTranslator(
+                            zh_en_model_path=self.zh_en_model_path,
+                            en_zh_model_path=self.en_zh_model_path,
+                            device=self.translation_device,
+                        )
+                    elif self.model_name in ("nllb_200_600m", "nllb"):
+                        translator = NLLBTranslator(
+                            model_path=self.nllb_model_path,
+                            device=self.translation_device,
+                        )
+                    else:
+                        raise ValueError(f"Unsupported translation model provider: {self.model_name}")
+                    translator.load()
+                    self._TRANSLATOR_CACHE[cache_key] = translator
+                    self._TRANSLATOR_INFERENCE_LOCKS[cache_key] = threading.Lock()
 
-                translators = self._TRANSLATOR_CACHE[cache_key]
-                locks = self._TRANSLATOR_INFERENCE_LOCKS[cache_key]
-                index = self._TRANSLATOR_INDEX.get(cache_key, 0) % len(translators)
-                self._TRANSLATOR_INDEX[cache_key] = (index + 1) % len(translators)
-                self.translator = translators[index]
-                self.translator_lock = locks[index]
+                self.translator = self._TRANSLATOR_CACHE[cache_key]
+                self.translator_lock = self._TRANSLATOR_INFERENCE_LOCKS[cache_key]
             self.model_loaded = True
             logging.info(
-                "Translation model loaded successfully. Provider: %s Target language: %s Pool size: %d",
+                "Translation model loaded successfully. Provider: %s Target language: %s",
                 self.model_name,
                 self.target_language,
-                len(self._TRANSLATOR_CACHE[cache_key]),
             )
         except Exception as e:
             logging.error(f"Failed to load translation model: {e}")
             self.translator = None
             self.translator_lock = None
             self.model_loaded = False
-
-    def create_translator(self):
-        if self.model_name == "helsinki_zh_en":
-            return HelsinkiZhEnTranslator(
-                zh_en_model_path=self.zh_en_model_path,
-                en_zh_model_path=self.en_zh_model_path,
-                device=self.translation_device,
-            )
-        if self.model_name in ("nllb_200_600m", "nllb"):
-            return NLLBTranslator(
-                model_path=self.nllb_model_path,
-                device=self.translation_device,
-            )
-        raise ValueError(f"Unsupported translation model provider: {self.model_name}")
 
     def translate_text(self, text: str, source_language: Optional[str]):
         """
