@@ -119,6 +119,9 @@ let reconnectController = null;
 const DEFAULT_BACKEND = "faster_whisper";
 const DEFAULT_MODEL = "model/asr/small";
 const DEFAULT_DISPLAY_SEGMENTS = 16;
+const DEFAULT_DISPLAY_MODE = "stacked";
+const DEFAULT_FACE_TO_FACE_ENABLED = true;
+const DEFAULT_FACE_TO_FACE_MODE = "interpretation";
 const MAX_SESSION_SEGMENTS = 500;
 const DEFAULT_CAPTION_STYLE = {
   sourceFontSize: 20,
@@ -247,15 +250,19 @@ function initializeDefaults() {
   const savedFaceToFaceMode = window.localStorage.getItem("whisperlive_face_to_face_mode");
   const savedTranslationTarget = window.localStorage.getItem("whisperlive_translation_target");
   const savedDiarizationEnabled = window.localStorage.getItem("whisperlive_diarization_enabled");
-  displayMode = window.localStorage.getItem("whisperlive_display_mode") || "split";
+  displayMode = window.localStorage.getItem("whisperlive_display_mode") || DEFAULT_DISPLAY_MODE;
   singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "translation";
   if (savedMeeting && !elements.meetingName.value) elements.meetingName.value = savedMeeting;
   if (savedServer) elements.server.value = savedServer;
   if (elements.translationEnabled) elements.translationEnabled.checked = true;
   window.localStorage.removeItem("whisperlive_translation_enabled");
   if (savedTranslationProvider && elements.translationProvider) elements.translationProvider.value = savedTranslationProvider;
-  if (savedFaceToFaceEnabled !== null && elements.faceToFaceEnabled) elements.faceToFaceEnabled.checked = savedFaceToFaceEnabled === "true";
-  if (savedFaceToFaceMode && elements.faceToFaceMode) elements.faceToFaceMode.value = savedFaceToFaceMode;
+  if (elements.faceToFaceEnabled) {
+    elements.faceToFaceEnabled.checked = savedFaceToFaceEnabled !== null
+      ? savedFaceToFaceEnabled === "true"
+      : DEFAULT_FACE_TO_FACE_ENABLED;
+  }
+  if (elements.faceToFaceMode) elements.faceToFaceMode.value = savedFaceToFaceMode || DEFAULT_FACE_TO_FACE_MODE;
   if (savedTranslationTarget && elements.translationTarget) elements.translationTarget.value = savedTranslationTarget;
   if (savedDiarizationEnabled !== null) elements.diarizationEnabled.checked = savedDiarizationEnabled === "true";
   elements.displayMode.value = displayMode;
@@ -424,10 +431,6 @@ function hotwordApiBaseUrl() {
   if (serverUrl.startsWith("wss://")) return toAdminBase(serverUrl.replace(/^wss:/, "https:"));
   if (serverUrl.startsWith("ws://")) return toAdminBase(serverUrl.replace(/^ws:/, "http:"));
   return window.location.origin === "null" ? "http://localhost:9093" : window.location.origin;
-}
-
-function hotwordUploadParseUrl() {
-  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/hotwords/parse-upload`;
 }
 
 function adminClientsUrl() {
@@ -1109,15 +1112,7 @@ async function readHotwordFileText(file) {
   if (/\.(txt|md)$/i.test(file.name)) {
     return { text: await file.text(), filename: file.name };
   }
-  if (/\.docx$/i.test(file.name)) {
-    const form = new FormData();
-    form.append("file", file);
-    const response = await fetch(hotwordUploadParseUrl(), { method: "POST", body: form });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-    return { text: result.text || "", filename: result.filename || file.name };
-  }
-  throw new Error("只支持上传 .txt、.md 或 .docx 热词文件");
+  throw new Error("只支持上传 .txt 或 .md 热词文件");
 }
 
 async function loadUploadedHotwords(file) {
@@ -1639,7 +1634,7 @@ function renderTranscriptViews() {
 }
 
 function setDisplayMode(mode) {
-  displayMode = ["split", "interleaved", "single"].includes(mode) ? mode : "split";
+  displayMode = ["split", "stacked", "interleaved", "single"].includes(mode) ? mode : "split";
   window.localStorage.setItem("whisperlive_display_mode", displayMode);
   elements.displayMode.value = displayMode;
   singleLanguageMode = displayMode === "single" ? "translation" : singleLanguageMode;

@@ -28,7 +28,8 @@
             <button id="finishInterruptedButton" class="stop-action" type="button" hidden>结束会议</button>
           </div>
           <div class="view-switcher" aria-label="显示模式">
-            <button type="button" class="view-mode active" data-view-mode="split">双栏</button>
+            <button type="button" class="view-mode" data-view-mode="split">双栏</button>
+            <button type="button" class="view-mode active" data-view-mode="stacked">上下</button>
             <button type="button" class="view-mode" data-view-mode="interleaved">交错</button>
             <button type="button" class="view-mode" data-view-mode="single">单栏</button>
           </div>
@@ -37,7 +38,7 @@
         </div>
       </header>
 
-      <section id="transcriptWorkspace" class="transcript-workspace mode-split" aria-label="同传内容">
+      <section id="transcriptWorkspace" class="transcript-workspace mode-stacked" aria-label="同传内容">
         <article class="transcript-pane source-pane" data-language-pane="source">
           <header><div><span class="pane-kicker">SOURCE</span><h2 id="sourcePaneTitle">原文</h2></div><button id="clearSourceButton" class="text-button" type="button">清空</button></header>
           <div id="sourceText" class="text-stream muted">等待语音输入...</div>
@@ -75,7 +76,7 @@
               <label>WebSocket 地址<input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off"></label>
               <label>源语言<select id="languageInput"><option value="zh">中文</option><option value="en">English</option></select></label>
               <label>翻译模型<select id="translationProviderInput"><option value="helsinki_zh_en">Helsinki 轻量实时</option><option value="nllb_200_600m">NLLB-200 600M 高质量</option></select></label>
-              <label class="toggle-field compact-toggle"><span><strong>启用面对面模式</strong><small>中英互答 / 同传 / 统一记录</small></span><input id="faceToFaceEnabledInput" type="checkbox"><span class="toggle" aria-hidden="true"></span></label>
+              <label class="toggle-field compact-toggle"><span><strong>启用面对面模式</strong><small>中英互答 / 同传 / 统一记录</small></span><input id="faceToFaceEnabledInput" type="checkbox" checked><span class="toggle" aria-hidden="true"></span></label>
               <label>面对面模式<select id="faceToFaceModeInput"><option value="interpretation">同传：中文 ↔ English</option><option value="meeting_record">会议记录：统一翻译为目标语言</option></select></label>
               <label>目标语言<select id="translationTargetInput"><option value="zh">中文</option><option value="en">English</option></select></label>
               <p id="translationModeHint" class="tool-status">普通模式：按源语言固定识别并翻译</p>
@@ -90,8 +91,8 @@
             <summary class="card-title"><span>会议热词</span><small>本页上传，当次会议有效</small></summary>
             <div class="card-body field-stack">
               <div class="hotword-upload-inline">
-                <div class="inline-tool-heading"><strong>上传热词文件</strong><span>支持 TXT / Markdown / DOCX；一行一个热词，支持 source=>target</span></div>
-                <label>热词文件<input id="hotwordFileInput" type="file" accept=".txt,.md,.docx,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
+                <div class="inline-tool-heading"><strong>上传热词文件</strong><span>支持 TXT / Markdown；一行一个热词，支持 source=>target</span></div>
+                <label>热词文件<input id="hotwordFileInput" type="file" accept=".txt,.md,text/plain,text/markdown"></label>
                 <button id="clearHotwordFileButton" class="ghost-button" type="button">清空热词</button>
               </div>
             </div>
@@ -100,7 +101,7 @@
           <details class="settings-card" open>
             <summary class="card-title"><span>显示样式</span><small>布局、字号、颜色</small></summary>
             <div class="card-body field-stack">
-              <label>内容布局<select id="displayModeInput"><option value="split">原文与翻译双栏</option><option value="interleaved">一句原文一句译文</option><option value="single">单语言显示</option></select></label>
+              <label>内容布局<select id="displayModeInput"><option value="split">原文与翻译双栏</option><option value="stacked" selected>原文与翻译上下排列</option><option value="interleaved">一句原文一句译文</option><option value="single">单语言显示</option></select></label>
               <label id="singleLanguageField" hidden>单栏内容<select id="singleLanguageInput"><option value="source">只显示原文</option><option value="zh">只显示中文</option><option value="en">只显示 English</option><option value="translation" selected>只显示翻译</option></select></label>
               <div class="caption-style-group">
                 <div class="caption-style-heading"><strong>原文样式</strong><span id="sourceFontSizeValue">20px</span></div>

@@ -65,10 +65,9 @@ https://app.cmtbs.com:57890/admin.html
 ```text
 .txt
 .md
-.docx
 ```
 
-建议使用 `.txt` 或 `.md`，一行写一个热词。
+建议使用 `.txt` 或 `.md`，一行写一个热词。暂不支持上传 DOCX 热词文件。
 
 示例：
 
