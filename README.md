@@ -1,5 +1,14 @@
 # WhisperLive 部署与使用说明
 
+## 当前文档入口
+
+当前生产环境的详细说明拆分为两份独立文档：
+
+- [普通用户使用指导](./whisperlive-user-guide.md)：面向会议使用者，说明页面入口、WebSocket 填写、热词上传、显示模式、日志导出和总结功能。
+- [运维使用指导](./whisperlive-ops-guide.md)：面向运维人员，说明单卡/双卡模式、容器拉起命令、Nginx 模式切换、WebSocket 路由和 Admin API 填写方式。
+
+如果是生产环境 `https://app.cmtbs.com:57890/` 的使用和维护，优先查看以上两份文档。下面内容保留为项目通用部署说明和历史参考。
+
 本项目当前主要用途：
 
 本项目后端按职责组织：
@@ -68,13 +77,13 @@ docker network create --subnet 172.30.0.0/24 whisperlive-net
 
 ```bash
 docker run --rm -it --gpus '"device=0"' \
-  --name whisperlive-server \
+  --name whisperlive-gpu0 \
   --network whisperlive-net \
   -p 9090:9090 \
   -p 9094:8000 \
   -v "$PWD:/app" \
   -w /app \
-  whisperlive-server bash
+  whisperlive-server:docx bash
 ```
 
 进入容器后启动服务：
