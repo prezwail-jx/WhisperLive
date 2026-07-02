@@ -417,8 +417,12 @@ function normalizeLanguage(value) {
 
 function hotwordApiBaseUrl() {
   const serverUrl = elements.server.value.trim();
-  if (serverUrl.startsWith("wss://")) return serverUrl.replace(/^wss:/, "https:").replace(/\/ws\/?$/, "");
-  if (serverUrl.startsWith("ws://")) return serverUrl.replace(/^ws:/, "http:").replace(/\/ws\/?$/, "");
+  const toAdminBase = (url) => url
+    .replace(/\/ws-gpu0\/?$/, "/admin-gpu0")
+    .replace(/\/ws-gpu1\/?$/, "/admin-gpu1")
+    .replace(/\/ws\/?$/, "");
+  if (serverUrl.startsWith("wss://")) return toAdminBase(serverUrl.replace(/^wss:/, "https:"));
+  if (serverUrl.startsWith("ws://")) return toAdminBase(serverUrl.replace(/^ws:/, "http:"));
   return window.location.origin === "null" ? "http://localhost:9093" : window.location.origin;
 }
 
