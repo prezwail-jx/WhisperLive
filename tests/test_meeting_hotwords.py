@@ -34,18 +34,18 @@ class TestMeetingHotwordStore(unittest.TestCase):
     def test_count_hotwords_ignores_blank_lines_and_comments(self):
         self.assertEqual(count_hotwords("# c\nACE\n\nDocker"), 2)
 
-    def test_translation_rules_add_only_source_to_hotword_prompt(self):
+    def test_translation_rules_do_not_add_source_to_hotword_prompt(self):
         parsed = parse_hotword_config(
             "# comment\nOpenAI => 开放人工智能\n普通热词\ninvalid =>\n=> invalid\n"
         )
 
-        self.assertEqual(parsed["hotwords"], ["OpenAI", "普通热词"])
+        self.assertEqual(parsed["hotwords"], ["普通热词"])
         self.assertEqual(parsed["translation_glossary"], {"OpenAI": "开放人工智能"})
-        self.assertEqual(parsed["count"], 2)
+        self.assertEqual(parsed["count"], 1)
         self.assertEqual(parsed["translation_count"], 1)
         self.assertEqual(
             hotword_text_to_prompt(parsed["text"]),
-            "OpenAI 普通热词",
+            "普通热词",
         )
 
     def test_duplicate_translation_rule_uses_last_target(self):

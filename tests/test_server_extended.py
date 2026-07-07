@@ -206,7 +206,7 @@ class TestHotwordUploadParsing(unittest.TestCase):
 """.encode("utf-8")
         result = TranscriptionServer.parse_hotword_upload("hotwords.md", payload)
         self.assertEqual(result["filename"], "hotwords.md")
-        self.assertEqual(result["count"], 4)
+        self.assertEqual(result["count"], 3)
         self.assertEqual(result["translation_count"], 1)
         self.assertIn("彭凯平", result["normalized_text"])
         self.assertIn("Qwen => Qwen", result["normalized_text"])
@@ -441,6 +441,24 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
             server.apply_default_hotwords(options)
             self.assertEqual(options["hotwords"], "Custom")
 
+    def test_translation_only_meeting_hotwords_do_not_apply_default_asr_hotwords(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "会议A.txt"), "w", encoding="utf-8") as file:
+                file.write("NICE => 长三角国家技术创新中心")
+            server = TranscriptionServer()
+            server.meeting_hotwords = MeetingHotwordStore(directory)
+            server.default_hotwords = "Default"
+            options = {"uid": "client", "meeting_name": "会议A"}
+
+            server.apply_meeting_hotwords(options)
+            server.apply_default_hotwords(options)
+
+            self.assertNotIn("hotwords", options)
+            self.assertEqual(options["hotwords_count"], 0)
+            self.assertEqual(options["translation_glossary"], {"NICE": "长三角国家技术创新中心"})
+            self.assertEqual(options["translation_glossary_count"], 1)
+            self.assertTrue(options["hotwords_locked"])
+
     def test_meeting_translation_glossary_is_loaded_with_custom_hotwords(self):
         with tempfile.TemporaryDirectory() as directory:
             with open(os.path.join(directory, "会议A.txt"), "w", encoding="utf-8") as file:
@@ -454,7 +472,7 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
             self.assertEqual(options["hotwords"], "Custom")
             self.assertEqual(options["translation_glossary"], {"OpenAI": "开放人工智能"})
             self.assertEqual(options["translation_glossary_count"], 1)
-            self.assertEqual(options["hotwords_count"], 2)
+            self.assertEqual(options["hotwords_count"], 1)
 
 
 class TestMeetingSummaryIntegration(unittest.TestCase):

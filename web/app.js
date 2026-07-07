@@ -301,7 +301,6 @@ function parseHotwordText(text) {
     const source = line.slice(0, separator).trim();
     const target = line.slice(separator + 2).trim();
     if (!source || !target) return;
-    hotwords.push(source);
     translationGlossary[source] = target;
     translationCount += 1;
   });
@@ -1127,7 +1126,7 @@ async function loadUploadedHotwords(file) {
   };
   updateHotwordStatus(
     filename
-      ? `${filename} · ${lockedHotwords.count} 个热词 · ${lockedHotwords.translationCount} 条固定翻译`
+      ? `${filename} · ${lockedHotwords.count} 个识别热词 · ${lockedHotwords.translationCount} 条固定翻译`
       : "未上传热词"
   );
 }
@@ -1866,7 +1865,7 @@ async function startCapture() {
   updateMeetingTitle();
   updateHotwordStatus(
     lockedHotwords.filename
-      ? `${lockedHotwords.filename} · ${lockedHotwords.count} 个热词 · ${lockedHotwords.translationCount} 条固定翻译`
+      ? `${lockedHotwords.filename} · ${lockedHotwords.count} 个识别热词 · ${lockedHotwords.translationCount} 条固定翻译`
       : "未上传热词"
   );
 

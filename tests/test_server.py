@@ -83,6 +83,10 @@ class TestServerDefaultHotwords(unittest.TestCase):
         server.apply_default_hotwords(options)
         self.assertEqual(options["hotwords"], "ACE Docker")
 
+        options = {"uid": "client", "hotwords_locked": True, "translation_glossary": {"NICE": "长三角国家技术创新中心"}}
+        server.apply_default_hotwords(options)
+        self.assertNotIn("hotwords", options)
+
 
 class TestGetWaitTime(unittest.TestCase):
     def setUp(self):

@@ -20,7 +20,6 @@ def parse_hotword_config(text):
         if not source or not target:
             logging.warning("Ignoring invalid hotword translation rule: %r", line)
             continue
-        hotwords.append(source)
         translation_glossary[source] = target
         normalized_lines.append(f"{source} => {target}")
 

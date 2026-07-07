@@ -1,0 +1,43 @@
+services:
+  whisperlive-gpu0:
+    image: whisperlive-server:docx
+    container_name: whisperlive-gpu0
+    working_dir: /app
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    ports:
+      - "9090:9090"
+      - "9094:8000"
+    volumes:
+      - .:/app
+    command: bash -lc "./scripts/start_whisper_service.sh"
+    networks:
+      - whisperlive-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+  whisperlive-web-gateway:
+    image: nginx:alpine
+    container_name: whisperlive-web-gateway
+    restart: unless-stopped
+    depends_on:
+      - whisperlive-gpu0
+    ports:
+      - "9093:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./deploy/nginx/whisperlive.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - whisperlive-net
+
+networks:
+  whisperlive-net:
+    external: true

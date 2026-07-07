@@ -469,7 +469,7 @@ class TranscriptionServer:
             options["translation_terms"] = self.extract_translation_terms(stored.get("text"))
 
     def apply_default_hotwords(self, options):
-        if options.get("hotwords"):
+        if options.get("hotwords") or options.get("hotwords_locked"):
             return
         if self.default_hotwords:
             options["hotwords"] = self.default_hotwords
