@@ -316,6 +316,16 @@ class TranscriptionServer:
         self.meeting_logs = MeetingLogStore()
         self.summary_templates = SummaryTemplateStore()
         self.meeting_summary = MeetingSummaryService()
+        self.warmup_lock = threading.Lock()
+        self.warmup_status = {
+            "state": "idle",
+            "started_at": None,
+            "finished_at": None,
+            "duration_seconds": None,
+            "asr_status": "idle",
+            "translation_status": "idle",
+            "error": "",
+        }
 
     HOTWORD_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
 
@@ -482,6 +492,234 @@ class TranscriptionServer:
         payload["server_backend"] = backend
         return payload
 
+    def get_admin_warmup_status_payload(self):
+        with self.warmup_lock:
+            status = dict(self.warmup_status)
+        status["server_time"] = time.time()
+        status["server_backend"] = (
+            self.backend.value if isinstance(getattr(self, "backend", None), BackendType)
+            else str(getattr(self, "backend", "") or "")
+        )
+        return status
+
+    def has_active_clients(self):
+        if not self.client_manager:
+            return False
+        snapshot = self.client_manager.get_client_status_snapshot()
+        return any(client.get("connected") for client in snapshot.get("clients", []))
+
+    def start_admin_warmup(self, config, force=False):
+        with self.warmup_lock:
+            if self.warmup_status.get("state") == "running":
+                return JSONResponse(status_code=409, content={
+                    "started": False,
+                    "error": "warmup already running",
+                    "status": dict(self.warmup_status),
+                })
+
+            if self.has_active_clients() and not force:
+                return JSONResponse(status_code=409, content={
+                    "started": False,
+                    "error": "active clients exist; retry with force=true",
+                    "status": dict(self.warmup_status),
+                })
+
+            now = time.time()
+            self.warmup_status = {
+                "state": "running",
+                "started_at": now,
+                "finished_at": None,
+                "duration_seconds": None,
+                "asr_status": "pending",
+                "translation_status": "pending",
+                "error": "",
+            }
+
+        threading.Thread(target=self.run_admin_warmup, args=(config,), daemon=True).start()
+        return {"started": True, "status": self.get_admin_warmup_status_payload()}
+
+    def run_admin_warmup(self, config):
+        started_at = time.time()
+        asr_status = "skipped"
+        translation_status = "skipped"
+        error = ""
+        state = "success"
+        try:
+            asr_status = self.warmup_asr(config)
+            translation_status = self.warmup_translation(config)
+            failed_parts = [
+                status for status in (asr_status, translation_status)
+                if str(status).startswith("failed")
+            ]
+            if failed_parts:
+                state = "failed"
+                error = "; ".join(failed_parts)
+        except Exception as exc:
+            state = "failed"
+            error = str(exc)
+            logging.exception("[ADMIN_WARMUP_FAILED] %s", exc)
+        finally:
+            finished_at = time.time()
+            with self.warmup_lock:
+                self.warmup_status.update({
+                    "state": state,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "duration_seconds": round(finished_at - started_at, 3),
+                    "asr_status": asr_status,
+                    "translation_status": translation_status,
+                    "error": error,
+                })
+
+    def warmup_asr(self, config):
+        backend = config["backend"]
+        if not self.single_model:
+            logging.info("[ADMIN_WARMUP] ASR skipped because single_model is disabled")
+            return "skipped:not_single_model"
+
+        if backend.is_faster_whisper():
+            return self.warmup_faster_whisper(config)
+        if backend.is_funasr():
+            return self.warmup_funasr(config)
+        logging.info("[ADMIN_WARMUP] ASR warmup skipped for backend=%s", backend.value)
+        return f"skipped:{backend.value}"
+
+    @staticmethod
+    def warmup_audio(duration_seconds=1.0):
+        sample_count = max(1, int(ServeClientBase.RATE * duration_seconds))
+        timeline = np.arange(sample_count, dtype=np.float32) / ServeClientBase.RATE
+        return (0.02 * np.sin(2 * np.pi * 440.0 * timeline)).astype(np.float32)
+
+    @staticmethod
+    def _warmup_compute_type(device):
+        if device == "cuda":
+            major, _ = torch.cuda.get_device_capability(device)
+            return "float16" if major >= 7 else "float32"
+        return "int8"
+
+    def warmup_faster_whisper(self, config):
+        from whisper_live.backend.faster_whisper_backend import ServeClientFasterWhisper
+
+        model_path = config.get("faster_whisper_custom_model_path") or self.resolve_asr_model_path("small")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        with ServeClientFasterWhisper.SINGLE_MODEL_INIT_LOCK:
+            if ServeClientFasterWhisper.SINGLE_MODEL is None:
+                warm_client = object.__new__(ServeClientFasterWhisper)
+                warm_client.model_sizes = [
+                    "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+                    "medium", "medium.en", "large-v2", "large-v3", "distil-small.en",
+                    "distil-medium.en", "distil-large-v2", "distil-large-v3",
+                    "large-v3-turbo", "turbo"
+                ]
+                warm_client.model_size_or_path = model_path
+                warm_client.cache_path = self.cache_path
+                warm_client.compute_type = self._warmup_compute_type(device)
+                logging.info("[ADMIN_WARMUP] Loading shared faster-whisper model: %s", model_path)
+                warm_client.create_model(device)
+                ServeClientFasterWhisper.SINGLE_MODEL = warm_client.transcriber
+            transcriber = ServeClientFasterWhisper.SINGLE_MODEL
+
+        audio = self.warmup_audio()
+        segments, _info = transcriber.transcribe(
+            audio,
+            language="en",
+            task="transcribe",
+            vad_filter=False,
+            initial_prompt=None,
+            hotwords=None,
+            word_timestamps=False,
+        )
+        list(segments or [])
+
+        if (
+            self.batch_config is not None
+            and ServeClientFasterWhisper.BATCH_WORKER is None
+            and ServeClientFasterWhisper.SINGLE_MODEL is not None
+        ):
+            from whisper_live.batch_inference import BatchInferenceWorker
+            worker = BatchInferenceWorker(
+                transcriber=ServeClientFasterWhisper.SINGLE_MODEL,
+                **self.batch_config,
+            )
+            worker.start()
+            ServeClientFasterWhisper.BATCH_WORKER = worker
+            logging.info("[ADMIN_WARMUP] Batch inference worker started")
+
+        logging.info("[ADMIN_WARMUP] faster-whisper warmup completed")
+        return "success"
+
+    def warmup_funasr(self, config):
+        from whisper_live.backend.funasr_backend import ServeClientFunASR
+
+        class WarmupWebSocket:
+            def send(self, _message):
+                return None
+
+            def close(self):
+                return None
+
+        model = config.get("funasr_model")
+        mode = config.get("funasr_mode") or "sensevoice"
+        if mode == "paraformer_streaming":
+            model = model or "model/funasr/paraformer-zh-streaming"
+        else:
+            model = self.resolve_funasr_model_path(model, model)
+
+        client = ServeClientFunASR(
+            WarmupWebSocket(),
+            language="zh",
+            task="transcribe",
+            client_uid="admin-warmup",
+            model=model,
+            device=config.get("funasr_device") or "auto",
+            mode=mode,
+            punc_model=None,
+            vad_model=config.get("funasr_vad_model"),
+            final_model=config.get("funasr_final_model") or "model/funasr/SenseVoiceSmall",
+            final_device=config.get("funasr_final_device"),
+            final_refine=bool(config.get("funasr_final_refine", True)),
+            single_model=True,
+            use_vad=False,
+        )
+        try:
+            audio = self.warmup_audio()
+            if mode == "paraformer_streaming":
+                client.transcribe_streaming_audio(audio, is_final=False)
+            else:
+                client.transcribe_audio(audio)
+        finally:
+            client.cleanup()
+            if getattr(client, "trans_thread", None):
+                client.trans_thread.join(timeout=1.0)
+        logging.info("[ADMIN_WARMUP] FunASR warmup completed")
+        return "success"
+
+    def warmup_translation(self, config):
+        from whisper_live.backend.translation_backend import ServeClientTranslation
+
+        class WarmupWebSocket:
+            def send(self, _message):
+                return None
+
+        translation_client = ServeClientTranslation(
+            client_uid="admin-warmup",
+            websocket=WarmupWebSocket(),
+            translation_queue=queue.Queue(),
+            target_language="auto",
+            model_name=config.get("translation_provider") or "helsinki_zh_en",
+            zh_en_model_path=config.get("zh_en_model_path") or "model/opus-mt-zh-en",
+            en_zh_model_path=config.get("en_zh_model_path") or "model/opus-mt-en-zh",
+            nllb_model_path=config.get("nllb_model_path") or "model/NLLB-200-600M",
+            translation_device=config.get("translation_device") or self.translation_device,
+        )
+        if not translation_client.model_loaded:
+            return "failed:not_loaded"
+        translation_client.translate_text("hello", "en")
+        translation_client.translate_text("你好", "zh")
+        translation_client.cleanup()
+        logging.info("[ADMIN_WARMUP] Translation warmup completed")
+        return "success"
+
     def session_timeline_offset(self, websocket):
         client = self.client_manager.get_client(websocket) if self.client_manager else None
         return float(getattr(client, "meeting_log_timeline_offset_seconds", 0.0) or 0.0) if client else 0.0
@@ -628,6 +866,10 @@ class TranscriptionServer:
                 translation_glossary=options.get("translation_glossary"),
                 translation_terms=options.get("translation_terms") or self.extract_translation_terms(options.get("hotwords")),
                 translation_mode=options.get("translation_mode", "standard"),
+                translation_merge_enabled=options.get("translation_merge_enabled", True),
+                translation_merge_max_chars=options.get("translation_merge_max_chars", 180),
+                translation_merge_max_delay=options.get("translation_merge_max_delay", 1.2),
+                translation_merge_gap_seconds=options.get("translation_merge_gap_seconds", 1.0),
             )
             
             # Start translation thread
@@ -1117,6 +1359,7 @@ class TranscriptionServer:
         self.cache_path = cache_path
         self.raw_pcm_input = raw_pcm_input
         self.translation_device = translation_device
+        self.backend = BackendType(backend)
         self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
         self.meeting_logs = MeetingLogStore(meeting_logs_dir)
         self.summary_templates = SummaryTemplateStore(summary_templates_dir)
@@ -1187,9 +1430,49 @@ class TranscriptionServer:
             allow_headers=["*"],
         )
 
+        warmup_config = {
+            "backend": BackendType(backend),
+            "faster_whisper_custom_model_path": faster_whisper_custom_model_path,
+            "funasr_model": funasr_model,
+            "funasr_device": funasr_device,
+            "funasr_mode": funasr_mode,
+            "funasr_vad_model": funasr_vad_model,
+            "funasr_final_model": funasr_final_model,
+            "funasr_final_device": funasr_final_device,
+            "funasr_final_refine": funasr_final_refine,
+            "translation_device": translation_device,
+            "translation_provider": "helsinki_zh_en",
+            "zh_en_model_path": "model/opus-mt-zh-en",
+            "en_zh_model_path": "model/opus-mt-en-zh",
+            "nllb_model_path": "model/NLLB-200-600M",
+        }
+
         @app.get("/admin/clients")
         async def admin_clients():
             return self.get_admin_clients_payload()
+
+        @app.get("/admin/warmup/status")
+        async def admin_warmup_status():
+            return self.get_admin_warmup_status_payload()
+
+        @app.post("/admin/warmup")
+        async def admin_warmup(request: Request, force: bool = False):
+            config = dict(warmup_config)
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            if isinstance(body, dict):
+                for key in (
+                    "translation_provider",
+                    "zh_en_model_path",
+                    "en_zh_model_path",
+                    "nllb_model_path",
+                    "translation_device",
+                ):
+                    if body.get(key):
+                        config[key] = body[key]
+            return self.start_admin_warmup(config, force=force)
 
         @app.delete("/admin/clients/{uid}")
         async def delete_admin_client(uid: str):

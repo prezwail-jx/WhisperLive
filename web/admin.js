@@ -15,6 +15,11 @@ const els = {
   hotwordFileList: document.getElementById("hotwordFileList"),
   hotwordPreview: document.getElementById("hotwordPreview"),
   refreshHotwords: document.getElementById("refreshHotwordsButton"),
+  warmupStatus: document.getElementById("warmupStatus"),
+  warmupDetails: document.getElementById("warmupDetails"),
+  refreshWarmup: document.getElementById("refreshWarmupButton"),
+  runWarmup: document.getElementById("runWarmupButton"),
+  warmupForce: document.getElementById("warmupForceInput"),
 };
 
 let timer = null;
@@ -48,6 +53,17 @@ function hotwordListUrl() {
   return `${apiBaseUrl()}/admin/hotwords`;
 }
 
+function warmupStatusUrl() {
+  return `${apiBaseUrl()}/admin/warmup/status`;
+}
+
+function warmupRunUrl() {
+  const params = new URLSearchParams();
+  if (els.warmupForce && els.warmupForce.checked) params.set("force", "true");
+  const query = params.toString();
+  return `${apiBaseUrl()}/admin/warmup${query ? `?${query}` : ""}`;
+}
+
 function hotwordUrl(meetingName) {
   const meeting = String(meetingName || "").trim();
   if (!meeting) throw new Error("请先选择会议热词");
@@ -64,6 +80,13 @@ function fmtSeconds(value) {
 function fmtTime(value) {
   if (!value) return "-";
   return new Date(Number(value) * 1000).toLocaleString();
+}
+
+function warmupStateLabel(state) {
+  if (state === "running") return ["预热中", "busy"];
+  if (state === "success") return ["预热完成", "ready"];
+  if (state === "failed") return ["预热失败", "error"];
+  return ["未预热", "idle"];
 }
 
 function escapeHtml(value) {
@@ -166,6 +189,56 @@ async function refreshHotwordList() {
   }
 }
 
+function renderWarmupStatus(data) {
+  if (!els.warmupStatus || !els.warmupDetails) return;
+  const [label, stateClass] = warmupStateLabel(data.state);
+  els.warmupStatus.textContent = label;
+  els.warmupStatus.className = `warmup-state ${stateClass}`;
+  const details = [
+    `后端：${data.server_backend || "-"}`,
+    `ASR：${data.asr_status || "-"}`,
+    `翻译：${data.translation_status || "-"}`,
+    `耗时：${data.duration_seconds ? `${Number(data.duration_seconds).toFixed(1)}s` : "-"}`,
+    `开始：${fmtTime(data.started_at)}`,
+  ];
+  if (data.error) details.push(`错误：${data.error}`);
+  els.warmupDetails.textContent = details.join(" / ");
+}
+
+async function refreshWarmupStatus() {
+  if (!els.warmupStatus) return;
+  try {
+    const response = await fetch(warmupStatusUrl(), { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    renderWarmupStatus(data);
+  } catch (error) {
+    els.warmupStatus.textContent = "预热状态加载失败";
+    els.warmupStatus.className = "warmup-state error";
+    if (els.warmupDetails) els.warmupDetails.textContent = String(error);
+  }
+}
+
+async function runWarmup() {
+  if (!els.runWarmup) return;
+  try {
+    els.runWarmup.disabled = true;
+    els.warmupStatus.textContent = "预热中";
+    els.warmupStatus.className = "warmup-state busy";
+    const response = await fetch(warmupRunUrl(), { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    renderWarmupStatus(data.status || data);
+    window.setTimeout(refreshWarmupStatus, 1200);
+  } catch (error) {
+    els.warmupStatus.textContent = "预热失败";
+    els.warmupStatus.className = "warmup-state error";
+    if (els.warmupDetails) els.warmupDetails.textContent = String(error);
+  } finally {
+    els.runWarmup.disabled = false;
+  }
+}
+
 async function showMeetingHotwords(meetingName) {
   const response = await fetch(hotwordUrl(meetingName), { cache: "no-store" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -242,6 +315,8 @@ els.hotwordSelect.addEventListener("change", () => {
 });
 
 els.refreshHotwords.addEventListener("click", refreshHotwordList);
+if (els.refreshWarmup) els.refreshWarmup.addEventListener("click", refreshWarmupStatus);
+if (els.runWarmup) els.runWarmup.addEventListener("click", runWarmup);
 
 initializeDefaultApi();
 els.start.addEventListener("click", startPolling);
@@ -251,4 +326,5 @@ els.stop.addEventListener("click", () => {
 });
 
 refreshHotwordList();
+refreshWarmupStatus();
 startPolling();

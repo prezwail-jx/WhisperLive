@@ -52,6 +52,24 @@
         <pre class="hotword-preview" id="hotwordPreview">选择列表中的会议查看内容。</pre>
       </section>
 
+      <section class="warmup-panel" aria-label="服务预热管理">
+        <header>
+          <h2>服务预热</h2>
+          <span id="warmupStatus">未刷新</span>
+        </header>
+        <div class="warmup-body">
+          <div class="warmup-details" id="warmupDetails">用于手动加载 ASR 与翻译模型，减少正式会议首次冷启动。</div>
+          <label class="inline-checkbox">
+            <input id="warmupForceInput" type="checkbox">
+            有活动 Client 时仍强制预热
+          </label>
+          <div class="actions">
+            <button id="refreshWarmupButton" type="button">刷新预热状态</button>
+            <button id="runWarmupButton" type="button">预热当前服务</button>
+          </div>
+        </div>
+      </section>
+
       <section class="summary-grid" aria-label="汇总指标">
         <article><span>当前连接</span><strong id="activeCount">0</strong></article>
         <article><span>翻译开启</span><strong id="translationCount">0</strong></article>
@@ -91,6 +109,6 @@
         </div>
       </section>
     </main>
-    <script src="./admin.js?v=translation-glossary-1"></script>
+    <script src="./admin.js?v=warmup-1"></script>
   </body>
 </html>

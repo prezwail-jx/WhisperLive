@@ -34,6 +34,7 @@ button, input, select, textarea { font: inherit; }
 .controls,
 .table-panel,
 .hotword-panel,
+.warmup-panel,
 .summary-grid article {
   background: rgba(255, 253, 247, 0.94);
   border: 1px solid var(--line);
@@ -172,6 +173,53 @@ button {
   font: 13px/1.5 "Avenir Next", "Noto Sans SC", "Segoe UI", sans-serif;
 }
 .empty.small { padding: 14px; }
+
+.warmup-panel {
+  margin-top: 18px;
+  overflow: hidden;
+}
+.warmup-panel header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  padding: 16px;
+}
+.warmup-body {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
+  gap: 14px;
+  align-items: center;
+  padding: 16px;
+}
+.warmup-details {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.warmup-state {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+.warmup-state.ready { color: var(--green); }
+.warmup-state.busy { color: var(--amber); }
+.warmup-state.error { color: var(--red); }
+.inline-checkbox {
+  display: flex;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.inline-checkbox input {
+  width: auto;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
 
 .summary-grid {
   display: grid;

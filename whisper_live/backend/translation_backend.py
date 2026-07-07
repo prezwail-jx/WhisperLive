@@ -451,6 +451,10 @@ class ServeClientTranslation(ServeClientBase):
         translation_glossary=None,
         translation_terms=None,
         translation_mode="standard",
+        translation_merge_enabled=True,
+        translation_merge_max_chars=180,
+        translation_merge_max_delay=1.2,
+        translation_merge_gap_seconds=1.0,
     ):
         """
         Initialize the translation client.
@@ -477,8 +481,14 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_glossary = self.normalize_translation_glossary(translation_glossary)
         self.translation_terms = list(translation_terms or [])
         self.translation_mode = str(translation_mode or "standard")
+        self.translation_merge_enabled = bool(translation_merge_enabled)
+        self.translation_merge_max_chars = max(1, int(translation_merge_max_chars or 180))
+        self.translation_merge_max_delay = max(0.1, float(translation_merge_max_delay or 1.2))
+        self.translation_merge_gap_seconds = max(0.0, float(translation_merge_gap_seconds or 1.0))
         self.translation_buffer = []
         self.translation_buffer_started_at = None
+        self.translation_merge_buffer = []
+        self.translation_merge_started_at = None
         self.translated_segments = []
         self.last_translated_source_text = ""
         self.translator = None
@@ -1055,7 +1065,120 @@ class ServeClientTranslation(ServeClientBase):
         if len(utterance_ids) == 1:
             translated_segment["utterance_id"] = utterance_ids[0]
 
-        self.translated_segments.append(translated_segment)
+        self.enqueue_translated_segment(translated_segment)
+
+    @staticmethod
+    def _segment_time(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def _join_merge_text(cls, values, language=None):
+        merged = ""
+        for value in values:
+            current = str(value or "").strip()
+            if not current:
+                continue
+            if not merged:
+                merged = current
+                continue
+            if language == "zh":
+                merged = f"{merged}{current}"
+                continue
+            needs_space = re.search(r"[A-Za-z0-9]$", merged) and re.search(r"^[A-Za-z0-9]", current)
+            merged = f"{merged}{' ' if needs_space else ''}{current}"
+        return merged
+
+    def _merge_buffer_text(self):
+        target_language = self.translation_merge_buffer[0].get("target_language") if self.translation_merge_buffer else None
+        return self._join_merge_text((segment.get("text") for segment in self.translation_merge_buffer), target_language)
+
+    def _merge_buffer_source_text(self):
+        source_language = self.translation_merge_buffer[0].get("source_language") if self.translation_merge_buffer else None
+        return self._join_merge_text((segment.get("source_text") for segment in self.translation_merge_buffer), source_language)
+
+    def _should_split_merge_buffer_before(self, segment):
+        if not self.translation_merge_buffer:
+            return False
+        previous = self.translation_merge_buffer[-1]
+        if previous.get("source_language") != segment.get("source_language"):
+            return True
+        if previous.get("target_language") != segment.get("target_language"):
+            return True
+        if previous.get("translation_model") != segment.get("translation_model"):
+            return True
+        gap = self._segment_time(segment.get("start")) - self._segment_time(previous.get("end"))
+        return gap > self.translation_merge_gap_seconds
+
+    def should_flush_merge_buffer(self, force=False):
+        if not self.translation_merge_buffer:
+            return False
+        if force:
+            return True
+        if len(self._merge_buffer_text()) >= self.translation_merge_max_chars:
+            return True
+        if self.translation_merge_started_at is not None:
+            return time.monotonic() - self.translation_merge_started_at >= self.translation_merge_max_delay
+        return False
+
+    def enqueue_translated_segment(self, translated_segment):
+        if not self.translation_merge_enabled:
+            self.translated_segments.append(translated_segment)
+            segments_to_send = self.prepare_translated_segments()
+            self.send_translation_to_client(segments_to_send)
+            return
+
+        if self._should_split_merge_buffer_before(translated_segment):
+            self.flush_merge_buffer(force=True)
+
+        if not self.translation_merge_buffer:
+            self.translation_merge_started_at = time.monotonic()
+        self.translation_merge_buffer.append(translated_segment)
+        self.flush_merge_buffer()
+
+    def build_merged_translation_segment(self):
+        first = self.translation_merge_buffer[0]
+        last = self.translation_merge_buffer[-1]
+        utterance_ids = list(dict.fromkeys(
+            utterance_id
+            for segment in self.translation_merge_buffer
+            for utterance_id in (segment.get("source_utterance_ids") or ([segment.get("utterance_id")] if segment.get("utterance_id") else []))
+            if utterance_id
+        ))
+        merged_segment = {
+            "start": first.get("start"),
+            "end": last.get("end"),
+            "text": self._merge_buffer_text(),
+            "completed": True,
+            "source_text": self._merge_buffer_source_text(),
+            "source_language": first.get("source_language"),
+            "target_language": first.get("target_language"),
+            "translation_model": first.get("translation_model"),
+        }
+        if utterance_ids:
+            merged_segment["source_utterance_ids"] = utterance_ids
+        if len(utterance_ids) == 1:
+            merged_segment["utterance_id"] = utterance_ids[0]
+        return merged_segment
+
+    def flush_merge_buffer(self, force=False):
+        if not self.should_flush_merge_buffer(force=force):
+            return
+        item_count = len(self.translation_merge_buffer)
+        merged_segment = self.build_merged_translation_segment()
+        self.translation_merge_buffer = []
+        self.translation_merge_started_at = None
+        self.translated_segments.append(merged_segment)
+        logging.info(
+            "[TRANSLATION_MERGE_FLUSH] uid=%s items=%d text_len=%d start=%s end=%s",
+            self.client_uid,
+            item_count,
+            len(str(merged_segment.get("text") or "")),
+            merged_segment.get("start"),
+            merged_segment.get("end"),
+        )
         segments_to_send = self.prepare_translated_segments()
         self.send_translation_to_client(segments_to_send)
 
@@ -1123,6 +1246,7 @@ class ServeClientTranslation(ServeClientBase):
                     self.translation_queue.task_done()
                     logging.info(f"Received exit signal for translation client {self.client_uid}")
                     self.flush_translation_buffer(force=True)
+                    self.flush_merge_buffer(force=True)
                     break
 
                 segments_to_process, saw_exit_signal = self.drain_translation_backlog(segment)
@@ -1138,10 +1262,12 @@ class ServeClientTranslation(ServeClientBase):
                     if saw_exit_signal:
                         logging.info(f"Received exit signal for translation client {self.client_uid}")
                         self.flush_translation_buffer(force=True)
+                        self.flush_merge_buffer(force=True)
                         break
 
             except queue.Empty:
                 self.flush_translation_buffer()
+                self.flush_merge_buffer()
                 continue
             except Exception as e:
                 logging.error(f"Error processing translation queue: {e}")

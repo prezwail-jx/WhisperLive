@@ -379,6 +379,7 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
 class TestServeClientTranslationBuffer(unittest.TestCase):
     def make_client(self, **kwargs):
+        kwargs.setdefault("translation_merge_enabled", False)
         with mock.patch.object(ServeClientTranslation, "load_translation_model"):
             client = ServeClientTranslation(
                 client_uid="client-buffer",
@@ -735,6 +736,89 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
             ["client:1:0.000", "client:2:0.500"],
         )
         self.assertNotIn("utterance_id", segment)
+
+    def test_translation_merge_buffers_completed_translations_until_forced(self):
+        client = self.make_client(
+            translation_merge_enabled=True,
+            translation_merge_max_chars=100,
+            translation_merge_max_delay=60,
+        )
+        for start, end, text, utterance_id in (
+            ("0.000", "0.500", "你好", "client:1:0.000"),
+            ("0.500", "1.000", "世界", "client:2:0.500"),
+        ):
+            client.add_segment_to_translation_buffer({
+                "start": start,
+                "end": end,
+                "text": text,
+                "completed": True,
+                "language": "zh",
+                "utterance_id": utterance_id,
+            })
+            client.flush_translation_buffer(force=True)
+
+        client.websocket.send.assert_not_called()
+        client.flush_merge_buffer(force=True)
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["start"], "0.000")
+        self.assertEqual(segment["end"], "1.000")
+        self.assertEqual(segment["text"], "translated:你好translated:世界")
+        self.assertEqual(segment["source_text"], "你好世界")
+        self.assertEqual(segment["source_utterance_ids"], ["client:1:0.000", "client:2:0.500"])
+        self.assertNotIn("utterance_id", segment)
+
+    def test_translation_merge_flushes_on_gap(self):
+        client = self.make_client(
+            translation_merge_enabled=True,
+            translation_merge_max_chars=100,
+            translation_merge_max_delay=60,
+            translation_merge_gap_seconds=0.5,
+        )
+        client.enqueue_translated_segment({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "hello",
+            "completed": True,
+            "source_text": "你好",
+            "source_language": "zh",
+            "target_language": "en",
+            "translation_model": "helsinki_zh_en",
+            "utterance_id": "client:1:0.000",
+        })
+        client.enqueue_translated_segment({
+            "start": "2.000",
+            "end": "2.500",
+            "text": "world",
+            "completed": True,
+            "source_text": "世界",
+            "source_language": "zh",
+            "target_language": "en",
+            "translation_model": "helsinki_zh_en",
+            "utterance_id": "client:2:2.000",
+        })
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "hello")
+        self.assertEqual(len(client.translation_merge_buffer), 1)
+        self.assertEqual(client.translation_merge_buffer[0]["text"], "world")
+
+    def test_translation_merge_disabled_keeps_immediate_send(self):
+        client = self.make_client(translation_merge_enabled=False)
+        client.enqueue_translated_segment({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "hello",
+            "completed": True,
+            "source_text": "你好",
+            "source_language": "zh",
+            "target_language": "en",
+            "translation_model": "helsinki_zh_en",
+        })
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "hello")
 
     def test_auto_language_chinese_segment_is_inferred_for_auto_translation(self):
         client = self.make_client()
