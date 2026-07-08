@@ -695,6 +695,58 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         self.assertEqual(payload["translated_segments"][0]["text"], "C Plus Plus")
         client.translate_text.assert_not_called()
 
+    def test_glossary_applies_only_english_sources_for_en_to_zh(self):
+        client = self.make_client(translation_glossary={
+            "NICE": "长三角国家技术创新中心",
+            "Liu Qing": "刘庆",
+            "刘庆": "Liu Qing",
+            "长三角国家技术创新中心": "NICE",
+        })
+
+        translated_text, source_language, target_language = client.translate_with_glossary(
+            "NICE works with Liu Qing.",
+            "en",
+        )
+
+        self.assertEqual(translated_text, "translated:长三角国家技术创新中心 works with 刘庆.")
+        self.assertEqual(source_language, "en")
+        self.assertEqual(target_language, "zh")
+
+    def test_glossary_applies_only_chinese_sources_for_zh_to_en(self):
+        client = self.make_client(translation_glossary={
+            "NICE": "长三角国家技术创新中心",
+            "Liu Qing": "刘庆",
+            "刘庆": "Liu Qing",
+            "长三角国家技术创新中心": "NICE",
+        })
+
+        translated_text, source_language, target_language = client.translate_with_glossary(
+            "刘庆来自长三角国家技术创新中心",
+            "zh",
+        )
+
+        self.assertEqual(translated_text, "translated:Liu Qing来自NICE")
+        self.assertEqual(source_language, "zh")
+        self.assertEqual(target_language, "en")
+
+    def test_glossary_exact_match_respects_source_language_direction(self):
+        client = self.make_client(translation_glossary={
+            "NICE": "长三角国家技术创新中心",
+            "长三角国家技术创新中心": "NICE",
+        })
+
+        self.assertIsNone(client.translate_with_glossary("NICE", "zh"))
+
+    def test_glossary_exact_match_keeps_legacy_behavior_without_source_language(self):
+        client = self.make_client(translation_glossary={"NICE": "长三角国家技术创新中心"})
+
+        translated_text, source_language, target_language = client.translate_with_glossary("NICE", None)
+
+        self.assertEqual(translated_text, "长三角国家技术创新中心")
+        self.assertIsNone(source_language)
+        self.assertEqual(target_language, "auto")
+        client.translate_text.assert_not_called()
+
     def test_translation_preserves_single_utterance_id(self):
         client = self.make_client(translation_max_chars=4)
         for start, end, text in (("0.000", "0.500", "你好"), ("0.500", "1.000", "世界")):

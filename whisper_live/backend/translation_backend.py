@@ -479,6 +479,7 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_max_wait_seconds = translation_max_wait_seconds
         self.translation_sentence_endings = translation_sentence_endings
         self.translation_glossary = self.normalize_translation_glossary(translation_glossary)
+        self._translation_glossary_sources_cache = {}
         self.translation_terms = list(translation_terms or [])
         self.translation_mode = str(translation_mode or "standard")
         self.translation_merge_enabled = bool(translation_merge_enabled)
@@ -695,6 +696,30 @@ class ServeClientTranslation(ServeClientBase):
         return str(text or "").strip(punctuation).casefold()
 
     @staticmethod
+    def _glossary_source_language(source):
+        source = str(source or "")
+        if re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", source):
+            return "zh"
+        if re.search(r"[A-Za-z]", source):
+            return "en"
+        return None
+
+    def glossary_sources_for_language(self, source_language):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        if source_language not in ("zh", "en"):
+            source_language = None
+        if source_language in self._translation_glossary_sources_cache:
+            return self._translation_glossary_sources_cache[source_language]
+
+        sources = []
+        for source in self.translation_glossary:
+            glossary_language = self._glossary_source_language(source)
+            if source_language is None or glossary_language is None or glossary_language == source_language:
+                sources.append(source)
+        self._translation_glossary_sources_cache[source_language] = sources
+        return sources
+
+    @staticmethod
     def _glossary_term_pattern(source):
         escaped = re.escape(source)
         if source and source[0].isascii() and source[0].isalnum():
@@ -712,8 +737,13 @@ class ServeClientTranslation(ServeClientBase):
         if not self.translation_glossary:
             return None
 
+        eligible_sources = self.glossary_sources_for_language(source_language)
+        if not eligible_sources:
+            return None
+
         normalized_text = self._normalize_glossary_lookup_text(text)
-        for source, target in self.translation_glossary.items():
+        for source in eligible_sources:
+            target = self.translation_glossary[source]
             if self._normalize_glossary_lookup_text(source) == normalized_text:
                 logging.info("[TRANSLATION_GLOSSARY_EXACT] source=%r target=%r", text, target)
                 return (
@@ -722,7 +752,7 @@ class ServeClientTranslation(ServeClientBase):
                     self._resolved_target_language(source_language),
                 )
 
-        ordered_sources = sorted(self.translation_glossary, key=len, reverse=True)
+        ordered_sources = sorted(eligible_sources, key=len, reverse=True)
         if not ordered_sources:
             return None
         pattern = re.compile(
