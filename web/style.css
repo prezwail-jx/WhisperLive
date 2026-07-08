@@ -101,6 +101,7 @@ h1 { margin: 0; overflow: hidden; font-size: clamp(17px, 1.8vw, 24px); line-heig
 .text-stream.muted { display: grid; place-items: center; color: #3e4842; font-size: 17px; }
 .segment { margin: 0 0 .62em; }
 .segment.incomplete { color: #738078; }
+.translation-warning-mark { display: inline-flex; align-items: center; justify-content: center; width: 1.05em; height: 1.05em; border-radius: 999px; background: #fff3cd; color: #9a6700; font-size: .58em; font-weight: 800; line-height: 1; vertical-align: super; }
 .interleaved-pane { display: none; }
 .mode-stacked .interleaved-pane { display: none; }
 .mode-interleaved { grid-template-columns: 1fr; }

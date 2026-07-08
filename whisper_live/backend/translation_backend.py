@@ -511,6 +511,10 @@ class ServeClientTranslation(ServeClientBase):
             self.translation_device,
         )
 
+    @staticmethod
+    def is_nllb_model(model_name):
+        return str(model_name or "") in {"nllb_200_600m", "nllb", "nllb_200_distilled_1_3b", "nllb_200_1_3b"}
+
     def load_translation_model(self):
         """Load the translation model and tokenizer."""
         try:
@@ -523,7 +527,7 @@ class ServeClientTranslation(ServeClientBase):
                             en_zh_model_path=self.en_zh_model_path,
                             device=self.translation_device,
                         )
-                    elif self.model_name in ("nllb_200_600m", "nllb"):
+                    elif self.is_nllb_model(self.model_name):
                         translator = NLLBTranslator(
                             model_path=self.nllb_model_path,
                             device=self.translation_device,
@@ -674,7 +678,7 @@ class ServeClientTranslation(ServeClientBase):
             return "unknown"
 
     def should_retry_nllb_residual_cjk(self, translated_text, source_language, target_language):
-        if self.model_name not in ("nllb_200_600m", "nllb"):
+        if not self.is_nllb_model(self.model_name):
             return False
         source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
         target_language = HelsinkiZhEnTranslator.normalize_language(target_language) or "auto"

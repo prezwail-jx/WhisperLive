@@ -460,6 +460,22 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
         self.assertIsNone(client.pending_translation_warning)
         self.assertEqual(client.translator.translate.call_count, 1)
 
+    def test_nllb_1_3b_alias_uses_nllb_residual_retry(self):
+        client = self.make_client(
+            model_name="nllb_200_distilled_1_3b",
+            translations=[
+                ("创新中心联合集粹教育基金会特邀U型理论创始人", "zh", "en"),
+                ("The Innovation Center invited the founder of Theory U.", "zh", "en"),
+            ],
+        )
+
+        translated, source_language, target_language = client.translate_text("创新中心特邀专家", "zh")
+
+        self.assertEqual(translated, "The Innovation Center invited the founder of Theory U.")
+        self.assertEqual(source_language, "zh")
+        self.assertEqual(target_language, "en")
+        self.assertEqual(client.translator.translate.call_count, 2)
+
     def test_nllb_en_to_zh_does_not_retry_english_residual(self):
         client = self.make_client(translations=[("This remains English.", "en", "zh")])
 

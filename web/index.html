@@ -74,7 +74,7 @@
             <div class="card-body field-stack">
               <label>会议名称<input id="meetingNameInput" type="text" maxlength="80" placeholder="如 2026产品会" autocomplete="off"></label>
               <label>WebSocket 地址<input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off"></label>
-              <label>翻译模型<select id="translationProviderInput"><option value="helsinki_zh_en">Helsinki 轻量实时</option><option value="nllb_200_600m">NLLB-200 600M 高质量</option></select></label>
+              <label>翻译模型<select id="translationProviderInput"><option value="helsinki_zh_en">Helsinki 轻量实时</option><option value="nllb_200_600m">NLLB-200 600M 高质量</option><option value="nllb_200_distilled_1_3b">NLLB-200 1.3B 高质量</option></select></label>
               <label>翻译方式<select id="faceToFaceModeInput"><option value="interpretation" selected>自动识别语言：中文 ↔ English</option><option value="specified">指定翻译：手动选择源语言和目标语言</option></select></label>
               <label>源语言（指定翻译）<select id="languageInput"><option value="zh">中文</option><option value="en">English</option></select></label>
               <label>目标语言<select id="translationTargetInput"><option value="auto" selected>自动互译</option><option value="zh">中文</option><option value="en">English</option></select></label>
@@ -220,6 +220,6 @@
     <script src="./reconnect-controller.js?v=reconnect-1"></script>
     <script src="./ws-client.js?v=reconnect-1"></script>
     <script src="./audio-capture.js?v=reconnect-1"></script>
-    <script src="./app.js?v=face-toggle-2"></script>
+    <script src="./app.js?v=nllb-warning-1"></script>
   </body>
 </html>

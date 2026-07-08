@@ -121,6 +121,7 @@ const DEFAULT_MODEL = "model/asr/small";
 const DEFAULT_DISPLAY_SEGMENTS = 16;
 const DEFAULT_DISPLAY_MODE = "stacked";
 const DEFAULT_TRANSLATION_MODE = "interpretation";
+const TRANSLATION_ERROR_SUFFIX = "（翻译出错）";
 const MAX_SESSION_SEGMENTS = 500;
 const DEFAULT_CAPTION_STYLE = {
   sourceFontSize: 20,
@@ -470,6 +471,14 @@ function faceToFaceEnabled() {
 function selectedTargetLanguage() {
   const target = String(elements.translationTarget?.value || "auto");
   return ["auto", "zh", "en"].includes(target) ? target : "auto";
+}
+
+function selectedTranslationProviderConfig() {
+  const provider = elements.translationProvider?.value || "helsinki_zh_en";
+  if (provider === "nllb_200_distilled_1_3b") {
+    return { provider, nllbModelPath: "facebook/nllb-200-distilled-1.3B" };
+  }
+  return { provider, nllbModelPath: "model/NLLB-200-600M" };
 }
 
 function syncSpecifiedTranslationTarget() {
@@ -1409,6 +1418,27 @@ function joinDisplayText(previous, current) {
   return `${left}${needsSpace ? " " : ""}${right}`;
 }
 
+function hasTranslationWarning(segment) {
+  return Boolean(segment?.translation_warning) || String(segment?.text || "").trim().endsWith(TRANSLATION_ERROR_SUFFIX);
+}
+
+function translationDisplayText(text) {
+  const value = String(text || "").trim();
+  return value.endsWith(TRANSLATION_ERROR_SUFFIX)
+    ? value.slice(0, -TRANSLATION_ERROR_SUFFIX.length).trim()
+    : value;
+}
+
+function appendTranslationWarningMark(target) {
+  const mark = document.createElement("span");
+  mark.className = "translation-warning-mark";
+  mark.title = "翻译异常";
+  mark.setAttribute("aria-label", "翻译异常");
+  mark.textContent = "!";
+  target.appendChild(document.createTextNode(" "));
+  target.appendChild(mark);
+}
+
 function groupSegmentsForDisplay(segments) {
   const groups = [];
   segments.forEach((segment, index) => {
@@ -1418,9 +1448,16 @@ function groupSegmentsForDisplay(segments) {
       previous.text = joinDisplayText(previous.text, segment.text);
       previous.end = segment.end;
       previous.completed = previous.completed !== false && segment.completed !== false;
+      previous.translation_warning = previous.translation_warning || segment.translation_warning;
+      previous.has_translation_warning = previous.has_translation_warning || hasTranslationWarning(segment);
       return;
     }
-    groups.push({ ...segment, group_key: key, text: String(segment.text || "").trim() });
+    groups.push({
+      ...segment,
+      group_key: key,
+      text: String(segment.text || "").trim(),
+      has_translation_warning: hasTranslationWarning(segment),
+    });
   });
   return groups;
 }
@@ -1441,7 +1478,9 @@ function renderSegments(target, segments, emptyText) {
   displaySegments.forEach((segment) => {
     const paragraph = document.createElement("p");
     paragraph.className = `segment${segment.completed ? "" : " incomplete"}`;
-    paragraph.textContent = String(segment.text || "").trim();
+    const isTranslationPane = target === elements.translationText;
+    paragraph.textContent = isTranslationPane ? translationDisplayText(segment.text) : String(segment.text || "").trim();
+    if (isTranslationPane && segment.has_translation_warning) appendTranslationWarningMark(paragraph);
     fragment.appendChild(paragraph);
   });
   target.appendChild(fragment);
@@ -1519,7 +1558,8 @@ function buildInterleavedCompletedRows(sources, translations) {
       key: interleavedTranslationKey(translation, indexes),
       start: Number(matchedSources[0]?.start ?? translation.start) || 0,
       source: sourceText,
-      translation: String(translation.text || "").trim(),
+      translation: translationDisplayText(translation.text),
+      translationWarning: hasTranslationWarning(translation),
       pending: false,
     });
   });
@@ -1541,7 +1581,8 @@ function buildInterleavedCompletedRows(sources, translations) {
       key: `translation:${translation.group_key || index}`,
       start: Number(translation.start) || 0,
       source: "（原文片段处理中）",
-      translation: String(translation.text || "").trim(),
+      translation: translationDisplayText(translation.text),
+      translationWarning: hasTranslationWarning(translation),
       pending: false,
     });
   });
@@ -1562,6 +1603,7 @@ function updateInterleavedRow(container, row) {
   source.textContent = row.source || "（原文片段处理中）";
   translation.className = `interleaved-translation${row.pending ? " pending" : ""}`;
   translation.textContent = row.translation;
+  if (row.translationWarning) appendTranslationWarningMark(translation);
 }
 
 function renderInterleavedRows(rows) {
@@ -1750,6 +1792,7 @@ function sendConfig(event) {
   }
   const selectedTranslationTarget = selectedFaceToFaceTarget();
   const translationMode = autoDetectMode ? "mixed_interpretation" : "standard";
+  const translationProvider = selectedTranslationProviderConfig();
   const meetingName = elements.meetingName.value.trim();
   const payload = {
     uid,
@@ -1787,14 +1830,14 @@ function sendConfig(event) {
     enable_translation: true,
     target_language: selectedTranslationTarget,
     translation_mode: translationMode,
-    translation_provider: elements.translationProvider?.value || "helsinki_zh_en",
+    translation_provider: translationProvider.provider,
     translation_merge_enabled: true,
     translation_merge_max_chars: 180,
     translation_merge_max_delay: 1.2,
     translation_merge_gap_seconds: 1.0,
     zh_en_model_path: "model/opus-mt-zh-en",
     en_zh_model_path: "model/opus-mt-en-zh",
-    nllb_model_path: "model/NLLB-200-600M",
+    nllb_model_path: translationProvider.nllbModelPath,
   };
   currentConfig = payload;
   targetSocket.send(JSON.stringify(payload));
