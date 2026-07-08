@@ -1,5 +1,6 @@
 import json
 import queue
+import threading
 import unittest
 from unittest import mock
 
@@ -375,6 +376,100 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
         self.assertEqual(guarded, "从我的角度来看，主要关注点是稳定性。")
         self.assertIsNone(ServeClientTranslation.translation_output_guard_reason("hello", "你好"))
+
+
+class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
+    def make_client(self, model_name="nllb_200_600m", translations=None):
+        with mock.patch.object(ServeClientTranslation, "load_translation_model"):
+            client = ServeClientTranslation(
+                client_uid="client-residual",
+                websocket=mock.Mock(),
+                translation_queue=queue.Queue(),
+                model_name=model_name,
+                translation_merge_enabled=False,
+            )
+        client.model_loaded = True
+        client.translator = mock.Mock()
+        client.translator.translate = mock.Mock(side_effect=translations or [])
+        client.translator_lock = threading.Lock()
+        return client
+
+    def get_last_payload(self, client):
+        payload = client.websocket.send.call_args[0][0]
+        return json.loads(payload)
+
+    def test_nllb_zh_to_en_retries_once_when_first_output_has_residual_cjk(self):
+        client = self.make_client(translations=[
+            ("创新中心联合集粹教育基金会特邀U型理论创始人", "zh", "en"),
+            ("The Innovation Center invited the founder of Theory U.", "zh", "en"),
+        ])
+
+        translated, source_language, target_language = client.translate_text("创新中心特邀专家", "zh")
+
+        self.assertEqual(translated, "The Innovation Center invited the founder of Theory U.")
+        self.assertEqual(source_language, "zh")
+        self.assertEqual(target_language, "en")
+        self.assertIsNone(client.pending_translation_warning)
+        self.assertEqual(client.translator.translate.call_count, 2)
+
+    def test_nllb_zh_to_en_marks_warning_when_retry_still_has_residual_cjk(self):
+        client = self.make_client(translations=[
+            ("创新中心联合集粹教育基金会特邀U型理论创始人", "zh", "en"),
+            ("创新中心仍然没有完成翻译", "zh", "en"),
+        ])
+
+        translated, source_language, target_language = client.translate_text("创新中心特邀专家", "zh")
+
+        self.assertEqual(translated, "创新中心仍然没有完成翻译（翻译出错）")
+        self.assertEqual(source_language, "zh")
+        self.assertEqual(target_language, "en")
+        self.assertEqual(client.pending_translation_warning, "residual_cjk")
+        self.assertEqual(client.translator.translate.call_count, 2)
+
+    def test_nllb_zh_to_en_flush_adds_warning_metadata_when_retry_still_fails(self):
+        client = self.make_client(translations=[
+            ("创新中心联合集粹教育基金会特邀U型理论创始人", "zh", "en"),
+            ("创新中心仍然没有完成翻译", "zh", "en"),
+        ])
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "创新中心特邀专家举办主题讲座。",
+            "completed": True,
+            "language": "zh",
+        })
+
+        client.flush_translation_buffer(force=True)
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "创新中心仍然没有完成翻译（翻译出错）")
+        self.assertEqual(segment["translation_warning"], "residual_cjk")
+
+    def test_helsinki_does_not_retry_residual_cjk(self):
+        client = self.make_client(
+            model_name="helsinki_zh_en",
+            translations=[("创新中心联合集粹教育基金会特邀U型理论创始人", "zh", "en")],
+        )
+
+        translated, source_language, target_language = client.translate_text("创新中心特邀专家", "zh")
+
+        self.assertEqual(translated, "创新中心联合集粹教育基金会特邀U型理论创始人")
+        self.assertEqual(source_language, "zh")
+        self.assertEqual(target_language, "en")
+        self.assertIsNone(client.pending_translation_warning)
+        self.assertEqual(client.translator.translate.call_count, 1)
+
+    def test_nllb_en_to_zh_does_not_retry_english_residual(self):
+        client = self.make_client(translations=[("This remains English.", "en", "zh")])
+
+        translated, source_language, target_language = client.translate_text("This should be translated.", "en")
+
+        self.assertEqual(translated, "This remains English.")
+        self.assertEqual(source_language, "en")
+        self.assertEqual(target_language, "zh")
+        self.assertIsNone(client.pending_translation_warning)
+        self.assertEqual(client.translator.translate.call_count, 1)
 
 
 class TestServeClientTranslationBuffer(unittest.TestCase):

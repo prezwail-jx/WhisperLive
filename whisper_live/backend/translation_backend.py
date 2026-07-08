@@ -431,6 +431,9 @@ class ServeClientTranslation(ServeClientBase):
     _BACKLOG_KEEP_LATEST = 3
     _REALTIME_MAX_EN_CHARS = 100
     _REALTIME_MAX_ZH_CHARS = 80
+    _RESIDUAL_CJK_MIN_CHARS = 8
+    _RESIDUAL_CJK_MAX_RATIO = 0.25
+    _TRANSLATION_ERROR_SUFFIX = "（翻译出错）"
 
     def __init__(
         self,
@@ -492,6 +495,7 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_merge_started_at = None
         self.translated_segments = []
         self.last_translated_source_text = ""
+        self.pending_translation_warning = None
         self.translator = None
         self.translator_lock = None
         self.model_loaded = False
@@ -554,6 +558,7 @@ class ServeClientTranslation(ServeClientBase):
         Returns:
             str: Translated text or original text if translation fails
         """
+        self.pending_translation_warning = None
         if not self.model_loaded or not self.translator or not text.strip():
             return text, source_language, self.target_language
 
@@ -575,6 +580,63 @@ class ServeClientTranslation(ServeClientBase):
                     self.target_language,
                 )
                 generate_ms = (time.monotonic() - generate_started_at) * 1000.0
+                if self.should_retry_nllb_residual_cjk(
+                    translated_text,
+                    resolved_source_language,
+                    target_language,
+                ):
+                    logging.warning(
+                        "[TRANSLATION_RESIDUAL_CJK_RETRY] uid=%s model=%s source_language=%s "
+                        "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
+                        self.client_uid,
+                        self.model_name,
+                        resolved_source_language,
+                        target_language,
+                        len(str(text or "")),
+                        len(str(translated_text or "")),
+                        str(text or "").strip()[:120],
+                        str(translated_text or "").strip()[:160],
+                    )
+                    retry_started_at = time.monotonic()
+                    try:
+                        retry_text, retry_source_language, retry_target_language = self.translator.translate(
+                            text,
+                            source_language,
+                            self.target_language,
+                        )
+                    except Exception as retry_error:
+                        logging.warning(
+                            "[TRANSLATION_RESIDUAL_CJK_RETRY_FAILED] uid=%s model=%s error=%s",
+                            self.client_uid,
+                            self.model_name,
+                            retry_error,
+                        )
+                        retry_text = translated_text
+                        retry_source_language = resolved_source_language
+                        retry_target_language = target_language
+                    generate_ms += (time.monotonic() - retry_started_at) * 1000.0
+                    translated_text = retry_text
+                    resolved_source_language = retry_source_language
+                    target_language = retry_target_language
+                    if self.should_retry_nllb_residual_cjk(
+                        translated_text,
+                        resolved_source_language,
+                        target_language,
+                    ):
+                        logging.warning(
+                            "[TRANSLATION_RESIDUAL_CJK_FAILED] uid=%s model=%s source_language=%s "
+                            "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
+                            self.client_uid,
+                            self.model_name,
+                            resolved_source_language,
+                            target_language,
+                            len(str(text or "")),
+                            len(str(translated_text or "")),
+                            str(text or "").strip()[:120],
+                            str(translated_text or "").strip()[:160],
+                        )
+                        self.pending_translation_warning = "residual_cjk"
+                        translated_text = f"{translated_text}{self._TRANSLATION_ERROR_SUFFIX}"
             finally:
                 self.translator_lock.release()
             translated_text = self.guard_translation_output(
@@ -610,6 +672,22 @@ class ServeClientTranslation(ServeClientBase):
             return self.translation_queue.qsize()
         except Exception:
             return "unknown"
+
+    def should_retry_nllb_residual_cjk(self, translated_text, source_language, target_language):
+        if self.model_name not in ("nllb_200_600m", "nllb"):
+            return False
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language) or "auto"
+        if source_language != "zh" or target_language != "en":
+            return False
+        translated_text = str(translated_text or "")
+        cjk_count = self._count_cjk(translated_text)
+        if cjk_count < self._RESIDUAL_CJK_MIN_CHARS:
+            return False
+        visible_count = len(re.sub(r"\s+", "", translated_text))
+        if visible_count <= 0:
+            return False
+        return (cjk_count / visible_count) >= self._RESIDUAL_CJK_MAX_RATIO
 
     @classmethod
     def _output_words(cls, text):
@@ -1047,6 +1125,7 @@ class ServeClientTranslation(ServeClientBase):
         if not original_text:
             return
 
+        self.pending_translation_warning = None
         translation_result = self.translate_fixed_short_phrase(original_text, source_language)
         if translation_result is None:
             translation_result = self.translate_with_glossary(original_text, source_language)
@@ -1059,6 +1138,8 @@ class ServeClientTranslation(ServeClientBase):
         if translation_result is None:
             translation_result = self.translate_text(original_text, source_language)
         translated_text, source_language, target_language = translation_result
+        translation_warning = self.pending_translation_warning
+        self.pending_translation_warning = None
         self.last_translated_source_text = original_text
         logging.info(
             "[TRANSLATION_FLUSH] uid=%s model=%s source_language=%s target_language=%s "
@@ -1090,6 +1171,8 @@ class ServeClientTranslation(ServeClientBase):
             for segment in buffered_segments
             if segment.get("utterance_id")
         ))
+        if translation_warning:
+            translated_segment["translation_warning"] = translation_warning
         if utterance_ids:
             translated_segment["source_utterance_ids"] = utterance_ids
         if len(utterance_ids) == 1:

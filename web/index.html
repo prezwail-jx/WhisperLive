@@ -74,12 +74,11 @@
             <div class="card-body field-stack">
               <label>会议名称<input id="meetingNameInput" type="text" maxlength="80" placeholder="如 2026产品会" autocomplete="off"></label>
               <label>WebSocket 地址<input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off"></label>
-              <label>源语言<select id="languageInput"><option value="zh">中文</option><option value="en">English</option></select></label>
               <label>翻译模型<select id="translationProviderInput"><option value="helsinki_zh_en">Helsinki 轻量实时</option><option value="nllb_200_600m">NLLB-200 600M 高质量</option></select></label>
-              <label class="toggle-field compact-toggle"><span><strong>启用面对面模式</strong><small>中英互答 / 同传 / 统一记录</small></span><input id="faceToFaceEnabledInput" type="checkbox" checked><span class="toggle" aria-hidden="true"></span></label>
-              <label>面对面模式<select id="faceToFaceModeInput"><option value="interpretation">同传：中文 ↔ English</option><option value="meeting_record">会议记录：统一翻译为目标语言</option></select></label>
-              <label>目标语言<select id="translationTargetInput"><option value="zh">中文</option><option value="en">English</option></select></label>
-              <p id="translationModeHint" class="tool-status">普通模式：按源语言固定识别并翻译</p>
+              <label>翻译方式<select id="faceToFaceModeInput"><option value="interpretation" selected>自动识别语言：中文 ↔ English</option><option value="specified">指定翻译：手动选择源语言和目标语言</option></select></label>
+              <label>源语言（指定翻译）<select id="languageInput"><option value="zh">中文</option><option value="en">English</option></select></label>
+              <label>目标语言<select id="translationTargetInput"><option value="auto" selected>自动互译</option><option value="zh">中文</option><option value="en">English</option></select></label>
+              <p id="translationModeHint" class="tool-status">自动识别语言：中文 ↔ English</p>
               <div class="compact-toggle-row">
                 <input id="translationEnabledInput" type="hidden" checked value="true">
                 <label class="toggle-field compact-toggle"><span><strong>说话人识别</strong><small>写入日志与总结</small></span><input id="diarizationEnabledInput" type="checkbox"><span class="toggle" aria-hidden="true"></span></label>
