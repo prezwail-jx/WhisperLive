@@ -476,7 +476,7 @@ function selectedTargetLanguage() {
 function selectedTranslationProviderConfig() {
   const provider = elements.translationProvider?.value || "helsinki_zh_en";
   if (provider === "nllb_200_distilled_1_3b") {
-    return { provider: "nllb_200_600m", nllbModelPath: "facebook/nllb-200-distilled-1.3B" };
+    return { provider: "nllb_200_600m", nllbModelPath: "model/NLLB-200-distilled-1.3B" };
   }
   return { provider, nllbModelPath: "model/NLLB-200-600M" };
 }
