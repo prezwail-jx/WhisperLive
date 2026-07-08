@@ -208,6 +208,68 @@ class ServeClientFasterWhisper(ServeClientBase):
             self.websocket.send(json.dumps(
                 {"uid": self.client_uid, "language": self.language, "language_prob": info.language_probability}))
 
+    @staticmethod
+    def normalize_mixed_interpretation_language(language):
+        language = str(language or "").strip().lower()
+        if language == "zh" or language.startswith("zh-"):
+            return "zh"
+        if language == "en" or language.startswith("en-"):
+            return "en"
+        return None
+
+    @classmethod
+    def zh_en_language_candidates(cls, info):
+        candidates = {}
+        language_probs = getattr(info, "all_language_probs", None)
+        if not isinstance(language_probs, (list, tuple)):
+            return candidates
+        for item in language_probs:
+            try:
+                language, probability = item
+            except (TypeError, ValueError):
+                continue
+            language = cls.normalize_mixed_interpretation_language(language)
+            if not language:
+                continue
+            try:
+                probability = float(probability)
+            except (TypeError, ValueError):
+                continue
+            candidates[language] = max(candidates.get(language, 0.0), probability)
+        return candidates
+
+    def resolve_mixed_interpretation_language(self, info):
+        previous_language = self.normalize_mixed_interpretation_language(self.current_language)
+        if info is None:
+            return previous_language
+
+        detected_language = self.normalize_mixed_interpretation_language(getattr(info, "language", None))
+        if detected_language:
+            return detected_language
+
+        raw_language = getattr(info, "language", None)
+        candidates = self.zh_en_language_candidates(info)
+        if candidates:
+            resolved_language = max(candidates.items(), key=lambda item: item[1])[0]
+            logging.debug(
+                "[MIXED_INTERPRETATION_LANGUAGE_CLAMP] uid=%s detected=%s resolved=%s zh=%.3f en=%.3f",
+                self.client_uid,
+                raw_language,
+                resolved_language,
+                candidates.get("zh", 0.0),
+                candidates.get("en", 0.0),
+            )
+            return resolved_language
+
+        if raw_language:
+            logging.debug(
+                "[MIXED_INTERPRETATION_LANGUAGE_IGNORE] uid=%s detected=%s previous=%s",
+                self.client_uid,
+                raw_language,
+                previous_language,
+            )
+        return previous_language
+
     def transcribe_audio(self, input_sample):
         """
         Transcribes the provided audio sample using the configured transcriber instance.
@@ -242,7 +304,7 @@ class ServeClientFasterWhisper(ServeClientBase):
             if request.error:
                 raise request.error
             if self.mixed_interpretation:
-                self.current_language = getattr(request.info, "language", None) if request.info is not None else None
+                self.current_language = self.resolve_mixed_interpretation_language(request.info)
             if not self.mixed_interpretation and self.language is None and request.info is not None:
                 self.set_language(request.info)
             return request.result
@@ -263,7 +325,7 @@ class ServeClientFasterWhisper(ServeClientBase):
             ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
 
         if self.mixed_interpretation:
-            self.current_language = getattr(info, "language", None) if info is not None else None
+            self.current_language = self.resolve_mixed_interpretation_language(info)
         if not self.mixed_interpretation and self.language is None and info is not None:
             self.set_language(info)
         return result
