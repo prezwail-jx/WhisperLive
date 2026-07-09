@@ -395,6 +395,9 @@ function openSummaryDrawer() {
 
 function updateTranslationControls(forceConnectionLocked = false) {
   const autoDetectMode = faceToFaceEnabled();
+  if (autoDetectMode && elements.translationTarget) {
+    elements.translationTarget.value = "auto";
+  }
   if (!autoDetectMode) syncSpecifiedTranslationTarget();
   if (elements.language) {
     elements.language.disabled = Boolean(forceConnectionLocked || autoDetectMode);
@@ -492,7 +495,7 @@ function syncSpecifiedTranslationTarget() {
 }
 
 function selectedFaceToFaceTarget() {
-  if (faceToFaceEnabled()) return selectedTargetLanguage();
+  if (faceToFaceEnabled()) return "auto";
   syncSpecifiedTranslationTarget();
   return normalizeLanguage(elements.translationTarget?.value) || lockedTranslationTargetForBackend(currentServerBackend || DEFAULT_BACKEND, elements.language?.value);
 }
@@ -1823,7 +1826,7 @@ function sendConfig(event) {
     no_speech_thresh: 0.45,
     clip_audio: false,
     same_output_threshold: 7,
-    min_segment_rms: 0.002,
+    min_segment_rms: 0.004,
     min_transcription_chunk_seconds: 2.5,
     max_incomplete_segment_seconds: 10.0,
     enable_diarization: elements.diarizationEnabled.checked,

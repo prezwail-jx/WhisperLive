@@ -90,6 +90,8 @@ h1 { margin: 0; overflow: hidden; font-size: clamp(17px, 1.8vw, 24px); line-heig
 .transcript-workspace { display: grid; min-height: 0; gap: 1px; margin: 14px 0 0; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--line); }
 .transcript-workspace.mode-split { grid-template-columns: 1fr 1fr; }
 .transcript-workspace.mode-stacked { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+.mode-stacked .translation-pane { order: 1; }
+.mode-stacked .source-pane { order: 2; }
 .transcript-pane { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; background: var(--surface); }
 .transcript-pane > header { display: flex; align-items: center; justify-content: space-between; min-height: 50px; padding: 9px 16px; border-bottom: 1px solid var(--line); }
 .transcript-pane h2 { margin: 1px 0 0; font-size: 14px; }

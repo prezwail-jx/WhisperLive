@@ -64,6 +64,17 @@ class ServeClientBase(object):
         "thanks for watching",
         "thank you for watching",
     }
+    MIXED_INTERPRETATION_NOISE_PHRASES = {
+        ".",
+        "thank you",
+        "let's go",
+        "stop it",
+        "it's okay",
+        "hasta la próxima",
+        "c'est un simple qui est fan",
+        "com os nossos filhos de grandeza",
+        "продолжение следует",
+    }
     MAX_BOUNDARY_DEDUPE_WORDS = 6
     MAX_SHORT_GRATITUDE_SECONDS = 0.5
 
@@ -495,6 +506,31 @@ class ServeClientBase(object):
         normalized = cls._normalized_phrase(text)
         return normalized in cls.GRATITUDE_HALLUCINATION_PHRASES
 
+    def _is_mixed_interpretation_noise_text(self, text):
+        if not getattr(self, "mixed_interpretation", False):
+            return False
+        value = str(text or "").strip()
+        normalized = self._normalized_phrase(value)
+        if not normalized:
+            return True
+        if normalized in self.MIXED_INTERPRETATION_NOISE_PHRASES:
+            logging.info(
+                "[MIXED_INTERPRETATION_NOISE_DROP] uid=%s reason=phrase text=%r",
+                self.client_uid,
+                value[:80],
+            )
+            return True
+        has_zh_or_ascii = bool(re.search(r"[\u4e00-\u9fffA-Za-z0-9]", value))
+        has_other_letters = bool(re.search(r"[^\W\d_]", value, re.UNICODE))
+        if has_other_letters and not has_zh_or_ascii:
+            logging.info(
+                "[MIXED_INTERPRETATION_NOISE_DROP] uid=%s reason=non_zh_en text=%r",
+                self.client_uid,
+                value[:80],
+            )
+            return True
+        return False
+
     def _is_probable_gratitude_hallucination(self, text, rel_start, rel_end, has_following_segment):
         if not self._is_gratitude_hallucination_phrase(text):
             return False
@@ -642,6 +678,9 @@ class ServeClientBase(object):
                     continue
                 if self.get_segment_no_speech_prob(s) > self.no_speech_thresh:
                     continue
+                if self._is_mixed_interpretation_noise_text(text_):
+                    offset = rel_end
+                    continue
                 if self._is_probable_gratitude_hallucination(text_, rel_start, rel_end, has_following_segment):
                     offset = rel_end
                     continue
@@ -675,7 +714,9 @@ class ServeClientBase(object):
         if self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
             rel_start = self.get_segment_start(segments[-1])
             rel_end = min(duration, self.get_segment_end(segments[-1]))
-            if self._is_probable_gratitude_hallucination(segments[-1].text, rel_start, rel_end, False):
+            if self._is_mixed_interpretation_noise_text(segments[-1].text):
+                offset = rel_end
+            elif self._is_probable_gratitude_hallucination(segments[-1].text, rel_start, rel_end, False):
                 offset = rel_end
             elif self._is_low_energy_range(rel_start, rel_end, duration, segments[-1].text):
                 offset = rel_end
@@ -716,6 +757,8 @@ class ServeClientBase(object):
             if not low_energy_repeated and (not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower()):
                 completed_text = self._dedupe_completed_text(self.current_out)
                 if not completed_text.strip():
+                    completed_text = ""
+                if self._is_mixed_interpretation_noise_text(completed_text):
                     completed_text = ""
                 if completed_text:
                     self.text.append(completed_text)
@@ -764,6 +807,8 @@ class ServeClientBase(object):
                     self.current_out.strip()[:80],
                 )
                 completed_text = self._dedupe_completed_text(self.current_out)
+                if self._is_mixed_interpretation_noise_text(completed_text):
+                    completed_text = ""
                 if completed_text.strip():
                     with self.lock:
                         completed_segment = self.format_segment(
