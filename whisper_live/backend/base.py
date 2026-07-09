@@ -51,10 +51,48 @@ class ServeClientBase(object):
         "bye",
         "bye bye",
         "you",
+        "You",
         "oh",
         ".",
         "看我了",
         "我看你了",
+        "yeah",
+        "wow",
+        "all right",
+        "exactly",
+        "right",
+        "ok",
+        "okay",
+        "alright",
+        "um",
+        "uh",
+        "hmm",
+        "so",
+        "well",
+        "no",
+        "mm-hmm",
+        "aha",
+        "eh",
+        "erm",
+        "hello",
+        "hi",
+        "hey",
+        "goodbye",
+        "see you",
+        "good night",
+        "nice",
+        "great",
+        "good",
+        "wonderful",
+        "beautiful",
+        "amazing",
+        "subscribe",
+        "我",
+        "你",
+        "嗯",
+        "哦",
+        "啊",
+        "Obrigado",
     }
     GRATITUDE_HALLUCINATION_PHRASES = {
         "thank you",
@@ -63,10 +101,15 @@ class ServeClientBase(object):
         "thanks very much",
         "thanks for watching",
         "thank you for watching",
+        "goodbye",
+        "see you",
+        "bye bye",
     }
     MIXED_INTERPRETATION_NOISE_PHRASES = {
         ".",
         "thank you",
+        "You",
+        "you",
         "let's go",
         "stop it",
         "it's okay",
@@ -74,6 +117,27 @@ class ServeClientBase(object):
         "c'est un simple qui est fan",
         "com os nossos filhos de grandeza",
         "продолжение следует",
+        "yeah",
+        "exactly",
+        "right",
+        "sure",
+        "yes",
+        "ok",
+        "okay",
+        "no",
+        "well",
+        "so",
+        "hello",
+        "hi",
+        "hey",
+        "goodbye",
+        "good morning",
+        "good afternoon",
+        "nice",
+        "great",
+        "mhm",
+        "mm-hmm",
+        "mhm",        # 嗯哼（常见清嗓幻觉）
     }
     MAX_BOUNDARY_DEDUPE_WORDS = 6
     MAX_SHORT_GRATITUDE_SECONDS = 0.5
@@ -224,7 +288,7 @@ class ServeClientBase(object):
 
     def handle_transcription_output(self, result, duration):
         raise NotImplementedError
-    
+
     def format_segment(self, start, end, text, completed=False, speaker=None, words=None):
         """
         Formats a transcription segment with precise start and end times alongside the transcribed text.
@@ -463,7 +527,7 @@ class ServeClientBase(object):
         """
         logging.info("Cleaning up.")
         self.exit = True
-    
+
     def get_segment_no_speech_prob(self, segment):
         return getattr(segment, "no_speech_prob", 0)
 
@@ -506,6 +570,42 @@ class ServeClientBase(object):
         normalized = cls._normalized_phrase(text)
         return normalized in cls.GRATITUDE_HALLUCINATION_PHRASES
 
+    @staticmethod
+    def _has_zh_script(text):
+        return bool(re.search(r"[一-鿿]", str(text or "")))
+
+    @staticmethod
+    def _has_ascii_word(text):
+        return bool(re.search(r"[A-Za-z0-9]", str(text or "")))
+
+    @staticmethod
+    def _has_korean_script(text):
+        return bool(re.search(r"[가-힯]", str(text or "")))
+
+    @staticmethod
+    def _has_japanese_kana(text):
+        return bool(re.search(r"[぀-ヿ]", str(text or "")))
+
+    @staticmethod
+    def _has_cyrillic_script(text):
+        return bool(re.search(r"[Ѐ-ӿ]", str(text or "")))
+
+    @staticmethod
+    def _is_zh_en_language(language):
+        language = str(language or "").strip().lower()
+        return language == "zh" or language.startswith("zh-") or language == "en" or language.startswith("en-")
+
+    def _log_mixed_interpretation_noise_drop(self, reason, text):
+        logging.info(
+            "[MIXED_INTERPRETATION_NOISE_DROP] uid=%s reason=%s raw_language=%s zh=%.3f en=%.3f text=%r",
+            self.client_uid,
+            reason,
+            getattr(self, "current_raw_language", None),
+            (getattr(self, "current_zh_en_candidates", {}) or {}).get("zh", 0.0),
+            (getattr(self, "current_zh_en_candidates", {}) or {}).get("en", 0.0),
+            str(text or "").strip()[:80],
+        )
+
     def _is_mixed_interpretation_noise_text(self, text):
         if not getattr(self, "mixed_interpretation", False):
             return False
@@ -514,21 +614,34 @@ class ServeClientBase(object):
         if not normalized:
             return True
         if normalized in self.MIXED_INTERPRETATION_NOISE_PHRASES:
-            logging.info(
-                "[MIXED_INTERPRETATION_NOISE_DROP] uid=%s reason=phrase text=%r",
-                self.client_uid,
-                value[:80],
-            )
+            self._log_mixed_interpretation_noise_drop("phrase", value)
             return True
-        has_zh_or_ascii = bool(re.search(r"[\u4e00-\u9fffA-Za-z0-9]", value))
+
+        has_zh = self._has_zh_script(value)
+        has_ascii = self._has_ascii_word(value)
+        has_korean = self._has_korean_script(value)
+        has_japanese = self._has_japanese_kana(value)
+        has_cyrillic = self._has_cyrillic_script(value)
+        has_foreign_script = has_korean or has_japanese or has_cyrillic
+
+        if has_foreign_script:
+            self._log_mixed_interpretation_noise_drop("foreign_script", value)
+            return True
+
+        has_zh_or_ascii = has_zh or has_ascii
         has_other_letters = bool(re.search(r"[^\W\d_]", value, re.UNICODE))
         if has_other_letters and not has_zh_or_ascii:
-            logging.info(
-                "[MIXED_INTERPRETATION_NOISE_DROP] uid=%s reason=non_zh_en text=%r",
-                self.client_uid,
-                value[:80],
-            )
+            self._log_mixed_interpretation_noise_drop("non_zh_en", value)
             return True
+
+        raw_language = getattr(self, "current_raw_language", None)
+        if raw_language and not self._is_zh_en_language(raw_language):
+            zh_en_candidates = getattr(self, "current_zh_en_candidates", {}) or {}
+            best_zh_en = max(zh_en_candidates.values(), default=0.0)
+            if best_zh_en < 0.20 and has_other_letters and not has_zh:
+                self._log_mixed_interpretation_noise_drop("raw_language", value)
+                return True
+
         return False
 
     def _is_probable_gratitude_hallucination(self, text, rel_start, rel_end, has_following_segment):
@@ -645,11 +758,11 @@ class ServeClientBase(object):
         """
         Processes the segments from Whisper and updates the transcript.
         Uses helper methods to account for differences between backends.
-        
+
         Args:
             segments (list): List of segments returned by the transcriber.
             duration (float): Duration of the current audio chunk.
-        
+
         Returns:
             dict or None: The last processed segment (if any).
         """
@@ -740,7 +853,7 @@ class ServeClientBase(object):
         if self.current_out.strip() == self.prev_out.strip() and self.current_out != '':
             self.same_output_count += 1
 
-            # if we remove the audio because of same output on the nth reptition we might remove the 
+            # if we remove the audio because of same output on the nth reptition we might remove the
             # audio thats not yet transcribed so, capturing the time when it was repeated for the first time
             if self.end_time_for_same_output is None:
                 self.end_time_for_same_output = self.get_segment_end(segments[-1])

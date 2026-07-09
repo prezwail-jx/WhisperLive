@@ -96,6 +96,9 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.mixed_interpretation = bool(mixed_interpretation)
         self.allow_language_auto_per_chunk = self.mixed_interpretation
         self.current_language = None
+        self.current_raw_language = None
+        self.current_language_probability = 0.0
+        self.current_zh_en_candidates = {}
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cuda":
@@ -241,14 +244,24 @@ class ServeClientFasterWhisper(ServeClientBase):
     def resolve_mixed_interpretation_language(self, info):
         previous_language = self.normalize_mixed_interpretation_language(self.current_language)
         if info is None:
+            self.current_raw_language = None
+            self.current_language_probability = 0.0
+            self.current_zh_en_candidates = {}
             return previous_language
 
-        detected_language = self.normalize_mixed_interpretation_language(getattr(info, "language", None))
+        raw_language = getattr(info, "language", None)
+        self.current_raw_language = raw_language
+        try:
+            self.current_language_probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            self.current_language_probability = 0.0
+        candidates = self.zh_en_language_candidates(info)
+        self.current_zh_en_candidates = candidates
+
+        detected_language = self.normalize_mixed_interpretation_language(raw_language)
         if detected_language:
             return detected_language
 
-        raw_language = getattr(info, "language", None)
-        candidates = self.zh_en_language_candidates(info)
         if candidates:
             resolved_language = max(candidates.items(), key=lambda item: item[1])[0]
             logging.debug(
