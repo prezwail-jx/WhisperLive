@@ -87,6 +87,7 @@ class ServeClientBase(object):
         "beautiful",
         "amazing",
         "subscribe",
+        "I'll see you next time.",
         "我",
         "你",
         "嗯",
