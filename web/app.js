@@ -185,6 +185,35 @@ function defaultWebSocketUrl() {
   return `${protocol}//${window.location.host}/ws`;
 }
 
+function webSocketPathForMode(mode = serviceMode) {
+  return mode === "accurate" ? "/ws-accurate" : "/ws-standard";
+}
+
+function webSocketUrlForMode(url, mode = serviceMode) {
+  const fallback = defaultWebSocketUrl();
+  const rawUrl = String(url || fallback).trim() || fallback;
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.pathname = webSocketPathForMode(mode);
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch (_error) {
+    const parsed = new URL(fallback);
+    parsed.pathname = webSocketPathForMode(mode);
+    return parsed.toString();
+  }
+}
+
+function syncWebSocketUrlForMode(mode = serviceMode) {
+  if (!elements.server) return;
+  elements.server.value = webSocketUrlForMode(elements.server.value, mode);
+}
+
+function translationDeviceForMode(mode = serviceMode) {
+  return mode === "accurate" ? "cuda:1" : "cpu";
+}
+
 function clampCaptionFontSize(value, fallback) {
   if (value === null || value === undefined || String(value).trim() === "") return fallback;
   const number = Number(value);
@@ -394,6 +423,7 @@ function setServiceMode(nextMode, persist = true) {
   if (elements.translationProvider && translationModels.length) {
     elements.translationProvider.value = preferredTranslationProviderForMode(serviceMode);
   }
+  syncWebSocketUrlForMode(serviceMode);
   syncDirectionLanguages();
   setTranslationEnabledForMode();
   applyServiceModeDisplayDefaults();
@@ -699,6 +729,8 @@ function hotwordApiBaseUrl() {
   const toAdminBase = (url) => url
     .replace(/\/ws-gpu0\/?$/, "/admin-gpu0")
     .replace(/\/ws-gpu1\/?$/, "/admin-gpu1")
+    .replace(/\/ws-standard\/?$/, "")
+    .replace(/\/ws-accurate\/?$/, "")
     .replace(/\/ws\/?$/, "");
   if (serverUrl.startsWith("wss://")) return toAdminBase(serverUrl.replace(/^wss:/, "https:"));
   if (serverUrl.startsWith("ws://")) return toAdminBase(serverUrl.replace(/^ws:/, "http:"));
@@ -2156,6 +2188,7 @@ function sendConfig(event) {
     target_language: selectedTranslationTarget,
     translation_mode: translationMode,
     translation_provider: translationProvider.provider,
+    translation_device: translationDeviceForMode(serviceMode),
     translation_merge_enabled: true,
     translation_merge_max_chars: 180,
     translation_merge_max_delay: 1.2,
@@ -2196,7 +2229,9 @@ function openMeetingSocket(resume = false) {
   resumeNextConnection = Boolean(resume);
   intentionallyClosingSocket = false;
   isServerReady = false;
-  socket = window.WhisperLiveWsClient.open(elements.server.value.trim(), {
+  const wsUrl = webSocketUrlForMode(elements.server.value, serviceMode);
+  elements.server.value = wsUrl;
+  socket = window.WhisperLiveWsClient.open(wsUrl, {
     open: sendConfig,
     message: handleMessage,
     error: () => setStatus("连接错误", "error"),
