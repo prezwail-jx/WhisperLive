@@ -1,144 +1,169 @@
 # WhisperLive 部署与使用说明
 
-## 当前文档入口
+## 外部文档
 
-当前生产环境的详细说明拆分为两份独立文档：
+以下两份文档覆盖生产环境使用和运维：
 
-- [普通用户使用指导](./whisperlive-user-guide.md)：面向会议使用者，说明页面入口、WebSocket 填写、热词上传、显示模式、日志导出和总结功能。
-- [运维使用指导](./whisperlive-ops-guide.md)：面向运维人员，说明单卡/双卡模式、容器拉起命令、Nginx 模式切换、WebSocket 路由和 Admin API 填写方式。
+- [普通用户使用指导](./whisperlive-user-guide.md)：会议使用者入口、WebSocket 填写、热词上传、显示模式、日志导出和总结功能。
+- [运维使用指导](./whisperlive-ops-guide.md)：单卡/双卡模式、容器拉起、Nginx 模式切换、WebSocket 路由和 Admin API。
 
-如果是生产环境 `https://app.cmtbs.com:57890/` 的使用和维护，优先查看以上两份文档。下面内容保留为项目通用部署说明和历史参考。
+下面内容为项目通用部署说明和功能参考。
 
-本项目当前主要用途：
+## 项目结构
 
-本项目后端按职责组织：
-
-```text
-whisper_live/server.py       WebSocket、Admin API、客户端管理与服务编排
-whisper_live/meeting/        会议热词、日志、总结模板和 LLM 总结
-whisper_live/backend/        ASR 与翻译后端
 ```
-
-```text
-Docker 镜像拉起 WhisperLive 服务
--> GPU 跑 faster-whisper ASR
--> CPU 跑中英翻译
--> 浏览器中控页面查看 client 状态
--> Web 页面或脚本连接服务做实时识别/翻译
+whisper_live/server.py         WebSocket、Admin API、客户端管理与服务编排
+whisper_live/meeting/           会议热词、日志、总结模板和 LLM 总结
+whisper_live/backend/           ASR 与翻译后端
+whisper_live/batch_inference.py  批量 GPU 推理调度
+whisper_live/vad.py             Silero VAD 语音活动检测
+whisper_live/diarization.py     说话人分离
+web/                            浏览器前端
+scripts/                        启动脚本、压测、Nginx 切换
+deploy/nginx/                   Nginx 配置
 ```
 
 ## 端口规划
 
-推荐固定使用这几个端口：
+| 端口 | 用途 |
+|------|------|
+| 9090 | 后端 WebSocket ASR 服务 |
+| 9093 | 浏览器统一入口（前端页面、/ws、/admin/） |
+| 9094 | 后端 Admin API（映射到容器内 8000） |
 
-```text
-9090  后端 WebSocket ASR 服务
-9093  浏览器统一入口：Web 前端、中控、/ws、/admin/
-9094  后端 Admin API，映射到容器内 8000
+浏览器只访问 `9093`，Nginx 自动将 `/ws` 转到 `9090`、`/admin/` 转到 `9094`。
+
+---
+
+## 1. 快速启动（docker-compose，推荐）
+
+前置条件：已构建 `whisperlive-server:docx` 镜像，已创建 `whisperlive-net` 网络，`model/asr/large-v3-turbo` 模型已下载。
+
+```bash
+docker compose -f docker-compose.local.yml up -d
 ```
 
-下面示例使用测试服务器 IP：
+这将同时启动：
+- **whisperlive-gpu0**：GPU 0 上的 ASR 服务（Whisper），自动执行 `scripts/start_whisper_service.sh`
+- **whisperlive-web-gateway**：Nginx 统一入口
 
-```text
-192.168.1.100
+访问：
+- 前端页面：`http://localhost:9093/`
+- 中控页面：`http://localhost:9093/admin.html`
+- Admin API：`http://localhost:9094/admin/clients`
+
+### compose 配置说明
+
+```yaml
+# 单卡模式（GPU 0），完整挂载项目目录
+whisperlive-gpu0:
+  image: whisperlive-server:docx
+  ports:
+    - "9090:9090"    # WebSocket
+    - "9094:8000"    # Admin API
+  volumes:
+    - .:/app
+  command: bash -lc "./scripts/start_whisper_service.sh"
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ["0"]
+
+# Nginx 统一入口
+whisperlive-web-gateway:
+  image: nginx:alpine
+  ports:
+    - "9093:80"
+  volumes:
+    - ./web:/usr/share/nginx/html:ro
+    - ./deploy/nginx/whisperlive.conf:/etc/nginx/conf.d/default.conf:ro
 ```
 
-实际部署到别的机器时，把命令里的 `192.168.1.100` 替换成你的服务器 IP 或内网地址。
+如需双卡，可在 compose 中增加一个 `whisperlive-gpu1` 服务、改用 `device_ids: ["1"]`，并切换到双卡 Nginx 配置：
 
-## 1. 构建镜像
+```bash
+./scripts/switch_nginx_mode.sh dual
+```
+
+---
+
+## 2. 构建镜像
 
 在项目根目录执行：
 
 ```bash
-docker build --network=host -f docker/Dockerfile.server -t whisperlive-server .
+docker build --network=host -f docker/Dockerfile.server -t whisperlive-server:docx .
 ```
 
-构建 Web client 静态页面镜像，备用测试时使用：
+### 可用 Dockerfile
 
-```bash
-docker build -f docker/Dockerfile.client -t whisperlive-client:latest .
-```
+| Dockerfile | 用途 |
+|------------|------|
+| `docker/Dockerfile.server` | GPU 生产镜像（CUDA 12.4），含 ASR + 翻译 + 总结 + DOCX |
+| `docker/Dockerfile.gpu` | 精简 GPU 镜像 |
+| `docker/Dockerfile.cpu` | CPU-only 镜像 |
+| `docker/Dockerfile.tensorrt` | TensorRT 后端 |
+| `docker/Dockerfile.openvino` | OpenVINO 后端 |
+| `docker/Dockerfile.client` | 纯 Web 前端静态页面 |
 
-如果已经有对应镜像，可以跳过这一步。
-
-## 2. 创建 Docker 网络
-
-推荐使用固定网段的 Docker 网络，避免默认 `bridge` 网络和 VPN/内网路由冲突。
+### 创建 Docker 网络
 
 ```bash
 docker network create --subnet 172.30.0.0/24 whisperlive-net
 ```
 
-如果提示网络已存在，可以忽略。
+如果网络已存在（`docker network ls | grep whisperlive-net`），可跳过。
 
-## 3. 启动后端容器
+---
 
-在项目根目录执行：
+## 3. 手动启动方式
+
+### 3.1 Faster-Whisper（推荐）
 
 ```bash
+# 1. 拉起容器
 docker run --rm -it --gpus '"device=0"' \
   --name whisperlive-gpu0 \
   --network whisperlive-net \
-  -p 9090:9090 \
-  -p 9094:8000 \
-  -v "$PWD:/app" \
-  -w /app \
+  -p 9090:9090 -p 9094:8000 \
+  -v "$PWD:/app" -w /app \
   whisperlive-server:docx bash
+
+# 2. 容器内启动服务
+./scripts/start_whisper_service.sh
 ```
 
-进入容器后启动服务：
+等效的手动命令：
 
 ```bash
 python run_server.py \
   --port 9090 \
   --backend faster_whisper \
   --max_clients 12 \
-  --max_connection_time 600 \
+  --max_connection_time 60000 \
+  --batch_inference --batch_max_size 1 \
   --translation_device cpu \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
   --meeting_logs_dir logs \
-  --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093 \
-  -fw model/asr/whisper-small-zh_tw-ct2/
+  --cors-origins http://localhost:9093,http://127.0.0.1:9093 \
+  -fw model/asr/large-v3-turbo
 ```
 
-说明：
+### 3.2 FunASR（Paraformer 流式 + SenseVoice 精修）
 
-- `-fw` 指定服务端实际使用的 ASR 模型。
-- `--translation_device cpu` 表示翻译模型走 CPU，GPU 优先留给 ASR。
-- `--rest_port 8000` 是容器内 Admin API 端口，通过 `-p 9094:8000` 暴露到宿主机。
-- `--meeting_hotwords_dir` 指定服务端会议热词目录，目录内 `会议号.txt` 会自动出现在 Client 和中控下拉列表。
-- `--meeting_logs_dir` 指定浏览器点击“导出日志”时服务端保存 JSON 的目录；不传时默认是 `logs/`。
-- Web client 默认发送 `min_segment_rms=0.0015`，用于过滤极低音量静音段里的热词幻觉；需要关闭时可在 client payload 中设为 `0`。
-- 浏览器推荐只访问 `9093`；`9093` 会把 `/ws` 转到 `9090`，把 `/admin/` 转到 `9094`。
-- `--cors-origins` 必须包含中控页面地址，否则浏览器会显示连接错误。
+需要提前准备模型：
 
-如果要换模型，例如 small：
-
-```bash
--fw model/asr/small
 ```
-
-如果要用中文 int8 模型：
-
-```bash
--fw model/asr/faster-whisper-belle-large-v3-turbo-zh-int8
-```
-
-## 4. 可选：FunASR Paraformer 流式识别
-
-默认部署仍推荐按第 3 节使用 `faster_whisper`。如果需要测试 FunASR，可以使用 Paraformer 做流式字幕刷新，再用 SenseVoice 对完成后的整段语音做一次 final 精修。
-
-需要提前准备这些本地模型：
-
-```text
 model/funasr/paraformer-zh-streaming
 model/funasr/SenseVoiceSmall
 model/funasr/ct-punc
 model/vad/silero_vad.onnx
 ```
 
-后端容器启动方式不变，仍然使用第 3 节的 `docker run ... whisperlive-server bash`。进入容器后启动 FunASR：
+启动（容器内执行 `./scripts/start_funasr_service.sh` 或手动）：
 
 ```bash
 python run_server.py \
@@ -150,56 +175,191 @@ python run_server.py \
   --funasr_punc_model model/funasr/ct-punc \
   --funasr_device cuda \
   --max_clients 12 \
-  --max_connection_time 600 \
+  --max_connection_time 60000 \
   --translation_device cpu \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
   --meeting_logs_dir logs \
-  --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093
+  --cors-origins http://localhost:9093,http://127.0.0.1:9093
 ```
 
-参数说明：
+FunASR 关键参数：
 
-- `--funasr_mode paraformer_streaming`：使用 Paraformer 流式模型持续刷新字幕。
-- `--funasr_model`：Paraformer 流式识别模型路径。
-- `--funasr_final_model`：断句完成后，用完整语音再跑一次离线识别，提高 final 文本质量。
-- `--funasr_punc_model`：对 final 文本做标点恢复。
-- `--funasr_device cuda`：FunASR 主识别模型使用 GPU。
-- `--funasr_final_device cpu|cuda|auto`：可选，指定 final 精修模型设备；不传时跟随 `--funasr_device`。
-- `--disable_funasr_final_refine`：可选，关闭 SenseVoice final 精修，换取更低 final 延迟。
+| 参数 | 说明 |
+|------|------|
+| `--funasr_mode paraformer_streaming` | Paraformer 流式识别，持续刷新字幕 |
+| `--funasr_model` | 流式识别模型路径 |
+| `--funasr_final_model` | 断句后用完整语音离线精修，提高 final 文本质量 |
+| `--funasr_punc_model` | 标点恢复模型 |
+| `--funasr_device cuda` | 主识别模型设备 |
+| `--funasr_final_device` | 精修模型设备，默认跟随 `--funasr_device` |
+| `--disable_funasr_final_refine` | 关闭精修，降低 final 延迟 |
 
-如果容器启动时使用了 `-v "$PWD:/app"` 挂载项目代码，修改 Python 或 Web 文件后通常只需要重启 `run_server.py`，不需要重新 build 镜像。只有代码被 COPY 进镜像时，才需要重新 build。
+---
 
-## 5. 推荐：统一 Web 入口
+## 4. 翻译功能
 
-推荐生产和多人使用时采用统一入口：client 用户只打开一个地址，不需要在 client 机器上安装 Docker。
+### 4.1 翻译模型选择
 
-统一入口 nginx 负责：
+前端支持三种翻译引擎：
 
-```text
-/             -> Web 同传页面
-/admin.html   -> 中控页面
-/ws           -> 反代到后端 WebSocket 9090
-/admin/       -> 反代到后端 Admin API 9094
-```
+| 模型 | 标识 | 说明 |
+|------|------|------|
+| Helsinki zh-en | `helsinki_zh_en` | 轻量级，实时性好，中英单向 |
+| NLLB 600M | `nllb_200_600m` | 多语言，翻译质量更高 |
+| NLLB 1.3B | `nllb_200_distilled_1_3b` | 蒸馏版，质量最佳，显存需求更大 |
 
-先按第 3 节启动后端容器和 `run_server.py`。如果统一入口页面使用 `http://192.168.1.100:9093`，服务启动命令里的 CORS 可以写：
+NLLB 模型路径默认为 `model/NLLB-200-600M`，可在客户端 config 中通过 `nllb_model_path` 指定自定义路径。
+
+服务端通过 `--translation_device` 控制翻译模型设备（`cpu` / `cuda` / `auto`）：
 
 ```bash
-python run_server.py \
-  --port 9090 \
-  --backend faster_whisper \
-  --max_clients 12 \
-  --max_connection_time 600 \
-  --translation_device cpu \
-  --rest_port 8000 \
-  --meeting_hotwords_dir config/hotwords.d \
-  --meeting_logs_dir logs \
-  --cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093 \
-  -fw model/asr/whisper-small-zh_tw-ct2/
+--translation_device cpu    # 翻译走 CPU，GPU 留给 ASR（推荐）
+--translation_device cuda   # 翻译走 GPU
 ```
 
-另开一个 server 端宿主机终端，启动统一入口 nginx：
+### 4.2 翻译方向模式
+
+**手动指定模式**（`specified`）：用户明确选择源语言和目标语言，单向翻译。
+
+**面对面模式**（`interpretation`）：自动识别输入语言并互译（中↔英），适合中英文混合发言。开启后源语言选择会被锁定，系统自动处理翻译方向。
+
+### 4.3 NLLB 残留字符重试
+
+NLLB 模型从中文翻译到英文时，如果译文中仍残留 CJK 字符（比例超过阈值），会自动触发重试，减少翻译中的中文残句。该逻辑仅在 NLLB 模型且源语言为 `zh` 时生效。
+
+### 4.4 翻译警告标记
+
+翻译出错时前端会在对应片段显示 `!` 警告标记（通过 `（翻译出错）` 后缀检测）。
+
+---
+
+## 5. 批量推理（Batch Inference）
+
+通过 `--batch_inference` 启用。多客户端并发时，由 `BatchInferenceWorker` 统一收集请求后批量提交 GPU 推理，减少模型实例化开销和锁竞争。
+
+```bash
+--batch_inference          # 启用批量推理
+--batch_max_size 8         # 最大 batch 大小（默认 8）
+--batch_window_ms 50       # 等待窗口（毫秒）
+```
+
+当 `batch_max_size=1` 时，退化为逐条串行推理，但依然共享模型实例，消除多 session 之间的 `SINGLE_MODEL_LOCK` 竞争。
+
+---
+
+## 6. VAD（语音活动检测）
+
+使用 Silero VAD（ONNX Runtime），自动下载到 `model/vad/silero_vad.onnx`。在 faster-whisper 后端中，VAD 用于过滤静音段、减少幻觉。
+
+前端默认配置：
+
+```json
+{
+  "use_vad": true,
+  "vad_parameters": {
+    "threshold": 0.5,
+    "min_silence_duration_ms": 900,
+    "speech_pad_ms": 300
+  }
+}
+```
+
+可通过 client config 自定义 `vad_parameters` 或关闭 `use_vad`。FunASR 后端亦独立使用 VAD 进行语音段分割。
+
+---
+
+## 7. 说话人分离（Diarization）
+
+通过 `--enable_diarization`（客户端 config）启用，依赖 `pyannote.audio` 和 `wespeaker-voxceleb-resnet34-LM` 嵌入模型。
+
+对已完成的语音片段进行说话人识别，基于余弦相似度在线聚类：
+- 相似度阈值：`0.55`（可通过 `diarization_threshold` 调整）
+- 最大说话人数：`10`
+
+前端设置中勾选"启用说话人识别"即可。该功能目前为轻量级在线分离，后续可接入独立说话人模型，复用现有 `speaker_id` 和校对数据。
+
+---
+
+## 8. 会议热词
+
+热词文件放在 `config/hotwords.d/`，文件名去掉 `.txt` 即为会议号：
+
+```
+config/hotwords.d/产品周会.txt  -> 会议号：产品周会
+config/hotwords.d/meeting-a.txt -> 会议号：meeting-a
+```
+
+文件格式：
+
+```
+图灵科技
+faster-whisper
+张三
+# 注释行（以 # 开头）
+OpenAI => 开放人工智能    # 固定翻译
+```
+
+- 普通行：只作为 ASR 热词
+- `source => target`：同时加入 ASR 热词和固定翻译表
+- 固定翻译是单向规则；需要反向翻译时应增加反向条目
+- 多条规则匹配时优先最长词组
+
+使用规则：
+- 启动参数：`--meeting_hotwords_dir config/hotwords.d`
+- Admin 页面负责刷新、下拉和预览，不上传/删除文件
+- Client 点击开始时读取热词快照并锁定本次会话
+- 开始后修改文件只影响下次开始
+- 没有对应会议号 txt 时，使用 `--hotwords_file` 的全局默认热词
+- 新增或修改热词后无需重启服务，在页面点击刷新即可
+
+---
+
+## 9. 会议日志
+
+点击"导出日志"时：
+- 浏览器本地下载 `会议号-*.json`
+- 通过 Admin API 保存到服务端 `logs/` 目录
+
+服务端保存目录通过 `--meeting_logs_dir logs` 指定。容器挂载 `-v "$PWD:/app"` 时，日志落在宿主机项目目录下。
+
+文件命名示例：`logs/产品周会-2026-05-28T10-30-15.json`
+
+---
+
+## 10. 会议纪要模板
+
+Web 设置面板支持上传 UTF-8 编码的 `.md` 模板（最多 2 MB）。
+
+流程：
+1. 停止会议
+2. 在"日志与总结"中上传 `.md` 文件并点击"分析模板"
+3. 调整字段名称、类型、说明后保存
+4. 在总结模板下拉框的"自定义模板"分组中选择模板并生成总结
+
+支持的字段类型：`文本`、`列表`、`带证据列表`、`表格`。
+
+默认模板库目录通过启动参数指定：
+
+```bash
+--summary_templates_dir config/summary_templates
+```
+
+---
+
+## 11. 会后转写校对与说话人管理
+
+会议结束后在"会议总结"面板操作：
+- 修改识别原文，系统保留 `original_text`
+- 新增、重命名、合并说话人，给片段分配说话人
+- 修改原文后译文和总结标记为过期；重新生成总结保留旧版本
+- 多页面编辑使用修订号（乐观锁）防止覆盖冲突
+
+---
+
+## 12. Nginx 统一入口
+
+docker-compose 已包含 Nginx 网关。手动启动方式：
 
 ```bash
 docker run --rm -it \
@@ -212,369 +372,168 @@ docker run --rm -it \
   nginx:alpine
 ```
 
-client 用户打开：
+Nginx 路由规则：
 
-```text
-http://192.168.1.100:9093/
-```
+| 路径 | 目标 |
+|------|------|
+| `/` | 前端页面 |
+| `/admin.html` | 中控页面 |
+| `/ws` | WebSocket → 后端 9090 |
+| `/admin/` | Admin API → 后端 9094（容器内 8000） |
 
-页面会默认连接：
-
-```text
-ws://192.168.1.100:9093/ws
-```
-
-页面里的 `会议号` 同时作为 client 可读名称和热词归属。Client 页面可以从下拉选择服务端已有热词文件，也可以手动填写会议号；点击开始时会自动加载同名 txt 热词文件并锁定本次连接。
-
-中控打开：
-
-```text
-http://192.168.1.100:9093/admin.html
-```
-
-中控会默认请求：
-
-```text
-http://192.168.1.100:9093/admin/clients
-```
-
-这种方式下，多台 client 机器都只需要浏览器打开同一个地址。多路并发仍由后端 `--max_clients`、模型大小和 GPU 性能决定。
-
-如果要让远程浏览器稳定使用麦克风，生产建议给统一入口配置 HTTPS，然后页面会自动使用：
-
-```text
-wss://你的域名/ws
-```
-
-
-## 6. 会议热词表
-
-热词文件提前放在 server 机器的 `config/hotwords.d/` 目录中。文件名去掉 `.txt` 后就是会议号，例如：
-
-```text
-config/hotwords.d/产品周会.txt  -> 会议号：产品周会
-config/hotwords.d/meeting-a.txt -> 会议号：meeting-a
-```
-
-文件格式：
-
-```text
-图灵科技
-faster-whisper
-张三
-# 这行是注释
-
-# 左侧同时作为 ASR 热词，右侧是固定译文
-OpenAI => 开放人工智能
-历史终极幻觉 => end-of-history illusion
-```
-
-普通行只作为 ASR 热词；`source => target` 行同时加入 ASR 热词和固定翻译表。固定翻译是单向规则，需要反向翻译时应再增加一条反向规则。句中出现多个规则时优先匹配最长词组。
-
-使用规则：
-
-- 服务启动参数使用 `--meeting_hotwords_dir config/hotwords.d`。
-- Admin 页面只负责刷新、下拉选择和预览服务器已有热词文件，不在网页上传或删除文件。
-- Client 页面可以从下拉选择已有会议热词，也可以手动填写会议号。
-- Client 点击开始时会按会议号读取 `config/hotwords.d/会议号.txt` 的快照并锁定本次连接。
-- 开始后再修改服务器 txt 文件，只影响下一次开始。
-- 如果会议号没有对应 txt，服务端才会使用 `--hotwords_file` 的全局默认热词。
-- 中控 Client 列表会显示会议号、热词文件名、热词是否锁定和热词数量。
-
-新增或修改热词文件后，不需要重启 ASR 服务；在 Client 或 Admin 页面点击刷新即可看到最新列表。
-
-## 7. 服务端会议日志
-
-浏览器页面点击“导出日志”时，会同时执行两件事：
-
-- 浏览器本地下载一份 `会议号-*.json`；没有会议号时使用 `meeting-log-*.json`。
-- 通过 Admin API 保存同一份 JSON 到服务端目录。
-
-默认服务端保存目录是：
-
-```text
-logs/
-```
-
-也可以在启动服务时指定：
+单卡/双卡 Nginx 配置切换：
 
 ```bash
---meeting_logs_dir logs
+./scripts/switch_nginx_mode.sh single
+./scripts/switch_nginx_mode.sh dual
 ```
 
-如果后端容器使用了 `-v "$PWD:/app"`，日志会落在宿主机项目目录的 `logs/` 下。文件名会使用会议号和服务端时间，例如：
+---
 
-```text
-logs/产品周会-2026-05-28T10-30-15.json
-```
+## 13. 命令行 client
 
-## 8. 备用：client 端 Docker 拉 Web 页面
-
-如果暂时没有统一入口或 HTTPS，可以让 client 机器自己拉起静态 Web 页面容器。client 机器只负责页面，不跑 ASR、不跑翻译，也不需要 GPU。
+在后端容器内执行：
 
 ```bash
-docker run --rm -it \
-  --name whisperlive-client \
-  -p 8080:80 \
-  whisperlive-client:latest
+docker exec -it whisperlive-gpu0 bash
 ```
 
-client 机器浏览器打开：
-
-```text
-http://localhost:8080
-```
-
-页面里的 `Server` 手动填远程 server 的 WebSocket 地址：
-
-```text
-ws://192.168.1.100:9090
-```
-
-这种方式仍然支持多路并发：每台 client 的浏览器都会建立独立 WebSocket 连接到 server。
-
-## 9. 命令行 client 使用
-
-推荐在后端容器内执行，依赖最完整。
-
-进入容器：
-
-```bash
-docker exec -it whisperlive-server bash
-```
-
-测试中文音频并开启翻译：
+中文音频 + 翻译：
 
 ```bash
 python run_client.py \
-  --server 127.0.0.1 \
-  --port 9090 \
-  --files /app/test_zn.wav \
-  --lang zh \
-  --enable_translation \
-  --target_language en \
-  --same_output_threshold 2 \
-  --mute_audio_playback
+  --server 127.0.0.1 --port 9090 \
+  --files /app/test_zn.wav --lang zh \
+  --enable_translation --target_language en \
+  --same_output_threshold 2 --mute_audio_playback
 ```
 
-测试英文音频并翻译成中文：
+英文音频 + 翻译：
 
 ```bash
 python run_client.py \
-  --server 127.0.0.1 \
-  --port 9090 \
-  --files /app/test_en.wav \
-  --lang en \
-  --enable_translation \
-  --target_language zh \
-  --same_output_threshold 2 \
-  --mute_audio_playback
+  --server 127.0.0.1 --port 9090 \
+  --files /app/test_en.wav --lang en \
+  --enable_translation --target_language zh \
+  --same_output_threshold 2 --mute_audio_playback
 ```
 
-注意：如果服务端启动时已经用了 `-fw`，实际 ASR 模型由服务端 `-fw` 决定，client 传的 `--model` 不会覆盖服务端固定模型。
+注意：服务端 `-fw` 决定了实际 ASR 模型，client 传的 `--model` 不覆盖服务端。
 
-## 10. 压测脚本
+---
 
-压测脚本用于模拟多路 WebSocket client 实时推流。
+## 14. 压测
 
-进入后端容器：
+在后端容器内执行：
 
 ```bash
-docker exec -it whisperlive-server bash
+docker exec -it whisperlive-gpu0 bash
 ```
 
-两路中文 + 翻译压测：
-
 ```bash
+# 两路中文 + 翻译
 python /app/scripts/stress_ws.py \
-  --host 127.0.0.1 \
-  --port 9090 \
-  --audio /app/test_zn.wav \
-  --clients 2 \
-  --language zh \
-  --target_language en \
-  --enable_translation \
-  --same_output_threshold 2
-```
+  --host 127.0.0.1 --port 9090 \
+  --audio /app/test_zn.wav --clients 2 \
+  --language zh --target_language en \
+  --enable_translation --same_output_threshold 2
 
-两路英文 + 翻译压测：
-
-```bash
+# 两路英文 + 翻译
 python /app/scripts/stress_ws.py \
-  --host 127.0.0.1 \
-  --port 9090 \
-  --audio /app/test_en.wav \
-  --clients 2 \
-  --language en \
-  --target_language zh \
-  --enable_translation \
-  --same_output_threshold 2
+  --host 127.0.0.1 --port 9090 \
+  --audio /app/test_en.wav --clients 2 \
+  --language en --target_language zh \
+  --enable_translation --same_output_threshold 2
 ```
 
-脚本默认会把日志写到：
+日志输出到 `scripts/stress_logs/`。关键字段：
+- `success`：是否通过
+- `rt_factor`：总耗时/音频时长，越接近 1.0 越实时
+- `segments` / `translations`：消息数
+- `errors` / `timeout`：连接错误或超时
 
-```text
-scripts/stress_logs/
-```
+---
 
-常看字段：
+## 15. 启动参数速查
 
-- `success`：本次压测是否通过。
-- `ready=2/2`：成功连接服务的 client 数。
-- `rt_factor`：总耗时 / 音频时长，越接近 `1.0` 越接近实时。
-- `segments`：ASR 消息数。
-- `translations`：翻译消息数。
-- `errors` / `timeout`：连接错误或等待超时。
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--port` | `9090` | WebSocket 端口 |
+| `--backend` | `faster_whisper` | 后端类型：`faster_whisper` / `funasr` / `tensorrt` / `openvino` |
+| `-fw` | - | Faster-Whisper 模型路径 |
+| `--max_clients` | `4` | 最大并发客户端数 |
+| `--max_connection_time` | `300` | 最长连接时间（秒） |
+| `--batch_inference` | `false` | 启用批量 GPU 推理 |
+| `--batch_max_size` | `8` | 批量推理最大 batch |
+| `--translation_device` | `cpu` | 翻译模型设备：`cpu` / `cuda` / `auto` |
+| `--rest_port` | `8000` | Admin API 端口（容器内） |
+| `--cors-origins` | - | CORS 域名（逗号分隔） |
+| `--meeting_hotwords_dir` | `config/hotwords.d` | 会议热词目录 |
+| `--meeting_logs_dir` | `logs` | 日志保存目录 |
+| `--summary_base_url` | `http://127.0.0.1:8001/v1` | LLM 总结 API |
+| `--summary_model` | `qwen3-4b-awq` | 总结模型名 |
+| `--summary_templates_dir` | `config/summary_templates` | 总结模板目录 |
 
-## 11. 常见问题
+---
 
-### 改了代码后是否需要重新 build 镜像
+## 16. 常见问题
 
-如果后端容器启动时使用了：
+### 改了代码后需要重新 build 镜像吗
+
+容器使用 `-v "$PWD:/app"` 挂载时，修改代码后只需重启 `run_server.py`，无需重新 build。只有 Dockerfile 中 `COPY` 固化的代码才需要重建镜像。
+
+### 页面能打开但显示连接错误
+
+通常是 `--cors-origins` 没包含页面地址。需要在启动命令中加入：
 
 ```bash
--v "$PWD:/app"
+--cors-origins http://localhost:9093,http://127.0.0.1:9093,http://你的IP:9093
 ```
 
-代码是从宿主机挂载进容器的，修改 Python 或 Web 文件后只需要停止当前 `run_server.py` 并重新启动。
+修改后重启服务。
 
-如果镜像里是通过 Dockerfile `COPY` 固化进去的代码，才需要重新执行 `docker build`。
+### localhost 容易混淆
 
-### FunASR 启动后为什么还会下载模型
+远程浏览器访问时 `localhost` 指的是你自己电脑而非服务器。远程访问统一用 `9093`：
 
-通常是启动参数没有指向本地模型目录，或者本地目录缺少核心文件。FunASR 本地路径建议使用：
-
-```text
-model/funasr/paraformer-zh-streaming
-model/funasr/SenseVoiceSmall
-model/funasr/ct-punc
+```
+页面：http://服务器IP:9093/
+WebSocket：ws://服务器IP:9093/ws
 ```
 
-如果传的是 `iic/SenseVoiceSmall` 这类模型 ID，FunASR 会从 ModelScope 下载到容器缓存目录。
+`9090/9094` 是后端端口，通常不直接填到浏览器页面的 WebSocket 地址中。
 
-### 页面能打开，但中控一直显示连接错误
+### FunASR 启动后还在下载模型
 
-通常是 `--cors-origins` 没包含页面地址。
+通常是启动参数没有指向本地模型目录，或使用了 `iic/` 模型 ID。确认本地有完整模型文件并使用本地路径。
 
-服务端启动命令里需要包含：
+### 中控 `HEAD` 请求返回 405
 
-```bash
---cors-origins http://192.168.1.100:9093,http://localhost:9093,http://127.0.0.1:9093
-```
-
-修改后需要重启 `run_server.py`。
-
-### 访问 `http://192.168.1.100:9093/admin.html` 打不开
-
-先在服务器上检查：
-
-```bash
-curl -I http://127.0.0.1:9093/admin.html
-```
-
-如果服务器本机通，但外部浏览器不通，检查防火墙、安全组或路由器是否放行 `9093`。
-
-如果服务器本机也不通，确认前端容器是否在 `whisperlive-net`：
-
-```bash
-docker ps
-```
-
-前端容器启动命令应包含：
-
-```bash
---network whisperlive-net
-```
-
-### `HEAD /admin/clients 405 Method Not Allowed`
-
-这个不是服务错误。`curl -I` 发的是 `HEAD` 请求，而 `/admin/clients` 只支持 `GET`。
-
-验证统一入口的 Admin API 请用：
+`curl -I` 发的 `HEAD` 被 `/admin/clients` 拒绝，因为该接口只支持 `GET`。验证请用：
 
 ```bash
 curl http://127.0.0.1:9093/admin/clients
 ```
 
-如果要直接验证后端裸端口，也可以用 `http://127.0.0.1:9094/admin/clients`。
+---
 
-### `localhost` 容易混淆
+## 17. 停止服务
 
-如果你是在自己电脑浏览器访问远程服务器：
-
-```text
-localhost
-```
-
-指的是你自己的电脑，不是 SSH 服务器。
-
-远程浏览器访问统一入口时只用 `9093`：
-
-```text
-Web 页面：http://192.168.1.100:9093/
-中控页面：http://192.168.1.100:9093/admin.html
-WebSocket：ws://192.168.1.100:9093/ws
-Admin API：http://192.168.1.100:9093
-```
-
-`9090/9094` 是后端真实端口，通常不直接填到浏览器页面里。
-
-
-## 12. Markdown 自定义会议纪要模板
-
-Web 设置面板支持上传 UTF-8 编码的 `.md` 模板。模板至少包含一个 `##` 到 `######` 标题，系统会调用当前总结模型分析字段；模型不可用时会按标题生成基础字段供手动确认。
-
-基本流程：
-
-1. 停止会议，确保后端会议日志状态为 `finished`。
-2. 在“日志与总结”中上传不超过 2 MB 的 `.md` 文件并点击“分析模板”。
-3. 调整字段名称、字段键、类型和说明后保存。
-4. 在总结模板下拉框的“自定义模板”分组中选择模板并生成总结。
-5. 下载的 Markdown 会保留上传模板的标题结构，模板里的示例正文会被新总结替换。
-
-模板支持以下字段类型：
-
-- `文本`：概述、背景等单段内容。
-- `列表`：议题、普通要点等无需逐条证据的内容。
-- `带证据列表`：决策、待办、观点、风险等，生成后校验原文时间戳和引用。
-- `表格`：按确认的列名生成 Markdown 表格。
-
-默认模板库目录为 `config/summary_templates`，可以通过启动参数修改：
+docker-compose 方式：
 
 ```bash
---summary_templates_dir config/summary_templates
+docker compose -f docker-compose.local.yml down
 ```
 
-生产部署需要持久化该目录。模板库第一版全局共享且只在前端提供新增功能；同名模板会自动生成新的 ID，不覆盖已有模板。
-
-## 13. 会后转写校对与说话人管理
-
-会议结束后，可在“会议总结”面板选择会议并展开“校对转写与说话人”：
-
-- 修改识别原文并逐段保存，系统保留首次识别的 `original_text`。
-- 手动新增说话人，并给片段分配、重命名或合并说话人。
-- 修改原文后，已有译文和总结会标记为过期；重新生成总结会保留旧版本。
-- 多个页面同时编辑时使用修订号防止覆盖，冲突后需重新加载最新内容。
-
-该功能当前不启用自动说话人分离，也不会自动生成 Speaker 1、Speaker 2。后续接入独立说话人模型时，可继续复用现有 `speaker_id` 和人工校对数据。
-
-## 14. 停止服务
-
-停止前端容器：
+手动方式：
 
 ```bash
-docker stop whisperlive-web-gateway
+docker stop whisperlive-web-gateway whisperlive-gpu0
 ```
 
-停止后端容器：
+---
 
-```bash
-docker stop whisperlive-server
-```
-
-## 15. 原始项目地址
-
-原 fork / 上游 README 可参考：
+## 18. 原始项目地址
 
 ```text
 https://github.com/collabora/WhisperLive

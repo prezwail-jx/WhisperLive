@@ -67,13 +67,13 @@
 - 修改启动参数或服务入口时，才同步检查 `run_server.py` 和 `whisper_live/server.py`：
 
 ```bash
-docker exec whisperlive-server python3 -m py_compile whisper_live/server.py run_server.py
+docker exec whisperlive-gpu0 python3 -m py_compile whisper_live/server.py run_server.py
 ```
 
 - 修改前端 JavaScript 时只检查实际改动文件：
 
 ```bash
-docker exec whisperlive-server node --check web/app.js
+docker exec whisperlive-gpu0 node --check web/app.js
 ```
 
 - 前端静态改动不自行启动浏览器、Nginx、ASR 或 Admin API；只有用户明确要求联调时才运行服务级检查。

@@ -38,6 +38,21 @@
         </div>
       </header>
 
+      <section class="mode-toolbar" aria-label="业务模式与翻译方向">
+        <div class="service-mode-switcher" aria-label="业务模式">
+          <button type="button" class="service-mode active" data-service-mode="standard">普通同传</button>
+          <button type="button" class="service-mode" data-service-mode="accurate">高精同传</button>
+          <button type="button" class="service-mode" data-service-mode="conversation">对话翻译</button>
+          <button type="button" class="service-mode" data-service-mode="transcription">语音识别</button>
+        </div>
+        <div class="language-direction" aria-label="翻译方向">
+          <button id="sourceLanguageButton" class="language-chip" type="button">中文</button>
+          <button id="directionToggleButton" class="direction-toggle" type="button" aria-label="切换自动互译">↔</button>
+          <button id="targetLanguageButton" class="language-chip" type="button">English</button>
+        </div>
+        <button id="fullscreenButton" class="secondary-button fullscreen-button" type="button">全屏</button>
+      </section>
+
       <section id="transcriptWorkspace" class="transcript-workspace mode-stacked" aria-label="同传内容">
         <article class="transcript-pane source-pane" data-language-pane="source">
           <header><div><span class="pane-kicker">SOURCE</span><h2 id="sourcePaneTitle">原文</h2></div><button id="clearSourceButton" class="text-button" type="button">清空</button></header>
@@ -74,10 +89,10 @@
             <div class="card-body field-stack">
               <label>会议名称<input id="meetingNameInput" type="text" maxlength="80" placeholder="如 2026产品会" autocomplete="off"></label>
               <label>WebSocket 地址<input id="serverInput" type="text" value="ws://localhost:9090" autocomplete="off"></label>
-              <label>翻译模型<select id="translationProviderInput"><option value="helsinki_zh_en">Helsinki 轻量实时</option><option value="nllb_200_600m">NLLB-200 600M 高质量</option><option value="nllb_200_distilled_1_3b">NLLB-200 1.3B 高质量</option></select></label>
-              <label>翻译方式<select id="faceToFaceModeInput"><option value="interpretation" selected>自动识别语言：中文 ↔ English</option><option value="specified">指定翻译：手动选择源语言和目标语言</option></select></label>
-              <label>源语言（指定翻译）<select id="languageInput"><option value="zh">中文</option><option value="en">English</option></select></label>
-              <label>目标语言<select id="translationTargetInput"><option value="auto" selected>自动互译</option><option value="zh">中文</option><option value="en">English</option></select></label>
+              <label id="translationProviderField">翻译模型<select id="translationProviderInput"><option value="helsinki_zh_en">Helsinki 轻量实时</option><option value="nllb_200_600m">NLLB-200 600M 高质量</option><option value="nllb_200_distilled_1_3b">NLLB-200 1.3B 高质量</option></select></label>
+              <label id="faceToFaceModeField">翻译方式<select id="faceToFaceModeInput"><option value="interpretation" selected>自动识别语言：中文 ↔ English</option><option value="specified">指定翻译：手动选择源语言和目标语言</option></select></label>
+              <label id="languageField">源语言（指定翻译）<select id="languageInput"><option value="zh">中文</option><option value="en">English</option></select></label>
+              <label id="translationTargetField">目标语言<select id="translationTargetInput"><option value="auto" selected>自动互译</option><option value="zh">中文</option><option value="en">English</option></select></label>
               <p id="translationModeHint" class="tool-status">自动识别语言：中文 ↔ English</p>
               <div class="compact-toggle-row">
                 <input id="translationEnabledInput" type="hidden" checked value="true">

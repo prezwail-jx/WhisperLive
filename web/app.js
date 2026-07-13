@@ -79,6 +79,15 @@ const elements = {
   translationFontColor: document.getElementById("translationFontColorInput"),
   resetCaptionStyle: document.getElementById("resetCaptionStyleButton"),
   toolStatus: document.getElementById("toolStatus"),
+  translationProviderField: document.getElementById("translationProviderField"),
+  faceToFaceModeField: document.getElementById("faceToFaceModeField"),
+  languageField: document.getElementById("languageField"),
+  translationTargetField: document.getElementById("translationTargetField"),
+  sourceLanguageButton: document.getElementById("sourceLanguageButton"),
+  targetLanguageButton: document.getElementById("targetLanguageButton"),
+  directionToggleButton: document.getElementById("directionToggleButton"),
+  fullscreenButton: document.getElementById("fullscreenButton"),
+  serviceModeButtons: Array.from(document.querySelectorAll("[data-service-mode]")),
   viewModeButtons: Array.from(document.querySelectorAll("[data-view-mode]")),
 };
 
@@ -94,6 +103,8 @@ let translatedSegments = [];
 const sourceSegmentStore = new Map();
 const translationSegmentStore = new Map();
 const translatedSourceIds = new Set();
+let sourceClearedBefore = null;
+let translationClearedBefore = null;
 let currentSessionId = null;
 let currentSessionStartedAt = null;
 let currentConfig = null;
@@ -111,6 +122,11 @@ let lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0
 let clientInstanceId = null;
 let displayMode = "split";
 let singleLanguageMode = "translation";
+let serviceMode = "standard";
+let directionMode = "auto";
+let selectedSourceLanguage = "zh";
+let selectedTargetLanguageCode = "en";
+let immersiveFullscreenFallback = false;
 let detectedSourceLanguage = null;
 let resumeNextConnection = false;
 let intentionallyClosingSocket = false;
@@ -121,6 +137,8 @@ const DEFAULT_MODEL = "model/asr/small";
 const DEFAULT_DISPLAY_SEGMENTS = 16;
 const DEFAULT_DISPLAY_MODE = "stacked";
 const DEFAULT_TRANSLATION_MODE = "interpretation";
+const DEFAULT_SERVICE_MODE = "standard";
+const SERVICE_MODES = ["standard", "accurate", "conversation", "transcription"];
 const TRANSLATION_ERROR_SUFFIX = "（翻译出错）";
 const MAX_SESSION_SEGMENTS = 500;
 const DEFAULT_CAPTION_STYLE = {
@@ -237,6 +255,174 @@ function resetCaptionStyle() {
   applyCaptionStyle(DEFAULT_CAPTION_STYLE);
 }
 
+function normalizeServiceMode(value) {
+  return SERVICE_MODES.includes(value) ? value : DEFAULT_SERVICE_MODE;
+}
+
+function isTranslationServiceMode(mode = serviceMode) {
+  return mode !== "transcription";
+}
+
+function oppositeLanguage(language) {
+  return normalizeLanguage(language) === "zh" ? "en" : "zh";
+}
+
+function normalizeDirectionMode(value) {
+  return value === "specified" ? "specified" : "auto";
+}
+
+function syncDirectionLanguages() {
+  selectedSourceLanguage = normalizeLanguage(selectedSourceLanguage) || "zh";
+  selectedTargetLanguageCode = normalizeLanguage(selectedTargetLanguageCode) || oppositeLanguage(selectedSourceLanguage);
+  if (selectedSourceLanguage === selectedTargetLanguageCode) {
+    selectedTargetLanguageCode = oppositeLanguage(selectedSourceLanguage);
+  }
+  if (elements.language) elements.language.value = selectedSourceLanguage;
+  if (elements.translationTarget) elements.translationTarget.value = directionMode === "auto" ? "auto" : selectedTargetLanguageCode;
+}
+
+function persistServiceModeState() {
+  window.localStorage.setItem("whisperlive_service_mode", serviceMode);
+  window.localStorage.setItem("whisperlive_direction_mode", directionMode);
+  window.localStorage.setItem("whisperlive_direction_source_language", selectedSourceLanguage);
+  window.localStorage.setItem("whisperlive_direction_target_language", selectedTargetLanguageCode);
+}
+
+function serviceModeLabel(mode = serviceMode) {
+  if (mode === "accurate") return "高精同传";
+  if (mode === "conversation") return "对话翻译";
+  if (mode === "transcription") return "语音识别";
+  return "普通同传";
+}
+
+function defaultTranslationProviderForMode(mode = serviceMode) {
+  if (mode === "accurate") return "nllb_200_distilled_1_3b";
+  if (mode === "standard") return "nllb_200_600m";
+  return "helsinki_zh_en";
+}
+
+function effectiveTranslationProvider() {
+  return elements.translationProvider?.value || defaultTranslationProviderForMode();
+}
+
+function setTranslationEnabledForMode() {
+  const enabled = isTranslationServiceMode();
+  if (!elements.translationEnabled) return;
+  elements.translationEnabled.checked = enabled;
+  elements.translationEnabled.value = enabled ? "true" : "false";
+}
+
+function applyServiceModeDisplayDefaults() {
+  if (serviceMode !== "transcription") return;
+  singleLanguageMode = "source";
+  if (elements.singleLanguage) elements.singleLanguage.value = singleLanguageMode;
+  window.localStorage.setItem("whisperlive_single_language", singleLanguageMode);
+  if (displayMode !== "single") setDisplayMode("single");
+}
+
+function setServiceMode(nextMode, persist = true) {
+  serviceMode = normalizeServiceMode(nextMode);
+  if (serviceMode === "conversation") directionMode = "auto";
+  if (serviceMode === "transcription") directionMode = "specified";
+  if (elements.translationProvider) {
+    elements.translationProvider.value = defaultTranslationProviderForMode(serviceMode);
+  }
+  syncDirectionLanguages();
+  setTranslationEnabledForMode();
+  applyServiceModeDisplayDefaults();
+  updateTranslationControls();
+  renderTranscriptViews();
+  if (persist) persistServiceModeState();
+}
+
+function setDirectionMode(nextMode, persist = true) {
+  if (serviceMode === "conversation") {
+    directionMode = "auto";
+  } else if (serviceMode === "transcription") {
+    directionMode = "specified";
+  } else {
+    directionMode = normalizeDirectionMode(nextMode);
+  }
+  syncDirectionLanguages();
+  updateTranslationControls();
+  renderTranscriptViews();
+  if (persist) persistServiceModeState();
+}
+
+function toggleSourceLanguage() {
+  selectedSourceLanguage = oppositeLanguage(selectedSourceLanguage);
+  selectedTargetLanguageCode = oppositeLanguage(selectedSourceLanguage);
+  setDirectionMode(directionMode);
+}
+
+function toggleTargetLanguage() {
+  selectedTargetLanguageCode = oppositeLanguage(selectedTargetLanguageCode);
+  selectedSourceLanguage = oppositeLanguage(selectedTargetLanguageCode);
+  setDirectionMode("specified");
+}
+
+function serviceModeHint() {
+  if (serviceMode === "transcription") return `当前模式：语音识别 · ${languageLabel(selectedSourceLanguage)}原文`;
+  if (serviceMode === "conversation") return "当前模式：对话翻译 · 自适应中文/English";
+  const provider = serviceMode === "accurate" ? "高精翻译" : "标准翻译";
+  return `当前模式：${serviceModeLabel()} · ${provider} · ${translationModeLabel()}`;
+}
+
+function updateModeToolbar(forceConnectionLocked = false) {
+  elements.serviceModeButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.serviceMode === serviceMode);
+    button.disabled = Boolean(forceConnectionLocked);
+  });
+  document.body.dataset.serviceMode = serviceMode;
+  document.body.classList.toggle("translation-disabled", !isTranslationServiceMode());
+
+  if (elements.sourceLanguageButton) {
+    elements.sourceLanguageButton.textContent = languageLabel(selectedSourceLanguage);
+    elements.sourceLanguageButton.disabled = Boolean(forceConnectionLocked || serviceMode === "conversation");
+  }
+  if (elements.targetLanguageButton) {
+    elements.targetLanguageButton.textContent = serviceMode === "transcription" ? "无翻译" : languageLabel(selectedTargetLanguageCode);
+    elements.targetLanguageButton.disabled = Boolean(forceConnectionLocked || serviceMode === "conversation" || serviceMode === "transcription");
+  }
+  if (elements.directionToggleButton) {
+    elements.directionToggleButton.textContent = serviceMode === "conversation" ? "自适应" : (directionMode === "auto" && serviceMode !== "transcription" ? "↔" : "→");
+    elements.directionToggleButton.disabled = Boolean(forceConnectionLocked || serviceMode === "conversation" || serviceMode === "transcription");
+    elements.directionToggleButton.setAttribute("aria-label", serviceMode === "conversation" ? "当前对话翻译自适应语言" : (directionMode === "auto" ? "当前自动互译，点击改为指定方向" : "当前指定方向，点击改为自动互译"));
+  }
+}
+
+async function enterCaptionFullscreen() {
+  closeAllDrawers();
+  try {
+    if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+      immersiveFullscreenFallback = false;
+    } else {
+      immersiveFullscreenFallback = true;
+    }
+  } catch (_error) {
+    immersiveFullscreenFallback = true;
+  }
+  document.body.classList.add("is-caption-fullscreen");
+  updateFullscreenButton();
+}
+
+async function exitCaptionFullscreen() {
+  immersiveFullscreenFallback = false;
+  if (document.fullscreenElement && document.exitFullscreen) {
+    await document.exitFullscreen().catch(() => {});
+  }
+  document.body.classList.remove("is-caption-fullscreen");
+  updateFullscreenButton();
+}
+
+function updateFullscreenButton() {
+  if (!elements.fullscreenButton) return;
+  const active = document.fullscreenElement || immersiveFullscreenFallback || document.body.classList.contains("is-caption-fullscreen");
+  elements.fullscreenButton.textContent = active ? "退出全屏" : "全屏";
+  elements.fullscreenButton.setAttribute("aria-pressed", active ? "true" : "false");
+}
+
 function initializeDefaults() {
   const legacyDefault = "ws://localhost:9090";
   if (!elements.server.value || elements.server.value === legacyDefault) {
@@ -249,6 +435,10 @@ function initializeDefaults() {
   const savedFaceToFaceEnabled = window.localStorage.getItem("whisperlive_face_to_face_enabled");
   const savedFaceToFaceMode = window.localStorage.getItem("whisperlive_face_to_face_mode");
   const savedTranslationTarget = window.localStorage.getItem("whisperlive_translation_target");
+  const savedServiceMode = window.localStorage.getItem("whisperlive_service_mode");
+  const savedDirectionMode = window.localStorage.getItem("whisperlive_direction_mode");
+  const savedDirectionSource = window.localStorage.getItem("whisperlive_direction_source_language");
+  const savedDirectionTarget = window.localStorage.getItem("whisperlive_direction_target_language");
   const savedDiarizationEnabled = window.localStorage.getItem("whisperlive_diarization_enabled");
   displayMode = window.localStorage.getItem("whisperlive_display_mode") || DEFAULT_DISPLAY_MODE;
   singleLanguageMode = window.localStorage.getItem("whisperlive_single_language") || "translation";
@@ -262,11 +452,15 @@ function initializeDefaults() {
   }
   window.localStorage.removeItem("whisperlive_face_to_face_enabled");
   if (savedTranslationTarget && elements.translationTarget) elements.translationTarget.value = savedTranslationTarget;
+  serviceMode = normalizeServiceMode(savedServiceMode);
+  directionMode = normalizeDirectionMode(savedDirectionMode || (faceToFaceMode() === "specified" ? "specified" : "auto"));
+  selectedSourceLanguage = normalizeLanguage(savedDirectionSource || elements.language?.value) || "zh";
+  selectedTargetLanguageCode = normalizeLanguage(savedDirectionTarget || selectedTargetLanguage()) || oppositeLanguage(selectedSourceLanguage);
   if (savedDiarizationEnabled !== null) elements.diarizationEnabled.checked = savedDiarizationEnabled === "true";
   elements.displayMode.value = displayMode;
   elements.singleLanguage.value = singleLanguageMode;
   applyCaptionStyle(readCaptionStyle());
-  updateTranslationControls();
+  setServiceMode(serviceMode, false);
   setDisplayMode(displayMode);
   updateMeetingTitle();
   updateHotwordStatus("未上传热词");
@@ -329,7 +523,7 @@ function updateDrawerTranslationStatus() {
     elements.drawerTranslationStatus.textContent = "已关闭";
     return;
   }
-  elements.drawerTranslationStatus.textContent = translationModeLabel();
+  elements.drawerTranslationStatus.textContent = serviceMode === "transcription" ? "已关闭" : serviceModeLabel();
 }
 
 function setToolStatus(text, state = "") {
@@ -394,23 +588,33 @@ function openSummaryDrawer() {
 }
 
 function updateTranslationControls(forceConnectionLocked = false) {
+  if (serviceMode === "conversation") directionMode = "auto";
+  if (serviceMode === "transcription") directionMode = "specified";
+  syncDirectionLanguages();
+  setTranslationEnabledForMode();
+
   const autoDetectMode = faceToFaceEnabled();
-  if (autoDetectMode && elements.translationTarget) {
-    elements.translationTarget.value = "auto";
+  if (elements.faceToFaceMode) {
+    elements.faceToFaceMode.value = autoDetectMode ? "interpretation" : "specified";
+    elements.faceToFaceMode.disabled = Boolean(forceConnectionLocked || serviceMode === "conversation" || serviceMode === "transcription");
   }
-  if (!autoDetectMode) syncSpecifiedTranslationTarget();
+  if (elements.translationProvider) {
+    elements.translationProvider.disabled = Boolean(forceConnectionLocked || serviceMode === "transcription");
+  }
   if (elements.language) {
-    elements.language.disabled = Boolean(forceConnectionLocked || autoDetectMode);
+    elements.language.disabled = Boolean(forceConnectionLocked || serviceMode === "conversation");
   }
   if (elements.translationTarget) {
-    elements.translationTarget.disabled = Boolean(forceConnectionLocked);
+    elements.translationTarget.disabled = Boolean(forceConnectionLocked || serviceMode === "conversation" || serviceMode === "transcription" || directionMode === "auto");
   }
-  if (elements.faceToFaceMode) {
-    elements.faceToFaceMode.disabled = Boolean(forceConnectionLocked);
-  }
+  if (elements.translationProviderField) elements.translationProviderField.hidden = serviceMode === "transcription";
+  if (elements.faceToFaceModeField) elements.faceToFaceModeField.hidden = serviceMode === "transcription";
+  if (elements.translationTargetField) elements.translationTargetField.hidden = serviceMode === "transcription";
+  if (elements.languageField) elements.languageField.hidden = serviceMode === "conversation";
   if (elements.translationModeHint) {
-    elements.translationModeHint.textContent = `当前翻译模式：${translationModeLabel()}`;
+    elements.translationModeHint.textContent = serviceModeHint();
   }
+  updateModeToolbar(forceConnectionLocked);
   updateDrawerTranslationStatus();
 }
 
@@ -468,16 +672,17 @@ function faceToFaceMode() {
 }
 
 function faceToFaceEnabled() {
-  return faceToFaceMode() === "interpretation";
+  return isTranslationServiceMode() && directionMode === "auto";
 }
 
 function selectedTargetLanguage() {
-  const target = String(elements.translationTarget?.value || "auto");
-  return ["auto", "zh", "en"].includes(target) ? target : "auto";
+  if (serviceMode === "transcription") return "auto";
+  if (directionMode === "auto") return "auto";
+  return normalizeLanguage(selectedTargetLanguageCode) || oppositeLanguage(selectedSourceLanguage);
 }
 
 function selectedTranslationProviderConfig() {
-  const provider = elements.translationProvider?.value || "helsinki_zh_en";
+  const provider = effectiveTranslationProvider();
   if (provider === "nllb_200_distilled_1_3b") {
     return { provider: "nllb_200_600m", nllbModelPath: "model/NLLB-200-distilled-1.3B" };
   }
@@ -496,8 +701,9 @@ function syncSpecifiedTranslationTarget() {
 
 function selectedFaceToFaceTarget() {
   if (faceToFaceEnabled()) return "auto";
-  syncSpecifiedTranslationTarget();
-  return normalizeLanguage(elements.translationTarget?.value) || lockedTranslationTargetForBackend(currentServerBackend || DEFAULT_BACKEND, elements.language?.value);
+  if (serviceMode === "transcription") return "auto";
+  syncDirectionLanguages();
+  return normalizeLanguage(selectedTargetLanguageCode) || lockedTranslationTargetForBackend(currentServerBackend || DEFAULT_BACKEND, selectedSourceLanguage);
 }
 
 function languageLabel(language) {
@@ -506,18 +712,17 @@ function languageLabel(language) {
 }
 
 function translationModeLabel() {
-  if (faceToFaceEnabled()) {
-    const target = selectedFaceToFaceTarget();
-    return target === "auto" ? "自动识别语言：中文 ↔ English" : `自动识别语言：统一翻译为${languageLabel(target)}`;
-  }
-  const source = normalizeLanguage(elements.language?.value) || defaultLanguageForBackend(currentServerBackend || DEFAULT_BACKEND);
+  if (serviceMode === "transcription") return `识别语言：${languageLabel(selectedSourceLanguage)}`;
+  if (faceToFaceEnabled()) return "自动识别语言：中文 ↔ English";
+  const source = normalizeLanguage(selectedSourceLanguage) || defaultLanguageForBackend(currentServerBackend || DEFAULT_BACKEND);
   const target = selectedFaceToFaceTarget();
   return `指定翻译：${languageLabel(source)} → ${languageLabel(target)}`;
 }
 
 function applyBackendLanguage(backend) {
   currentServerBackend = normalizeBackend(backend);
-  elements.language.value = defaultLanguageForBackend(currentServerBackend);
+  if (!selectedSourceLanguage) selectedSourceLanguage = defaultLanguageForBackend(currentServerBackend);
+  syncDirectionLanguages();
   updateTranslationControls();
 }
 
@@ -1304,6 +1509,40 @@ function segmentTimeValue(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+function segmentBoundaryValue(segment) {
+  const end = Number(segment?.end);
+  if (Number.isFinite(end)) return end;
+  const start = Number(segment?.start);
+  return Number.isFinite(start) ? start : null;
+}
+
+function maxSegmentBoundary(segments) {
+  return segments.reduce((maxValue, segment) => {
+    const value = segmentBoundaryValue(segment);
+    if (value === null) return maxValue;
+    return maxValue === null ? value : Math.max(maxValue, value);
+  }, null);
+}
+
+function shouldIgnoreClearedSegment(segment, clearBoundary) {
+  if (clearBoundary === null) return false;
+  const value = segmentBoundaryValue(segment);
+  return value !== null && value <= clearBoundary;
+}
+
+function markSourceClearedBefore() {
+  sourceClearedBefore = maxSegmentBoundary(sourceSegments);
+}
+
+function markTranslationClearedBefore() {
+  translationClearedBefore = maxSegmentBoundary(translatedSegments);
+}
+
+function resetTranscriptClearBoundaries() {
+  sourceClearedBefore = null;
+  translationClearedBefore = null;
+}
+
 function sourceSegmentStoreKey(segment) {
   const utteranceId = String(segment?.utterance_id || "").trim();
   if (utteranceId) {
@@ -1368,6 +1607,7 @@ function mergeSourceSnapshot(segments) {
   });
 
   incoming.forEach((segment) => {
+    if (shouldIgnoreClearedSegment(segment, sourceClearedBefore)) return;
     const copy = { ...segment };
     sourceSegmentStore.set(sourceSegmentStoreKey(copy), copy);
   });
@@ -1378,6 +1618,7 @@ function mergeSourceSnapshot(segments) {
 function mergeTranslationSnapshot(segments) {
   const incoming = Array.isArray(segments) ? segments : [];
   incoming.forEach((segment) => {
+    if (shouldIgnoreClearedSegment(segment, translationClearedBefore)) return;
     const copy = {
       ...segment,
       source_utterance_ids: Array.isArray(segment.source_utterance_ids)
@@ -1402,6 +1643,7 @@ function clearTranslationSegmentState() {
 }
 
 function clearTranscriptState() {
+  resetTranscriptClearBoundaries();
   clearSourceSegmentState();
   clearTranslationSegmentState();
 }
@@ -1681,8 +1923,8 @@ function resolveSingleLanguageStream() {
 function renderTranscriptViews() {
   elements.sourcePaneTitle.textContent = "原文";
   elements.translationPaneTitle.textContent = "翻译";
-  renderSegments(elements.sourceText, sourceSegments, "等待语音输入...");
-  renderSegments(elements.translationText, translatedSegments, elements.translationEnabled.checked ? "等待翻译结果..." : "翻译已关闭");
+  renderSegments(elements.sourceText, sourceSegments, "等待原文内容...");
+  renderSegments(elements.translationText, translatedSegments, elements.translationEnabled.checked ? "等待翻译内容..." : "翻译已关闭");
   renderInterleaved();
   elements.transcriptWorkspace.classList.remove("show-translation");
   if (displayMode === "single") {
@@ -1786,14 +2028,16 @@ function sendConfig(event) {
 
   uid = createUid();
   const backend = currentServerBackend || DEFAULT_BACKEND;
-  const autoDetectMode = faceToFaceEnabled();
-  let selectedLanguage = normalizeLanguage(elements.language.value) || defaultLanguageForBackend(backend);
+  const translationEnabled = isTranslationServiceMode();
+  const autoDetectMode = translationEnabled && faceToFaceEnabled();
+  syncDirectionLanguages();
+  let selectedLanguage = normalizeLanguage(selectedSourceLanguage) || defaultLanguageForBackend(backend);
   if (autoDetectMode) {
     selectedLanguage = null;
   } else if (!["zh", "en"].includes(selectedLanguage)) {
     selectedLanguage = defaultLanguageForBackend(backend);
   }
-  const selectedTranslationTarget = selectedFaceToFaceTarget();
+  const selectedTranslationTarget = translationEnabled ? selectedFaceToFaceTarget() : "auto";
   const translationMode = autoDetectMode ? "mixed_interpretation" : "standard";
   const translationProvider = selectedTranslationProviderConfig();
   const meetingName = elements.meetingName.value.trim();
@@ -1826,11 +2070,12 @@ function sendConfig(event) {
     no_speech_thresh: 0.45,
     clip_audio: false,
     same_output_threshold: 7,
-    min_segment_rms: 0.004,
+    min_segment_rms: 0.018,
     min_transcription_chunk_seconds: 2.5,
     max_incomplete_segment_seconds: 10.0,
+    service_mode: serviceMode,
     enable_diarization: elements.diarizationEnabled.checked,
-    enable_translation: true,
+    enable_translation: translationEnabled,
     target_language: selectedTranslationTarget,
     translation_mode: translationMode,
     translation_provider: translationProvider.provider,
@@ -1859,6 +2104,10 @@ function setConnectionInputsDisabled(disabled) {
     elements.faceToFaceEnabled,
     elements.faceToFaceMode,
     elements.translationTarget,
+    elements.sourceLanguageButton,
+    elements.targetLanguageButton,
+    elements.directionToggleButton,
+    ...elements.serviceModeButtons,
     elements.diarizationEnabled,
     elements.hotwordFile,
     elements.clearHotwordFile,
@@ -2053,7 +2302,12 @@ elements.closeSettings.addEventListener("click", closeSettings);
 if (elements.closeSummary) elements.closeSummary.addEventListener("click", closeSummaryDrawer);
 elements.settingsBackdrop.addEventListener("click", closeAllDrawers);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeAllDrawers();
+  if (event.key !== "Escape") return;
+  if (immersiveFullscreenFallback || document.body.classList.contains("is-caption-fullscreen")) {
+    exitCaptionFullscreen().catch((error) => console.error(error));
+    return;
+  }
+  closeAllDrawers();
 });
 elements.viewModeButtons.forEach((button) => {
   button.addEventListener("click", () => setDisplayMode(button.dataset.viewMode));
@@ -2071,25 +2325,60 @@ elements.singleLanguage.addEventListener("change", () => {
 elements.resetCaptionStyle.addEventListener("click", resetCaptionStyle);
 if (elements.translationProvider) {
   elements.translationProvider.addEventListener("change", () => {
-    window.localStorage.setItem("whisperlive_translation_provider", elements.translationProvider.value || "helsinki_zh_en");
+    window.localStorage.setItem("whisperlive_translation_provider", elements.translationProvider.value || defaultTranslationProviderForMode());
+    updateTranslationControls();
   });
 }
 if (elements.faceToFaceMode) {
   elements.faceToFaceMode.addEventListener("change", () => {
+    setDirectionMode(faceToFaceMode() === "specified" ? "specified" : "auto");
     window.localStorage.setItem("whisperlive_face_to_face_mode", faceToFaceMode());
-    updateTranslationControls();
   });
 }
 if (elements.translationTarget) {
   elements.translationTarget.addEventListener("change", () => {
+    const rawTarget = String(elements.translationTarget.value || "auto");
+    if (rawTarget === "auto") {
+      setDirectionMode("auto");
+    } else {
+      const target = normalizeLanguage(rawTarget) || oppositeLanguage(selectedSourceLanguage);
+      selectedTargetLanguageCode = target;
+      selectedSourceLanguage = oppositeLanguage(target);
+      setDirectionMode("specified");
+    }
     window.localStorage.setItem("whisperlive_translation_target", selectedTargetLanguage());
-    updateTranslationControls();
   });
 }
 elements.language.addEventListener("change", () => {
-  syncSpecifiedTranslationTarget();
-  updateTranslationControls();
-  renderTranscriptViews();
+  selectedSourceLanguage = normalizeLanguage(elements.language.value) || selectedSourceLanguage;
+  selectedTargetLanguageCode = oppositeLanguage(selectedSourceLanguage);
+  setDirectionMode(directionMode);
+});
+elements.serviceModeButtons.forEach((button) => {
+  button.addEventListener("click", () => setServiceMode(button.dataset.serviceMode));
+});
+if (elements.sourceLanguageButton) {
+  elements.sourceLanguageButton.addEventListener("click", toggleSourceLanguage);
+}
+if (elements.targetLanguageButton) {
+  elements.targetLanguageButton.addEventListener("click", toggleTargetLanguage);
+}
+if (elements.directionToggleButton) {
+  elements.directionToggleButton.addEventListener("click", () => {
+    setDirectionMode(directionMode === "auto" ? "specified" : "auto");
+  });
+}
+if (elements.fullscreenButton) {
+  elements.fullscreenButton.addEventListener("click", () => {
+    const active = document.fullscreenElement || immersiveFullscreenFallback || document.body.classList.contains("is-caption-fullscreen");
+    (active ? exitCaptionFullscreen() : enterCaptionFullscreen()).catch((error) => console.error(error));
+  });
+}
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement && !immersiveFullscreenFallback) {
+    document.body.classList.remove("is-caption-fullscreen");
+  }
+  updateFullscreenButton();
 });
 elements.diarizationEnabled.addEventListener("change", () => {
   window.localStorage.setItem("whisperlive_diarization_enabled", String(elements.diarizationEnabled.checked));
@@ -2311,11 +2600,13 @@ if (elements.clearHotwordFile) {
 
 
 elements.clearSource.addEventListener("click", () => {
+  markSourceClearedBefore();
   clearSourceSegmentState();
   renderTranscriptViews();
 });
 
 elements.clearTranslation.addEventListener("click", () => {
+  markTranslationClearedBefore();
   clearTranslationSegmentState();
   renderTranscriptViews();
 });
