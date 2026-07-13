@@ -42,6 +42,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         max_incomplete_segment_seconds=0.0,
         min_transcription_chunk_seconds=1.0,
         mixed_interpretation=False,
+        asr_device_index=0,
     ):
         """
         Initialize a ServeClient instance.
@@ -94,6 +95,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.vad_parameters = vad_parameters or {"threshold": 0.5}
         self.hotwords = hotwords
         self.mixed_interpretation = bool(mixed_interpretation)
+        self.asr_device_index = int(asr_device_index or 0)
         self.allow_language_auto_per_chunk = self.mixed_interpretation
         self.current_language = None
         self.current_raw_language = None
@@ -102,14 +104,14 @@ class ServeClientFasterWhisper(ServeClientBase):
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cuda":
-            major, _ = torch.cuda.get_device_capability(device)
+            major, _ = torch.cuda.get_device_capability(self.asr_device_index)
             self.compute_type = "float16" if major >= 7 else "float32"
         else:
             self.compute_type = "int8"
 
         if self.model_size_or_path is None:
             return
-        logging.info(f"Using Device={device} with precision {self.compute_type}")
+        logging.info(f"Using Device={device} index={self.asr_device_index} with precision {self.compute_type}")
     
         try:
             if single_model:
@@ -191,6 +193,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.transcriber = WhisperModel(
             model_to_load,
             device=device,
+            device_index=self.asr_device_index if device == "cuda" else 0,
             compute_type=self.compute_type,
             local_files_only=False,
         )

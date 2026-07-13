@@ -312,6 +312,7 @@ class TranscriptionServer:
         self.segment_post_processor = None
         self.default_hotwords = None
         self.translation_device = "cpu"
+        self.asr_device_index = 0
         self.meeting_hotwords = MeetingHotwordStore()
         self.meeting_logs = MeetingLogStore()
         self.summary_templates = SummaryTemplateStore()
@@ -544,6 +545,22 @@ class TranscriptionServer:
             return "nllb_200_600m"
         return f"nllb:{path}"
 
+    @staticmethod
+    def _translation_model_sort_key(model):
+        value = str(model.get("value") or "").lower()
+        label = str(model.get("label") or "").lower()
+        path = str(model.get("nllb_model_path") or "").lower()
+        text = " ".join((value, label, path))
+        if value == "helsinki_zh_en":
+            return (0, label)
+        if "600" in text:
+            return (1, label)
+        if "1.3" in text or "1_3" in text or "1-3" in text:
+            return (2, label)
+        if "3.3" in text or "3_3" in text or "3-3" in text:
+            return (3, label)
+        return (9, label or value or path)
+
     def get_translation_models_payload(self):
         models = []
         zh_en_path = "model/opus-mt-zh-en"
@@ -597,6 +614,7 @@ class TranscriptionServer:
                 continue
             seen.add(key)
             deduped.append(item)
+        deduped.sort(key=self._translation_model_sort_key)
         return {"models": deduped}
 
     def has_active_clients(self):
@@ -688,9 +706,9 @@ class TranscriptionServer:
         return (0.02 * np.sin(2 * np.pi * 440.0 * timeline)).astype(np.float32)
 
     @staticmethod
-    def _warmup_compute_type(device):
+    def _warmup_compute_type(device, device_index=0):
         if device == "cuda":
-            major, _ = torch.cuda.get_device_capability(device)
+            major, _ = torch.cuda.get_device_capability(int(device_index or 0))
             return "float16" if major >= 7 else "float32"
         return "int8"
 
@@ -699,6 +717,7 @@ class TranscriptionServer:
 
         model_path = config.get("faster_whisper_custom_model_path") or self.resolve_asr_model_path("small")
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        asr_device_index = int(config.get("asr_device_index") or 0)
         with ServeClientFasterWhisper.SINGLE_MODEL_INIT_LOCK:
             if ServeClientFasterWhisper.SINGLE_MODEL is None:
                 warm_client = object.__new__(ServeClientFasterWhisper)
@@ -710,8 +729,14 @@ class TranscriptionServer:
                 ]
                 warm_client.model_size_or_path = model_path
                 warm_client.cache_path = self.cache_path
-                warm_client.compute_type = self._warmup_compute_type(device)
-                logging.info("[ADMIN_WARMUP] Loading shared faster-whisper model: %s", model_path)
+                warm_client.asr_device_index = asr_device_index
+                warm_client.compute_type = self._warmup_compute_type(device, asr_device_index)
+                logging.info(
+                    "[ADMIN_WARMUP] Loading shared faster-whisper model: %s on device=%s index=%s",
+                    model_path,
+                    device,
+                    asr_device_index if device == "cuda" else 0,
+                )
                 warm_client.create_model(device)
                 ServeClientFasterWhisper.SINGLE_MODEL = warm_client.transcriber
             transcriber = ServeClientFasterWhisper.SINGLE_MODEL
@@ -926,7 +951,7 @@ class TranscriptionServer:
     def initialize_client(
         self, websocket, options, faster_whisper_custom_model_path,
         whisper_tensorrt_path, trt_multilingual, trt_py_session=False,
-        funasr_model=None, funasr_device="auto",
+        funasr_model=None, funasr_device="auto", asr_device_index=0,
         funasr_mode="sensevoice", funasr_punc_model=None, funasr_vad_model=None,
         funasr_final_model="model/funasr/SenseVoiceSmall", funasr_final_device=None,
         funasr_final_refine=True,
@@ -1142,6 +1167,7 @@ class TranscriptionServer:
                     diarization=self._create_diarizer(options),
                     word_timestamps=options.get("word_timestamps", False),
                     mixed_interpretation=options.get("translation_mode") == "mixed_interpretation",
+                    asr_device_index=asr_device_index,
                 )
 
                 logging.info("Running faster_whisper backend.")
@@ -1254,7 +1280,7 @@ class TranscriptionServer:
 
     def handle_new_connection(self, websocket, faster_whisper_custom_model_path,
                               whisper_tensorrt_path, trt_multilingual, trt_py_session=False,
-                              funasr_model=None, funasr_device="auto",
+                              funasr_model=None, funasr_device="auto", asr_device_index=0,
                               funasr_mode="sensevoice", funasr_punc_model=None, funasr_vad_model=None,
                               funasr_final_model="model/funasr/SenseVoiceSmall", funasr_final_device=None,
                               funasr_final_refine=True):
@@ -1289,6 +1315,7 @@ class TranscriptionServer:
             self.initialize_client(websocket, options, faster_whisper_custom_model_path,
                                    whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
                                    funasr_model=funasr_model, funasr_device=funasr_device,
+                                   asr_device_index=asr_device_index,
                                    funasr_mode=funasr_mode, funasr_punc_model=funasr_punc_model,
                                    funasr_vad_model=funasr_vad_model,
                                    funasr_final_model=funasr_final_model,
@@ -1369,6 +1396,7 @@ class TranscriptionServer:
         if not self.handle_new_connection(websocket, faster_whisper_custom_model_path,
                                           whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
                                           funasr_model=funasr_model, funasr_device=funasr_device,
+                                          asr_device_index=self.asr_device_index,
                                           funasr_mode=funasr_mode, funasr_punc_model=funasr_punc_model,
                                           funasr_vad_model=funasr_vad_model,
                                           funasr_final_model=funasr_final_model,
@@ -1420,6 +1448,7 @@ class TranscriptionServer:
             raw_pcm_input=False,
             metrics_port: int = 0,
             hotwords_file=None,
+            asr_device_index=0,
             translation_device="cpu",
             meeting_hotwords_dir="config/hotwords.d",
             meeting_logs_dir="logs",
@@ -1455,6 +1484,7 @@ class TranscriptionServer:
         """
         self.cache_path = cache_path
         self.raw_pcm_input = raw_pcm_input
+        self.asr_device_index = int(asr_device_index or 0)
         self.translation_device = translation_device
         self.backend = BackendType(backend)
         self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
@@ -1530,6 +1560,7 @@ class TranscriptionServer:
         warmup_config = {
             "backend": BackendType(backend),
             "faster_whisper_custom_model_path": faster_whisper_custom_model_path,
+            "asr_device_index": self.asr_device_index,
             "funasr_model": funasr_model,
             "funasr_device": funasr_device,
             "funasr_mode": funasr_mode,
@@ -1569,6 +1600,7 @@ class TranscriptionServer:
                     "zh_en_model_path",
                     "en_zh_model_path",
                     "nllb_model_path",
+                    "asr_device_index",
                     "translation_device",
                 ):
                     if body.get(key):
@@ -1908,9 +1940,18 @@ class TranscriptionServer:
                         tmp_path = tmp.name
 
                     device = "cuda" if torch.cuda.is_available() else "cpu"
-                    compute_type = "float16" if device == "cuda" else "int8"
+                    if device == "cuda":
+                        major, _ = torch.cuda.get_device_capability(self.asr_device_index)
+                        compute_type = "float16" if major >= 7 else "float32"
+                    else:
+                        compute_type = "int8"
 
-                    transcriber = WhisperModel(model_name, device=device, compute_type=compute_type)
+                    transcriber = WhisperModel(
+                        model_name,
+                        device=device,
+                        device_index=self.asr_device_index if device == "cuda" else 0,
+                        compute_type=compute_type,
+                    )
                     segments, info = transcriber.transcribe(
                         tmp_path,
                         language=language,

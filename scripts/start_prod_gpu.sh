@@ -108,7 +108,8 @@ start_instance() {
     --backend faster_whisper \
     --max_clients "${MAX_CLIENTS}" \
     --max_connection_time "${MAX_CONNECTION_TIME}" \
-    --translation_device cpu \
+    --asr_device_index "${ASR_DEVICE_INDEX:-0}" \
+    --translation_device "${TRANSLATION_DEVICE:-cpu}" \
     --batch_max_size "${BATCH_MAX_SIZE}" \
     --batch_window_ms "${BATCH_WINDOW_MS}" \
     -fw "${MODEL_PATH}" \

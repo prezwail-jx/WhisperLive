@@ -64,10 +64,12 @@ class HelsinkiZhEnTranslator:
 
     @staticmethod
     def normalize_device_name(device):
-        device = (device or "cpu").lower()
-        if device not in ("cpu", "cuda", "auto"):
-            raise ValueError(f"Unsupported translation device: {device}")
-        return device
+        device = (device or "cpu").strip().lower()
+        if device in ("cpu", "cuda", "auto"):
+            return device
+        if re.fullmatch(r"cuda:\d+", device):
+            return device
+        raise ValueError(f"Unsupported translation device: {device}")
 
     @classmethod
     def resolve_device(cls, device):

@@ -137,11 +137,16 @@ if __name__ == "__main__":
         help='Path to a text file containing default hotwords, one word or phrase per line.'
     )
     parser.add_argument(
+        '--asr_device_index',
+        type=int,
+        default=0,
+        help='CUDA device index for faster-whisper ASR when CUDA is available. Defaults to 0.'
+    )
+    parser.add_argument(
         '--translation_device',
         type=str,
-        choices=['cpu', 'cuda', 'auto'],
         default='cpu',
-        help='Device for server-side translation models. Defaults to CPU so ASR can keep the GPU.'
+        help='Device for server-side translation models. Supports cpu, cuda, cuda:N, or auto. Defaults to CPU so ASR can keep the GPU.'
     )
     parser.add_argument(
         '--meeting_hotwords_dir',
@@ -203,6 +208,7 @@ if __name__ == "__main__":
         raw_pcm_input=args.raw_pcm_input,
         metrics_port=args.metrics_port,
         hotwords_file=args.hotwords_file,
+        asr_device_index=args.asr_device_index,
         translation_device=args.translation_device,
         meeting_hotwords_dir=args.meeting_hotwords_dir,
         meeting_logs_dir=args.meeting_logs_dir,

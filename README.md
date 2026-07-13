@@ -144,7 +144,45 @@ python run_server.py \
   --max_clients 12 \
   --max_connection_time 60000 \
   --batch_inference --batch_max_size 1 \
-  --translation_device cpu \
+  --asr_device_index 0 \
+  --translation_device cuda:0 \
+  --rest_port 8000 \
+  --meeting_hotwords_dir config/hotwords.d \
+  --meeting_logs_dir logs \
+  --cors-origins http://localhost:9093,http://127.0.0.1:9093 \
+  -fw model/asr/large-v3-turbo
+```
+
+单卡默认策略是 ASR 和翻译都使用 GPU 0。`scripts/start_whisper_service.sh` 等效于：
+
+```bash
+ASR_DEVICE_INDEX=0 TRANSLATION_DEVICE=cuda:0 ./scripts/start_whisper_service.sh
+```
+
+双卡固定分工时，容器需要同时看到 GPU 0 和 GPU 1，然后让 ASR 走 GPU 0、翻译走 GPU 1：
+
+```bash
+docker run --rm -it --gpus '"device=0,1"' \
+  --name whisperlive-gpu0 \
+  --network whisperlive-net \
+  -p 9090:9090 -p 9094:8000 \
+  -v "$PWD:/app" -w /app \
+  whisperlive-server:docx bash
+
+ASR_DEVICE_INDEX=0 TRANSLATION_DEVICE=cuda:1 ./scripts/start_whisper_service.sh
+```
+
+等效的双卡手动命令：
+
+```bash
+python run_server.py \
+  --port 9090 \
+  --backend faster_whisper \
+  --max_clients 12 \
+  --max_connection_time 60000 \
+  --batch_inference --batch_max_size 1 \
+  --asr_device_index 0 \
+  --translation_device cuda:1 \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
   --meeting_logs_dir logs \
@@ -211,11 +249,13 @@ FunASR 关键参数：
 
 NLLB 模型路径默认为 `model/NLLB-200-600M`，可在客户端 config 中通过 `nllb_model_path` 指定自定义路径。
 
-服务端通过 `--translation_device` 控制翻译模型设备（`cpu` / `cuda` / `auto`）：
+服务端通过 `--translation_device` 控制翻译模型设备（`cpu` / `cuda` / `cuda:N` / `auto`）：
 
 ```bash
---translation_device cpu    # 翻译走 CPU，GPU 留给 ASR（推荐）
---translation_device cuda   # 翻译走 GPU
+--translation_device cpu      # 翻译走 CPU，GPU 留给 ASR
+--translation_device cuda:0   # 翻译走 GPU 0，适合单卡同时跑 ASR + 翻译
+--translation_device cuda:1   # 翻译走 GPU 1，适合双卡 ASR/翻译固定分工
+--translation_device auto     # 有 CUDA 时自动走 GPU，否则走 CPU
 ```
 
 ### 4.2 翻译方向模式
