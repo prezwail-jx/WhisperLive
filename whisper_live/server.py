@@ -503,19 +503,32 @@ class TranscriptionServer:
         return status
 
     @staticmethod
-    def _model_dir_has_files(path, required=(), required_any=()):
+    def _model_dir_has_files(path, required=(), required_any=(), required_any_patterns=()):
         if not path or not os.path.isdir(path):
             return False
         for filename in required:
             if not os.path.isfile(os.path.join(path, filename)):
                 return False
-        if required_any and not any(os.path.isfile(os.path.join(path, filename)) for filename in required_any):
-            return False
+        if required_any or required_any_patterns:
+            filenames = [
+                filename for filename in os.listdir(path)
+                if os.path.isfile(os.path.join(path, filename))
+            ]
+            exact_match = any(filename in filenames for filename in required_any)
+            pattern_match = any(
+                re.fullmatch(pattern, filename)
+                for pattern in required_any_patterns
+                for filename in filenames
+            )
+            if not exact_match and not pattern_match:
+                return False
         return True
 
     @staticmethod
     def _translation_model_label(name):
         normalized = str(name or "").lower()
+        if "3.3" in normalized or "3_3" in normalized or "3-3" in normalized:
+            return "NLLB-200 3.3B 高质量"
         if "1.3" in normalized or "1_3" in normalized or "1-3" in normalized:
             return "NLLB-200 1.3B 高质量"
         if "600" in normalized:
@@ -562,12 +575,16 @@ class TranscriptionServer:
                     path,
                     required=("config.json", "tokenizer_config.json"),
                     required_any=("pytorch_model.bin", "model.safetensors"),
+                    required_any_patterns=(
+                        r"pytorch_model-\d{5}-of-\d{5}\.bin",
+                        r"model-\d{5}-of-\d{5}\.safetensors",
+                    ),
                 ):
                     continue
                 models.append({
                     "value": self._translation_model_value(name, path),
                     "label": self._translation_model_label(name),
-                    "provider": "nllb_200_600m",
+                    "provider": "nllb",
                     "nllb_model_path": path,
                     "available": True,
                 })
