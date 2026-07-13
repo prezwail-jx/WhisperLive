@@ -118,6 +118,8 @@ let summaryVersions = [];
 let summaryTemplateDraft = null;
 let customSummaryTemplates = [];
 let transcriptEditorData = null;
+let translationModels = [];
+const translationModelByValue = new Map();
 let lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0, translationGlossary: {} };
 let clientInstanceId = null;
 let displayMode = "split";
@@ -295,14 +297,79 @@ function serviceModeLabel(mode = serviceMode) {
   return "普通同传";
 }
 
+function fallbackTranslationModels() {
+  return [
+    { value: "helsinki_zh_en", label: "Helsinki 轻量实时", provider: "helsinki_zh_en", zh_en_model_path: "model/opus-mt-zh-en", en_zh_model_path: "model/opus-mt-en-zh", available: true },
+    { value: "nllb_200_600m", label: "NLLB-200 600M 高质量", provider: "nllb_200_600m", nllb_model_path: "model/NLLB-200-600M", available: true },
+  ];
+}
+
 function defaultTranslationProviderForMode(mode = serviceMode) {
   if (mode === "accurate") return "nllb_200_distilled_1_3b";
   if (mode === "standard") return "nllb_200_600m";
   return "helsinki_zh_en";
 }
 
+function translationModelMetadata(value = effectiveTranslationProvider()) {
+  return translationModelByValue.get(value) || fallbackTranslationModels().find((model) => model.value === value) || null;
+}
+
+function availableTranslationModelValue(value) {
+  if (translationModelByValue.has(value)) return value;
+  return "";
+}
+
+function preferredTranslationProviderForMode(mode = serviceMode) {
+  const preferred = defaultTranslationProviderForMode(mode);
+  return availableTranslationModelValue(preferred)
+    || availableTranslationModelValue("nllb_200_600m")
+    || availableTranslationModelValue("helsinki_zh_en")
+    || translationModels[0]?.value
+    || preferred;
+}
+
 function effectiveTranslationProvider() {
-  return elements.translationProvider?.value || defaultTranslationProviderForMode();
+  return elements.translationProvider?.value || preferredTranslationProviderForMode();
+}
+
+function renderTranslationModelOptions(models, preferredValue = "") {
+  translationModels = (models || []).filter((model) => model && model.available !== false && model.value);
+  translationModelByValue.clear();
+  translationModels.forEach((model) => translationModelByValue.set(model.value, model));
+  if (!elements.translationProvider) return;
+  const selected = preferredValue || elements.translationProvider.value || preferredTranslationProviderForMode();
+  elements.translationProvider.replaceChildren();
+  if (!translationModels.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "未发现可用翻译模型";
+    elements.translationProvider.appendChild(option);
+    elements.translationProvider.disabled = true;
+    return;
+  }
+  translationModels.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model.value;
+    option.textContent = model.label || model.value;
+    elements.translationProvider.appendChild(option);
+  });
+  elements.translationProvider.value = translationModelByValue.has(selected) ? selected : preferredTranslationProviderForMode();
+}
+
+async function loadTranslationModels(preferredValue = "") {
+  try {
+    const response = await fetch(translationModelsUrl(), { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    renderTranslationModelOptions(data.models || [], preferredValue);
+  } catch (error) {
+    console.warn("Failed to load translation models, using fallback options", error);
+    renderTranslationModelOptions(fallbackTranslationModels(), preferredValue);
+  }
+  if (elements.translationProvider && translationModels.length && !translationModelByValue.has(elements.translationProvider.value)) {
+    elements.translationProvider.value = preferredTranslationProviderForMode();
+  }
+  updateTranslationControls();
 }
 
 function setTranslationEnabledForMode() {
@@ -324,8 +391,8 @@ function setServiceMode(nextMode, persist = true) {
   serviceMode = normalizeServiceMode(nextMode);
   if (serviceMode === "conversation") directionMode = "auto";
   if (serviceMode === "transcription") directionMode = "specified";
-  if (elements.translationProvider) {
-    elements.translationProvider.value = defaultTranslationProviderForMode(serviceMode);
+  if (elements.translationProvider && translationModels.length) {
+    elements.translationProvider.value = preferredTranslationProviderForMode(serviceMode);
   }
   syncDirectionLanguages();
   setTranslationEnabledForMode();
@@ -446,6 +513,7 @@ function initializeDefaults() {
   if (savedServer) elements.server.value = savedServer;
   if (elements.translationEnabled) elements.translationEnabled.checked = true;
   window.localStorage.removeItem("whisperlive_translation_enabled");
+  renderTranslationModelOptions(fallbackTranslationModels(), savedTranslationProvider || defaultTranslationProviderForMode(serviceMode));
   if (savedTranslationProvider && elements.translationProvider) elements.translationProvider.value = savedTranslationProvider;
   if (elements.faceToFaceMode) {
     elements.faceToFaceMode.value = normalizeTranslationMode(savedFaceToFaceMode, savedFaceToFaceEnabled);
@@ -465,6 +533,7 @@ function initializeDefaults() {
   updateMeetingTitle();
   updateHotwordStatus("未上传热词");
   applyBackendLanguageDefault().catch(() => applyBackendLanguageFallback());
+  loadTranslationModels(preferredTranslationProviderForMode()).catch(() => {});
   loadSummarySessions().catch(() => {});
   loadSummaryTemplates().catch(() => {});
 }
@@ -599,7 +668,7 @@ function updateTranslationControls(forceConnectionLocked = false) {
     elements.faceToFaceMode.disabled = Boolean(forceConnectionLocked || serviceMode === "conversation" || serviceMode === "transcription");
   }
   if (elements.translationProvider) {
-    elements.translationProvider.disabled = Boolean(forceConnectionLocked || serviceMode === "transcription");
+    elements.translationProvider.disabled = Boolean(forceConnectionLocked || serviceMode === "transcription" || !translationModels.length);
   }
   if (elements.language) {
     elements.language.disabled = Boolean(forceConnectionLocked || serviceMode === "conversation");
@@ -638,6 +707,10 @@ function hotwordApiBaseUrl() {
 
 function adminClientsUrl() {
   return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/clients`;
+}
+
+function translationModelsUrl() {
+  return `${hotwordApiBaseUrl().replace(/\/$/, "")}/admin/translation-models`;
 }
 
 function normalizeBackend(value) {
@@ -682,11 +755,15 @@ function selectedTargetLanguage() {
 }
 
 function selectedTranslationProviderConfig() {
-  const provider = effectiveTranslationProvider();
-  if (provider === "nllb_200_distilled_1_3b") {
-    return { provider: "nllb_200_600m", nllbModelPath: "model/NLLB-200-distilled-1.3B" };
-  }
-  return { provider, nllbModelPath: "model/NLLB-200-600M" };
+  const value = effectiveTranslationProvider();
+  const model = translationModelMetadata(value);
+  if (!model) return { provider: value || "helsinki_zh_en", nllbModelPath: "model/NLLB-200-600M" };
+  return {
+    provider: model.provider || value,
+    nllbModelPath: model.nllb_model_path || "model/NLLB-200-600M",
+    zhEnModelPath: model.zh_en_model_path || "model/opus-mt-zh-en",
+    enZhModelPath: model.en_zh_model_path || "model/opus-mt-en-zh",
+  };
 }
 
 function syncSpecifiedTranslationTarget() {
@@ -2083,8 +2160,8 @@ function sendConfig(event) {
     translation_merge_max_chars: 180,
     translation_merge_max_delay: 1.2,
     translation_merge_gap_seconds: 1.0,
-    zh_en_model_path: "model/opus-mt-zh-en",
-    en_zh_model_path: "model/opus-mt-en-zh",
+    zh_en_model_path: translationProvider.zhEnModelPath || "model/opus-mt-zh-en",
+    en_zh_model_path: translationProvider.enZhModelPath || "model/opus-mt-en-zh",
     nllb_model_path: translationProvider.nllbModelPath,
   };
   currentConfig = payload;
@@ -2386,6 +2463,7 @@ elements.diarizationEnabled.addEventListener("change", () => {
 elements.server.addEventListener("change", () => {
   window.localStorage.setItem("whisperlive_server_url", elements.server.value.trim());
   applyBackendLanguageDefault().catch(() => applyBackendLanguageFallback());
+  loadTranslationModels(preferredTranslationProviderForMode()).catch(() => {});
 });
 
 async function continueInterruptedMeeting() {

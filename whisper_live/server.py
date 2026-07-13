@@ -502,6 +502,86 @@ class TranscriptionServer:
         )
         return status
 
+    @staticmethod
+    def _model_dir_has_files(path, required=(), required_any=()):
+        if not path or not os.path.isdir(path):
+            return False
+        for filename in required:
+            if not os.path.isfile(os.path.join(path, filename)):
+                return False
+        if required_any and not any(os.path.isfile(os.path.join(path, filename)) for filename in required_any):
+            return False
+        return True
+
+    @staticmethod
+    def _translation_model_label(name):
+        normalized = str(name or "").lower()
+        if "1.3" in normalized or "1_3" in normalized or "1-3" in normalized:
+            return "NLLB-200 1.3B 高质量"
+        if "600" in normalized:
+            return "NLLB-200 600M 高质量"
+        return str(name or "NLLB 翻译模型")
+
+    @staticmethod
+    def _translation_model_value(name, path):
+        normalized = str(name or "").lower()
+        if "1.3" in normalized or "1_3" in normalized or "1-3" in normalized:
+            return "nllb_200_distilled_1_3b"
+        if "600" in normalized:
+            return "nllb_200_600m"
+        return f"nllb:{path}"
+
+    def get_translation_models_payload(self):
+        models = []
+        zh_en_path = "model/opus-mt-zh-en"
+        en_zh_path = "model/opus-mt-en-zh"
+        helsinki_required = ("config.json", "source.spm", "target.spm", "vocab.json")
+        if (
+            self._model_dir_has_files(zh_en_path, required=helsinki_required)
+            and self._model_dir_has_files(en_zh_path, required=helsinki_required)
+        ):
+            models.append({
+                "value": "helsinki_zh_en",
+                "label": "Helsinki 轻量实时",
+                "provider": "helsinki_zh_en",
+                "zh_en_model_path": zh_en_path,
+                "en_zh_model_path": en_zh_path,
+                "available": True,
+            })
+
+        model_root = "model"
+        if os.path.isdir(model_root):
+            for name in sorted(os.listdir(model_root)):
+                path = os.path.join(model_root, name)
+                if not os.path.isdir(path):
+                    continue
+                normalized = name.lower()
+                if "nllb" not in normalized:
+                    continue
+                if not self._model_dir_has_files(
+                    path,
+                    required=("config.json", "tokenizer_config.json"),
+                    required_any=("pytorch_model.bin", "model.safetensors"),
+                ):
+                    continue
+                models.append({
+                    "value": self._translation_model_value(name, path),
+                    "label": self._translation_model_label(name),
+                    "provider": "nllb_200_600m",
+                    "nllb_model_path": path,
+                    "available": True,
+                })
+
+        seen = set()
+        deduped = []
+        for item in models:
+            key = item.get("value")
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return {"models": deduped}
+
     def has_active_clients(self):
         if not self.client_manager:
             return False
@@ -1454,6 +1534,10 @@ class TranscriptionServer:
         @app.get("/admin/warmup/status")
         async def admin_warmup_status():
             return self.get_admin_warmup_status_payload()
+
+        @app.get("/admin/translation-models")
+        async def admin_translation_models():
+            return self.get_translation_models_payload()
 
         @app.post("/admin/warmup")
         async def admin_warmup(request: Request, force: bool = False):
