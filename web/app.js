@@ -334,7 +334,7 @@ function fallbackTranslationModels() {
 }
 
 function defaultTranslationProviderForMode(mode = serviceMode) {
-  if (mode === "accurate") return "nllb_200_distilled_1_3b";
+  if (mode === "accurate") return "nllb_200_3_3b";
   if (mode === "standard") return "nllb_200_600m";
   return "helsinki_zh_en";
 }
@@ -350,6 +350,14 @@ function availableTranslationModelValue(value) {
 
 function preferredTranslationProviderForMode(mode = serviceMode) {
   const preferred = defaultTranslationProviderForMode(mode);
+  if (mode === "accurate") {
+    return availableTranslationModelValue(preferred)
+      || availableTranslationModelValue("nllb_200_distilled_1_3b")
+      || availableTranslationModelValue("nllb_200_600m")
+      || availableTranslationModelValue("helsinki_zh_en")
+      || translationModels[translationModels.length - 1]?.value
+      || preferred;
+  }
   return availableTranslationModelValue(preferred)
     || availableTranslationModelValue("nllb_200_600m")
     || availableTranslationModelValue("helsinki_zh_en")
@@ -563,7 +571,7 @@ function initializeDefaults() {
   updateMeetingTitle();
   updateHotwordStatus("未上传热词");
   applyBackendLanguageDefault().catch(() => applyBackendLanguageFallback());
-  loadTranslationModels(preferredTranslationProviderForMode()).catch(() => {});
+  loadTranslationModels(defaultTranslationProviderForMode(serviceMode)).catch(() => {});
   loadSummarySessions().catch(() => {});
   loadSummaryTemplates().catch(() => {});
 }
@@ -2498,7 +2506,7 @@ elements.diarizationEnabled.addEventListener("change", () => {
 elements.server.addEventListener("change", () => {
   window.localStorage.setItem("whisperlive_server_url", elements.server.value.trim());
   applyBackendLanguageDefault().catch(() => applyBackendLanguageFallback());
-  loadTranslationModels(preferredTranslationProviderForMode()).catch(() => {});
+  loadTranslationModels(defaultTranslationProviderForMode(serviceMode)).catch(() => {});
 });
 
 async function continueInterruptedMeeting() {

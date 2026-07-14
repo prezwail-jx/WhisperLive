@@ -539,6 +539,8 @@ class TranscriptionServer:
     @staticmethod
     def _translation_model_value(name, path):
         normalized = str(name or "").lower()
+        if "3.3" in normalized or "3_3" in normalized or "3-3" in normalized:
+            return "nllb_200_3_3b"
         if "1.3" in normalized or "1_3" in normalized or "1-3" in normalized:
             return "nllb_200_distilled_1_3b"
         if "600" in normalized:

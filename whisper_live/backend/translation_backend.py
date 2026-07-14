@@ -661,7 +661,7 @@ class ServeClientTranslation(ServeClientBase):
 
     @staticmethod
     def is_nllb_model(model_name):
-        return str(model_name or "") in {"nllb_200_600m", "nllb", "nllb_200_distilled_1_3b", "nllb_200_1_3b"}
+        return str(model_name or "") in {"nllb_200_600m", "nllb", "nllb_200_distilled_1_3b", "nllb_200_1_3b", "nllb_200_3_3b"}
 
     def load_translation_model(self):
         """Load the translation model and tokenizer."""

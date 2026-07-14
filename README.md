@@ -278,9 +278,10 @@ FunASR 关键参数：
 |------|------|------|
 | Helsinki zh-en | `helsinki_zh_en` | 轻量级，实时性好，中英单向 |
 | NLLB 600M | `nllb_200_600m` | 多语言，翻译质量更高 |
-| NLLB 1.3B | `nllb_200_distilled_1_3b` | 蒸馏版，质量最佳，显存需求更大 |
+| NLLB 1.3B | `nllb_200_distilled_1_3b` | 蒸馏版，质量更高，显存需求更大 |
+| NLLB 3.3B | `nllb_200_3_3b` | 高精同传优先选择，显存需求最高 |
 
-NLLB 模型路径默认为 `model/NLLB-200-600M`，可在客户端 config 中通过 `nllb_model_path` 指定自定义路径。
+NLLB 模型路径默认为 `model/NLLB-200-600M`，可在客户端 config 中通过 `nllb_model_path` 指定自定义路径。高精同传会优先选择可用的 3.3B 模型，缺失时回退到 1.3B / 600M。
 
 服务端通过 `--translation_device` 控制翻译模型设备（`cpu` / `cuda` / `cuda:N` / `auto`）：
 
