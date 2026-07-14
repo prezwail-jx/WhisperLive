@@ -15,8 +15,10 @@
   --amber: #f4b557;
   --drawer-width: 440px;
   --source-font-size: 20px;
+  --fullscreen-source-font-size: 30px;
   --source-font-color: #f4f7f5;
   --translation-font-size: 20px;
+  --fullscreen-translation-font-size: 30px;
   --translation-font-color: #36d98b;
 }
 
@@ -384,27 +386,18 @@ body.drawer-open { overflow: hidden; }
 }
 
 body.is-caption-fullscreen .app-shell {
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   padding: 0;
   background: #000;
 }
 body.is-caption-fullscreen .topbar,
+body.is-caption-fullscreen .mode-toolbar,
 body.is-caption-fullscreen .view-switcher,
 body.is-caption-fullscreen .summary-drawer,
 body.is-caption-fullscreen .settings-drawer,
 body.is-caption-fullscreen .drawer-backdrop {
   display: none !important;
 }
-body.is-caption-fullscreen .mode-toolbar {
-  grid-template-columns: 1fr;
-  min-height: 62px;
-  padding: 10px 18px;
-  border-bottom-color: #101713;
-  background: #020302;
-}
-body.is-caption-fullscreen .service-mode-switcher,
-body.is-caption-fullscreen .language-direction { display: none; }
-body.is-caption-fullscreen .fullscreen-button { justify-self: end; }
 body.is-caption-fullscreen .transcript-workspace {
   margin: 0;
   border: 0;
@@ -417,7 +410,9 @@ body.is-caption-fullscreen .text-stream {
   padding: clamp(22px, 4vw, 58px);
   line-height: 1.42;
 }
-body.is-caption-fullscreen .source-pane .text-stream { font-size: clamp(26px, 4.8vw, 64px); }
-body.is-caption-fullscreen .translation-pane .text-stream { font-size: clamp(28px, 5.2vw, 70px); }
-body.is-caption-fullscreen .text-stream.muted { font-size: 17px; }
+body.is-caption-fullscreen .source-pane .text-stream,
+body.is-caption-fullscreen .interleaved-source { font-size: var(--fullscreen-source-font-size); }
+body.is-caption-fullscreen .translation-pane .text-stream,
+body.is-caption-fullscreen .interleaved-translation { font-size: var(--fullscreen-translation-font-size); }
+body.is-caption-fullscreen .text-stream.muted { font-size: min(var(--fullscreen-source-font-size), 24px); }
 body.is-caption-fullscreen .segment { margin-bottom: .48em; }

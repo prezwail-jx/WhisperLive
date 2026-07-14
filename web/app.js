@@ -149,6 +149,7 @@ const DEFAULT_CAPTION_STYLE = {
   translationFontSize: 20,
   translationFontColor: "#36d98b",
 };
+const FULLSCREEN_CAPTION_SCALE = 1.5;
 const CAPTION_STYLE_STORAGE_KEYS = {
   sourceFontSize: "whisperlive_source_font_size",
   sourceFontColor: "whisperlive_source_font_color",
@@ -221,6 +222,10 @@ function clampCaptionFontSize(value, fallback) {
   return Math.min(40, Math.max(14, Math.round(number)));
 }
 
+function fullscreenCaptionFontSize(value) {
+  return Math.round(value * FULLSCREEN_CAPTION_SCALE);
+}
+
 function normalizeCaptionColor(value, fallback) {
   const color = String(value || "").trim();
   return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : fallback;
@@ -256,8 +261,10 @@ function applyCaptionStyle(style, persist = false) {
   };
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty("--source-font-size", `${normalized.sourceFontSize}px`);
+  rootStyle.setProperty("--fullscreen-source-font-size", `${fullscreenCaptionFontSize(normalized.sourceFontSize)}px`);
   rootStyle.setProperty("--source-font-color", normalized.sourceFontColor);
   rootStyle.setProperty("--translation-font-size", `${normalized.translationFontSize}px`);
+  rootStyle.setProperty("--fullscreen-translation-font-size", `${fullscreenCaptionFontSize(normalized.translationFontSize)}px`);
   rootStyle.setProperty("--translation-font-color", normalized.translationFontColor);
   elements.sourceFontSize.value = String(normalized.sourceFontSize);
   elements.sourceFontSizeValue.textContent = `${normalized.sourceFontSize}px`;
