@@ -633,6 +633,19 @@ class TestClientManagerAdminStatus(unittest.TestCase):
         self.assertEqual(result, "connected")
         self.assertEqual(len(self.cm.get_client_status_snapshot()["clients"]), 1)
 
+    def test_get_client_status_entry_returns_websocket_and_snapshot(self):
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+
+        websocket, status = self.cm.get_client_status_entry("uid-1")
+
+        self.assertIs(websocket, self.ws)
+        self.assertEqual(status["uid"], "uid-1")
+        status["uid"] = "mutated"
+        self.assertEqual(
+            self.cm.get_client_status_snapshot()["clients"][0]["uid"],
+            "uid-1",
+        )
+
     def test_delete_missing_client_status_returns_not_found(self):
         result = self.cm.delete_disconnected_client_status("missing")
 

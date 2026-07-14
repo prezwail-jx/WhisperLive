@@ -126,6 +126,7 @@ function render(data) {
   els.rows.innerHTML = clients.map((client) => {
     const [stateClass, stateText] = clientState(client);
     const hotwordFile = client.hotwords_file || "-";
+    const actionTitle = client.connected ? "断开并删除" : "删除记录";
     return `<tr>
       <td><span class="state ${stateClass}">${stateText}</span></td>
       <td class="name" title="${escapeHtml(client.client_name)}">${escapeHtml(client.client_name || "-")}</td>
@@ -140,7 +141,7 @@ function render(data) {
       <td>${fmtSeconds(client.last_activity_seconds_ago)}</td>
       <td class="text" title="${escapeHtml(client.last_source_text)}">${escapeHtml(client.last_source_text || "-")}</td>
       <td class="text" title="${escapeHtml(client.last_translation_text)}">${escapeHtml(client.last_translation_text || "-")}</td>
-      <td class="actions-cell">${client.connected ? "-" : `<button class="delete-client" type="button" data-uid="${escapeHtml(client.uid)}" title="删除断开记录" aria-label="删除断开记录 ${escapeHtml(client.uid)}">×</button>`}</td>
+      <td class="actions-cell"><button class="delete-client" type="button" data-uid="${escapeHtml(client.uid)}" data-connected="${client.connected ? "true" : "false"}" title="${actionTitle}" aria-label="${actionTitle} ${escapeHtml(client.uid)}">×</button></td>
     </tr>`;
   }).join("");
 }
@@ -293,6 +294,7 @@ function stopPolling() {
 els.rows.addEventListener("click", (event) => {
   const button = event.target.closest(".delete-client");
   if (!button) return;
+  if (button.dataset.connected === "true" && !window.confirm("将断开该客户端并删除中控记录，确认继续？")) return;
   deleteClient(button.dataset.uid);
 });
 

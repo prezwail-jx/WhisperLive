@@ -152,6 +152,13 @@ class ClientManager:
         statuses.sort(key=lambda item: item.get("connected_at", 0), reverse=True)
         return {"server_time": now, "clients": statuses}
 
+    def get_client_status_entry(self, uid):
+        with self.lock:
+            for websocket, status in self.client_status.items():
+                if status.get("uid") == uid:
+                    return websocket, dict(status)
+        return None, None
+
     def delete_disconnected_client_status(self, uid):
         with self.lock:
             for websocket, status in list(self.client_status.items()):
@@ -1611,14 +1618,27 @@ class TranscriptionServer:
 
         @app.delete("/admin/clients/{uid}")
         async def delete_admin_client(uid: str):
+            websocket, status = self.client_manager.get_client_status_entry(uid)
+            if not status:
+                return JSONResponse(
+                    status_code=404,
+                    content={"deleted": False, "uid": uid, "error": "client not found"},
+                )
+
+            if status.get("connected"):
+                client = self.client_manager.get_client(websocket)
+                if client:
+                    try:
+                        client.disconnect()
+                    except Exception as e:
+                        logging.warning("Admin failed to notify client disconnect: uid=%s error=%s", uid, e)
+                self.cleanup(websocket)
+                self.client_manager.delete_disconnected_client_status(uid)
+                return {"deleted": True, "uid": uid, "disconnected": True}
+
             result = self.client_manager.delete_disconnected_client_status(uid)
             if result == "deleted":
-                return {"deleted": True, "uid": uid}
-            if result == "connected":
-                return JSONResponse(
-                    status_code=409,
-                    content={"deleted": False, "uid": uid, "error": "client is still connected"},
-                )
+                return {"deleted": True, "uid": uid, "disconnected": False}
             return JSONResponse(
                 status_code=404,
                 content={"deleted": False, "uid": uid, "error": "client not found"},
