@@ -390,9 +390,134 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
             translated_text = self.restore_english_terms(translated_text, protected_terms)
         return translated_text, source_language, resolved_target_language
 
+    def translate_batch(self, items):
+        results = [None] * len(items)
+        grouped = {}
+
+        for index, item in enumerate(items):
+            text = str(item.get("text") or "")
+            source_language = item.get("source_language")
+            target_language = item.get("target_language")
+            direction = self.resolve_direction(source_language, target_language)
+            if direction is None:
+                results[index] = (
+                    text,
+                    self.normalize_language(source_language),
+                    self.normalize_language(target_language),
+                )
+                continue
+
+            resolved_source, resolved_target = direction
+            protected_terms = {}
+            text_to_translate = text
+            if resolved_source == "zh":
+                text_to_translate, protected_terms = self.protect_english_terms_with_natural_placeholders(text)
+                if protected_terms:
+                    logging.info(
+                        "[NLLB_MIXED_LANG_PROTECT] direction=zh-en natural_terms=%d text_len=%d",
+                        len(protected_terms),
+                        len(text),
+                    )
+
+            grouped.setdefault((resolved_source, resolved_target), []).append({
+                "index": index,
+                "text": text,
+                "text_to_translate": text_to_translate,
+                "protected_terms": protected_terms,
+            })
+
+        for (source_language, target_language), group in grouped.items():
+            source_code = self.LANGUAGE_CODES[source_language]
+            target_code = self.LANGUAGE_CODES[target_language]
+            self.tokenizer.src_lang = source_code
+            encoded_input = self.tokenizer(
+                [entry["text_to_translate"] for entry in group],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+            ).to(self.device)
+            forced_bos_token_id = self.language_token_id(target_code)
+            with torch.no_grad():
+                generated_tokens = self.model.generate(
+                    **encoded_input,
+                    forced_bos_token_id=forced_bos_token_id,
+                    max_new_tokens=self.MAX_NEW_TOKENS,
+                    num_beams=1,
+                )
+            outputs = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+            for entry, translated_text in zip(group, outputs):
+                protected_terms = entry["protected_terms"]
+                if protected_terms:
+                    translated_text = self.restore_natural_term_placeholders(translated_text, protected_terms)
+                    translated_text = self.restore_english_terms(translated_text, protected_terms)
+                results[entry["index"]] = (translated_text, source_language, target_language)
+
+        return results
+
     def cleanup(self):
         self.model = None
         self.tokenizer = None
+
+
+class NLLBTranslationBatchWorker:
+    def __init__(self, translator, max_batch_size=8, batch_window_ms=40):
+        self.translator = translator
+        self.max_batch_size = max(1, int(max_batch_size or 8))
+        self.batch_window_seconds = max(0.0, float(batch_window_ms or 0) / 1000.0)
+        self.requests = queue.Queue()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def submit(self, text, source_language, target_language, client_uid, timeout_seconds=10.0):
+        request = {
+            "text": text,
+            "source_language": source_language,
+            "target_language": target_language,
+            "client_uid": client_uid,
+            "event": threading.Event(),
+            "result": None,
+            "error": None,
+        }
+        self.requests.put(request)
+        if not request["event"].wait(max(0.1, float(timeout_seconds or 10.0))):
+            raise TimeoutError("NLLB batch translation timed out")
+        if request["error"] is not None:
+            raise request["error"]
+        return request["result"]
+
+    def run(self):
+        while True:
+            first = self.requests.get()
+            batch = [first]
+            deadline = time.monotonic() + self.batch_window_seconds
+            while len(batch) < self.max_batch_size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    batch.append(self.requests.get(timeout=remaining))
+                except queue.Empty:
+                    break
+
+            started_at = time.monotonic()
+            try:
+                results = self.translator.translate_batch(batch)
+                elapsed_ms = (time.monotonic() - started_at) * 1000.0
+                logging.info(
+                    "[NLLB_BATCH] model=%s device=%s batch_size=%d generate_ms=%.1f",
+                    getattr(self.translator, "model_path", ""),
+                    getattr(self.translator, "device", ""),
+                    len(batch),
+                    elapsed_ms,
+                )
+                for request, result in zip(batch, results):
+                    request["result"] = result
+                    request["event"].set()
+            except Exception as error:
+                logging.exception("[NLLB_BATCH_FAILED] batch_size=%d", len(batch))
+                for request in batch:
+                    request["error"] = error
+                    request["event"].set()
 
 
 class ServeClientTranslation(ServeClientBase):
@@ -403,6 +528,7 @@ class ServeClientTranslation(ServeClientBase):
     """
     _TRANSLATOR_CACHE = {}
     _TRANSLATOR_INFERENCE_LOCKS = {}
+    _TRANSLATOR_BATCH_WORKERS = {}
     _TRANSLATOR_CACHE_LOCK = threading.Lock()
     _STANDALONE_ENGLISH_INTERJECTIONS = {
         "oh": "哦",
@@ -431,11 +557,22 @@ class ServeClientTranslation(ServeClientBase):
     _OUTPUT_GUARD_MAX_REPEATED_BIGRAM_COUNT = 8
     _BACKLOG_DROP_THRESHOLD = 5
     _BACKLOG_KEEP_LATEST = 3
-    _REALTIME_MAX_EN_CHARS = 100
-    _REALTIME_MAX_ZH_CHARS = 80
+    _REALTIME_MAX_EN_CHARS = 180
+    _REALTIME_MAX_ZH_CHARS = 120
     _RESIDUAL_CJK_MIN_CHARS = 8
     _RESIDUAL_CJK_MAX_RATIO = 0.25
     _TRANSLATION_ERROR_SUFFIX = "（翻译出错）"
+    _INCOMPLETE_EN_ENDING_WORDS = {
+        "a", "an", "and", "are", "as", "at", "because", "but", "by", "for",
+        "from", "had", "has", "have", "if", "in", "into", "is", "it", "of",
+        "on", "or", "our", "that", "the", "their", "then", "these", "this",
+        "those", "to", "was", "were", "when", "where", "which", "while",
+        "with", "without", "would",
+    }
+    _INCOMPLETE_EN_ENDING_PHRASES = {
+        "i had", "i have", "it was", "there are", "there is", "we had",
+        "we have", "we were", "you can", "you know",
+    }
 
     def __init__(
         self,
@@ -450,16 +587,20 @@ class ServeClientTranslation(ServeClientBase):
         nllb_model_path="model/NLLB-200-600M",
         translation_device="cpu",
         translation_min_chars=12,
-        translation_max_chars=130,
-        translation_max_wait_seconds=2.0,
+        translation_max_chars=220,
+        translation_max_wait_seconds=3.0,
         translation_sentence_endings="。！？.!?",
         translation_glossary=None,
         translation_terms=None,
         translation_mode="standard",
         translation_merge_enabled=True,
-        translation_merge_max_chars=180,
-        translation_merge_max_delay=1.2,
+        translation_merge_max_chars=240,
+        translation_merge_max_delay=1.8,
         translation_merge_gap_seconds=1.0,
+        nllb_batch_translation=False,
+        nllb_batch_max_size=8,
+        nllb_batch_window_ms=40,
+        nllb_batch_timeout_seconds=10.0,
     ):
         """
         Initialize the translation client.
@@ -488,9 +629,13 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_terms = list(translation_terms or [])
         self.translation_mode = str(translation_mode or "standard")
         self.translation_merge_enabled = bool(translation_merge_enabled)
-        self.translation_merge_max_chars = max(1, int(translation_merge_max_chars or 180))
-        self.translation_merge_max_delay = max(0.1, float(translation_merge_max_delay or 1.2))
+        self.translation_merge_max_chars = max(1, int(translation_merge_max_chars or 240))
+        self.translation_merge_max_delay = max(0.1, float(translation_merge_max_delay or 1.8))
         self.translation_merge_gap_seconds = max(0.0, float(translation_merge_gap_seconds or 1.0))
+        self.nllb_batch_translation = bool(nllb_batch_translation)
+        self.nllb_batch_max_size = max(1, int(nllb_batch_max_size or 8))
+        self.nllb_batch_window_ms = max(0, int(nllb_batch_window_ms or 0))
+        self.nllb_batch_timeout_seconds = max(0.1, float(nllb_batch_timeout_seconds or 10.0))
         self.translation_buffer = []
         self.translation_buffer_started_at = None
         self.translation_merge_buffer = []
@@ -500,6 +645,7 @@ class ServeClientTranslation(ServeClientBase):
         self.pending_translation_warning = None
         self.translator = None
         self.translator_lock = None
+        self.batch_worker = None
         self.model_loaded = False
         self.load_translation_model()
 
@@ -542,6 +688,15 @@ class ServeClientTranslation(ServeClientBase):
 
                 self.translator = self._TRANSLATOR_CACHE[cache_key]
                 self.translator_lock = self._TRANSLATOR_INFERENCE_LOCKS[cache_key]
+                if self.should_use_nllb_batch_translation():
+                    worker_key = (cache_key, self.nllb_batch_max_size, self.nllb_batch_window_ms)
+                    if worker_key not in self._TRANSLATOR_BATCH_WORKERS:
+                        self._TRANSLATOR_BATCH_WORKERS[worker_key] = NLLBTranslationBatchWorker(
+                            self.translator,
+                            max_batch_size=self.nllb_batch_max_size,
+                            batch_window_ms=self.nllb_batch_window_ms,
+                        )
+                    self.batch_worker = self._TRANSLATOR_BATCH_WORKERS[worker_key]
             self.model_loaded = True
             logging.info(
                 "Translation model loaded successfully. Provider: %s Target language: %s",
@@ -553,6 +708,102 @@ class ServeClientTranslation(ServeClientBase):
             self.translator = None
             self.translator_lock = None
             self.model_loaded = False
+
+    def should_use_nllb_batch_translation(self):
+        return self.nllb_batch_translation and self.is_nllb_model(self.model_name)
+
+    def translate_text_with_batch(self, text: str, source_language: Optional[str]):
+        if not self.batch_worker:
+            return None
+        started_at = time.monotonic()
+        try:
+            translated_text, resolved_source_language, target_language = self.batch_worker.submit(
+                text,
+                source_language,
+                self.target_language,
+                self.client_uid,
+                timeout_seconds=self.nllb_batch_timeout_seconds,
+            )
+            generate_ms = (time.monotonic() - started_at) * 1000.0
+            if self.should_retry_nllb_residual_cjk(
+                translated_text,
+                resolved_source_language,
+                target_language,
+            ):
+                logging.warning(
+                    "[TRANSLATION_RESIDUAL_CJK_RETRY] uid=%s model=%s source_language=%s "
+                    "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
+                    self.client_uid,
+                    self.model_name,
+                    resolved_source_language,
+                    target_language,
+                    len(str(text or "")),
+                    len(str(translated_text or "")),
+                    str(text or "").strip()[:120],
+                    str(translated_text or "").strip()[:160],
+                )
+                retry_started_at = time.monotonic()
+                retry_text, retry_source_language, retry_target_language = self.batch_worker.submit(
+                    text,
+                    source_language,
+                    self.target_language,
+                    self.client_uid,
+                    timeout_seconds=self.nllb_batch_timeout_seconds,
+                )
+                generate_ms += (time.monotonic() - retry_started_at) * 1000.0
+                translated_text = retry_text
+                resolved_source_language = retry_source_language
+                target_language = retry_target_language
+                if self.should_retry_nllb_residual_cjk(
+                    translated_text,
+                    resolved_source_language,
+                    target_language,
+                ):
+                    logging.warning(
+                        "[TRANSLATION_RESIDUAL_CJK_FAILED] uid=%s model=%s source_language=%s "
+                        "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
+                        self.client_uid,
+                        self.model_name,
+                        resolved_source_language,
+                        target_language,
+                        len(str(text or "")),
+                        len(str(translated_text or "")),
+                        str(text or "").strip()[:120],
+                        str(translated_text or "").strip()[:160],
+                    )
+                    self.pending_translation_warning = "residual_cjk"
+                    translated_text = f"{translated_text}{self._TRANSLATION_ERROR_SUFFIX}"
+            translated_text = self.guard_translation_output(
+                text,
+                translated_text,
+                resolved_source_language,
+                target_language,
+            )
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            logging.info(
+                "[TRANSLATION_LATENCY] uid=%s model=%s device=%s source_language=%s "
+                "source_len=%d lock_wait_ms=%.1f generate_ms=%.1f total_ms=%.1f "
+                "queue_size=%s batch=true source_preview=%r",
+                self.client_uid,
+                self.model_name,
+                self.translation_device,
+                source_language,
+                len(str(text or "")),
+                0.0,
+                generate_ms,
+                elapsed_ms,
+                self.translation_queue_size(),
+                str(text or "").strip()[:80],
+            )
+            return translated_text, resolved_source_language, target_language
+        except Exception as error:
+            logging.warning(
+                "[NLLB_BATCH_FALLBACK] uid=%s model=%s error=%s",
+                self.client_uid,
+                self.model_name,
+                error,
+            )
+            return None
 
     def translate_text(self, text: str, source_language: Optional[str]):
         """
@@ -570,6 +821,11 @@ class ServeClientTranslation(ServeClientBase):
 
         if self.exit:
             return text, source_language, self.target_language
+
+        if self.should_use_nllb_batch_translation():
+            batch_result = self.translate_text_with_batch(text, source_language)
+            if batch_result is not None:
+                return batch_result
 
         started_at = time.monotonic()
         lock_wait_ms = 0.0
@@ -984,6 +1240,62 @@ class ServeClientTranslation(ServeClientBase):
             return min(self.translation_max_chars, self._REALTIME_MAX_EN_CHARS)
         return self.translation_max_chars
 
+    @classmethod
+    def _split_english_sentence_chunks(cls, text):
+        parts = []
+        cursor = 0
+        for match in re.finditer(r"[^.!?;]+[.!?;]+(?:\s+|$)", text):
+            prefix = text[cursor:match.start()].strip()
+            if prefix:
+                parts.append(prefix)
+            parts.append(match.group(0).strip())
+            cursor = match.end()
+        suffix = text[cursor:].strip()
+        if suffix:
+            parts.append(suffix)
+        return parts or [text]
+
+    @classmethod
+    def _pack_text_parts(cls, parts, max_chars, language):
+        packed = []
+        current = ""
+        for part in parts:
+            part = str(part or "").strip()
+            if not part:
+                continue
+            candidate = cls._join_merge_text((current, part), language) if current else part
+            if current and len(candidate) > max_chars:
+                packed.append(current)
+                current = part
+            else:
+                current = candidate
+        if current:
+            packed.append(current)
+        return packed
+
+    @classmethod
+    def _split_long_english_text(cls, text, max_chars):
+        sentence_parts = cls._pack_text_parts(cls._split_english_sentence_chunks(text), max_chars, "en")
+        parts = []
+        for sentence_part in sentence_parts:
+            if len(sentence_part) <= max_chars:
+                parts.append(sentence_part)
+                continue
+            current = []
+            current_len = 0
+            for word in sentence_part.split():
+                extra = len(word) + (1 if current else 0)
+                if current and current_len + extra > max_chars:
+                    parts.append(" ".join(current))
+                    current = [word]
+                    current_len = len(word)
+                else:
+                    current.append(word)
+                    current_len += extra
+            if current:
+                parts.append(" ".join(current))
+        return parts
+
     def split_realtime_segment(self, segment):
         text = str(segment.get("text", "") or "").strip()
         if not text:
@@ -995,21 +1307,10 @@ class ServeClientTranslation(ServeClientBase):
 
         if source_language == "zh":
             parts = [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+        elif source_language == "en":
+            parts = self._split_long_english_text(text, max_chars)
         else:
-            parts = []
-            current = []
-            current_len = 0
-            for word in text.split():
-                extra = len(word) + (1 if current else 0)
-                if current and current_len + extra > max_chars:
-                    parts.append(" ".join(current))
-                    current = [word]
-                    current_len = len(word)
-                else:
-                    current.append(word)
-                    current_len += extra
-            if current:
-                parts.append(" ".join(current))
+            parts = [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
         if len(parts) <= 1:
             return [segment]
 
@@ -1037,15 +1338,33 @@ class ServeClientTranslation(ServeClientBase):
         )
         return split_segments
 
-    def should_flush_translation_buffer(self, force=False):
-        if not self.translation_buffer:
+    @classmethod
+    def english_text_ends_incomplete(cls, text):
+        text = str(text or "").strip()
+        if not text:
             return False
-        if force:
+        if text.endswith((",", ":", "-", "--", "—")):
             return True
+        normalized = re.sub(r"[^A-Za-z0-9\s]+$", "", text).strip().lower()
+        if not normalized:
+            return False
+        words = [match.group(0).lower() for match in cls._word_spans(normalized)]
+        if not words:
+            return False
+        if words[-1] in cls._INCOMPLETE_EN_ENDING_WORDS:
+            return True
+        tail = " ".join(words[-2:])
+        return tail in cls._INCOMPLETE_EN_ENDING_PHRASES
+
+    def translation_buffer_flush_reason(self, force=False):
+        if not self.translation_buffer:
+            return None
+        if force:
+            return "force"
 
         text = self.join_translation_buffer_text().strip()
         if not text:
-            return False
+            return None
         elapsed = 0.0
         if self.translation_buffer_started_at is not None:
             elapsed = time.monotonic() - self.translation_buffer_started_at
@@ -1056,17 +1375,27 @@ class ServeClientTranslation(ServeClientBase):
             and self._count_cjk(text) < self._SHORT_ZH_BUFFER_CJK_CHARS
             and elapsed < self._SHORT_ZH_BUFFER_WAIT_SECONDS
         ):
-            return False
+            return None
         if text.endswith(tuple(self.translation_sentence_endings)):
-            return True
+            return "sentence_end"
+        if (
+            source_language == "en"
+            and self.english_text_ends_incomplete(text)
+            and len(text) < self.realtime_max_source_chars(source_language)
+            and elapsed < self.translation_max_wait_seconds
+        ):
+            return None
         if len(text) >= self.realtime_max_source_chars(source_language):
-            return True
+            return "max_chars"
         if (
             self.translation_buffer_started_at is not None
             and elapsed >= self.translation_max_wait_seconds
         ):
-            return True
-        return False
+            return "timeout"
+        return None
+
+    def should_flush_translation_buffer(self, force=False):
+        return self.translation_buffer_flush_reason(force=force) is not None
 
     @staticmethod
     def _word_spans(text):
@@ -1102,7 +1431,7 @@ class ServeClientTranslation(ServeClientBase):
         incoming_language = self.get_segment_source_language(segment)
         current_language = self.get_buffer_source_language()
         if self.translation_buffer and incoming_language and current_language and incoming_language != current_language:
-            self.flush_translation_buffer(force=True)
+            self.flush_translation_buffer(force=True, reason="language_switch")
 
         segment = segment.copy()
         if incoming_language:
@@ -1117,8 +1446,9 @@ class ServeClientTranslation(ServeClientBase):
             self.translation_buffer_started_at = time.monotonic()
         self.translation_buffer.append(segment)
 
-    def flush_translation_buffer(self, force=False):
-        if not self.should_flush_translation_buffer(force=force):
+    def flush_translation_buffer(self, force=False, reason=None):
+        flush_reason = reason or self.translation_buffer_flush_reason(force=force)
+        if flush_reason is None:
             return
 
         buffered_segments = self.translation_buffer
@@ -1149,7 +1479,7 @@ class ServeClientTranslation(ServeClientBase):
         self.last_translated_source_text = original_text
         logging.info(
             "[TRANSLATION_FLUSH] uid=%s model=%s source_language=%s target_language=%s "
-            "source_len=%d translated_len=%d elapsed_ms=%.1f queue_size=%s start=%s end=%s",
+            "source_len=%d translated_len=%d elapsed_ms=%.1f queue_size=%s flush_reason=%s start=%s end=%s",
             self.client_uid,
             self.model_name,
             source_language,
@@ -1158,6 +1488,7 @@ class ServeClientTranslation(ServeClientBase):
             len(str(translated_text or "")),
             (time.monotonic() - flush_started_at) * 1000.0,
             self.translation_queue_size(),
+            flush_reason,
             buffered_segments[0].get("start"),
             buffered_segments[-1].get("end"),
         )

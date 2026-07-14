@@ -145,7 +145,7 @@ python run_server.py \
   --max_connection_time 60000 \
   --batch_inference --batch_max_size 1 \
   --asr_device_index 0 \
-  --translation_device cuda:0 \
+  --translation_device cpu \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
   --meeting_logs_dir logs \
@@ -153,40 +153,73 @@ python run_server.py \
   -fw model/asr/large-v3-turbo
 ```
 
-单卡默认策略是 ASR 和翻译都使用 GPU 0。`scripts/start_whisper_service.sh` 等效于：
+本地 3060 单卡默认策略是 ASR 使用 GPU 0，翻译走 CPU，避免翻译模型挤占 ASR 显存。`scripts/start_whisper_service.sh` 等效于：
 
 ```bash
-ASR_DEVICE_INDEX=0 TRANSLATION_DEVICE=cuda:0 ./scripts/start_whisper_service.sh
+ASR_DEVICE_INDEX=0 TRANSLATION_DEVICE=cpu ./scripts/start_whisper_service.sh
 ```
 
-双卡固定分工时，容器需要同时看到 GPU 0 和 GPU 1，然后让 ASR 走 GPU 0、翻译走 GPU 1：
+部署机 5090*2 使用两个后端容器：普通同传/对话翻译/语音识别走 `/ws-standard` 分流到 GPU0 + GPU1，翻译走 CPU；高精同传走 `/ws-accurate` 固定到 GPU0 ASR，并由前端传 `translation_device=cuda:1` 使用 GPU1 翻译。
+
+GPU0 容器必须同时看到两张卡：
 
 ```bash
-docker run --rm -it --gpus '"device=0,1"' \
+docker run -it -d --gpus '"device=0,1"' \
   --name whisperlive-gpu0 \
   --network whisperlive-net \
-  -p 9090:9090 -p 9094:8000 \
   -v "$PWD:/app" -w /app \
-  whisperlive-server:docx bash
-
-ASR_DEVICE_INDEX=0 TRANSLATION_DEVICE=cuda:1 ./scripts/start_whisper_service.sh
+  whisperlive-server:32b bash
 ```
 
-等效的双卡手动命令：
+GPU1 容器只需要看到物理 GPU1：
+
+```bash
+docker run -it -d --gpus '"device=1"' \
+  --name whisperlive-gpu1 \
+  --network whisperlive-net \
+  -v "$PWD:/app" -w /app \
+  whisperlive-server:32b bash
+```
+
+GPU0 容器内服务命令默认仍使用 CPU 翻译，高精模式由前端覆盖为 `cuda:1`：
 
 ```bash
 python run_server.py \
   --port 9090 \
   --backend faster_whisper \
   --max_clients 12 \
-  --max_connection_time 60000 \
-  --batch_inference --batch_max_size 1 \
   --asr_device_index 0 \
-  --translation_device cuda:1 \
+  --translation_device cpu \
+  --batch_inference \
+  --batch_max_size 12 \
+  --batch_window_ms 20 \
+  --max_connection_time 600 \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
-  --meeting_logs_dir logs \
-  --cors-origins http://localhost:9093,http://127.0.0.1:9093 \
+  --meeting_logs_dir logs/gpu0 \
+  --summary_model qwen3-32b-awq \
+  --cors-origins https://app.cmtbs.com:57890,https://app.cmtbs.com \
+  -fw model/asr/large-v3-turbo
+```
+
+GPU1 容器内服务命令：
+
+```bash
+python run_server.py \
+  --port 9090 \
+  --backend faster_whisper \
+  --max_clients 12 \
+  --asr_device_index 0 \
+  --translation_device cpu \
+  --batch_inference \
+  --batch_max_size 12 \
+  --batch_window_ms 20 \
+  --max_connection_time 600 \
+  --rest_port 8000 \
+  --meeting_hotwords_dir config/hotwords.d \
+  --meeting_logs_dir logs/gpu1 \
+  --summary_model qwen3-32b-awq \
+  --cors-origins https://app.cmtbs.com:57890,https://app.cmtbs.com \
   -fw model/asr/large-v3-turbo
 ```
 

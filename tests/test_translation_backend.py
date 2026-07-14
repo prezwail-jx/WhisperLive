@@ -653,6 +653,58 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         self.assertEqual(payload["translated_segments"][0]["text"], "translated:And")
         self.assertEqual(client.translation_buffer, [])
 
+    def test_incomplete_english_ending_waits_for_more_context(self):
+        client = self.make_client(translation_max_wait_seconds=3.0)
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "I could not go back because",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        client.websocket.send.assert_not_called()
+        self.assertEqual(len(client.translation_buffer), 1)
+
+    def test_complete_english_sentence_flushes_immediately(self):
+        client = self.make_client(translation_max_wait_seconds=3.0)
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "I needed my passport.",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "translated:I needed my passport.")
+
+    def test_language_switch_flushes_previous_context(self):
+        client = self.make_client()
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "I needed my passport because",
+            "completed": True,
+            "language": "en",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "1.000",
+            "end": "2.000",
+            "text": "我明天要出发",
+            "completed": True,
+            "language": "zh",
+        })
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(
+            payload["translated_segments"][0]["text"],
+            "translated:I needed my passport because",
+        )
+        self.assertEqual(client.join_translation_buffer_text(), "我明天要出发")
+
     def test_standalone_english_interjection_uses_stable_translation(self):
         client = self.make_client()
         client.add_segment_to_translation_buffer({
@@ -907,8 +959,8 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
             translation_merge_max_delay=60,
         )
         for start, end, text, utterance_id in (
-            ("0.000", "0.500", "你好", "client:1:0.000"),
-            ("0.500", "1.000", "世界", "client:2:0.500"),
+            ("0.000", "0.500", "今天", "client:1:0.000"),
+            ("0.500", "1.000", "开会", "client:2:0.500"),
         ):
             client.add_segment_to_translation_buffer({
                 "start": start,
@@ -927,8 +979,8 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         segment = payload["translated_segments"][0]
         self.assertEqual(segment["start"], "0.000")
         self.assertEqual(segment["end"], "1.000")
-        self.assertEqual(segment["text"], "translated:你好translated:世界")
-        self.assertEqual(segment["source_text"], "你好世界")
+        self.assertEqual(segment["text"], "translated:今天translated:开会")
+        self.assertEqual(segment["source_text"], "今天开会")
         self.assertEqual(segment["source_utterance_ids"], ["client:1:0.000", "client:2:0.500"])
         self.assertNotIn("utterance_id", segment)
 
@@ -1134,7 +1186,7 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         segment = {
             "start": 0.0,
             "end": 10.0,
-            "text": " ".join(["word"] * 30),
+            "text": " ".join(["word"] * 60),
             "completed": True,
             "language": "en",
         }
@@ -1145,6 +1197,22 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         self.assertTrue(all(len(item["text"]) <= client._REALTIME_MAX_EN_CHARS for item in split_segments))
         self.assertEqual(split_segments[0]["start"], 0.0)
         self.assertEqual(split_segments[-1]["end"], 10.0)
+
+    def test_long_english_segment_prefers_sentence_split(self):
+        client = self.make_client(translation_max_chars=80)
+        segment = {
+            "start": 0.0,
+            "end": 10.0,
+            "text": "This is the first complete sentence. " + " ".join(["word"] * 30),
+            "completed": True,
+            "language": "en",
+        }
+
+        split_segments = client.split_realtime_segment(segment)
+
+        self.assertGreater(len(split_segments), 1)
+        self.assertEqual(split_segments[0]["text"], "This is the first complete sentence.")
+        self.assertTrue(all(len(item["text"]) <= 80 for item in split_segments))
 
     def test_translation_backlog_drops_old_segments_and_keeps_latest(self):
         client = self.make_client()
