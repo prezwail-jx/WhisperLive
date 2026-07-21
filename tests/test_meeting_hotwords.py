@@ -5,7 +5,13 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-from whisper_live.meeting import MeetingHotwordStore, count_hotwords, hotword_text_to_prompt, parse_hotword_config
+from whisper_live.meeting import (
+    MeetingHotwordStore,
+    count_hotwords,
+    hotword_text_to_prompt,
+    normalize_asr_hotwords,
+    parse_hotword_config,
+)
 
 
 class TestMeetingHotwordStore(unittest.TestCase):
@@ -54,3 +60,40 @@ class TestMeetingHotwordStore(unittest.TestCase):
         self.assertEqual(parsed["translation_glossary"], {"OpenAI": "新译名"})
         self.assertEqual(parsed["translation_count"], 1)
 
+    def test_normalize_asr_hotwords_dedupes_and_preserves_first_spelling(self):
+        canonical = normalize_asr_hotwords(terms=[" OpenAI ", "openai", "Whisper   small", "ＡＣＥ"])
+
+        self.assertEqual(canonical["terms"], ["OpenAI", "Whisper small", "ACE"])
+        self.assertEqual(canonical["prompt"], "OpenAI Whisper small ACE")
+        self.assertEqual(canonical["original_count"], 4)
+        self.assertEqual(canonical["accepted_count"], 3)
+        self.assertEqual(canonical["rejected_count"], 1)
+        self.assertEqual(canonical["validation_reasons"], ["duplicate"])
+
+    def test_normalize_asr_hotwords_limits_terms_and_prompt_without_partial_terms(self):
+        canonical = normalize_asr_hotwords(
+            terms=["Alpha", "Beta", "Gamma"],
+            max_terms=2,
+            max_prompt_chars=100,
+        )
+
+        self.assertEqual(canonical["terms"], ["Alpha", "Beta"])
+        self.assertTrue(canonical["truncated"])
+        self.assertEqual(canonical["truncation_reasons"], ["term_count"])
+
+        canonical = normalize_asr_hotwords(
+            terms=["Alpha", "Beta Gamma", "Delta"],
+            max_terms=10,
+            max_prompt_chars=len("Alpha Beta Gamma"),
+        )
+
+        self.assertEqual(canonical["terms"], ["Alpha", "Beta Gamma"])
+        self.assertTrue(canonical["truncated"])
+        self.assertEqual(canonical["truncation_reasons"], ["prompt_chars"])
+
+    def test_normalize_asr_hotwords_rejects_oversized_terms(self):
+        canonical = normalize_asr_hotwords(terms=["Valid", "x" * 65, "Next"])
+
+        self.assertEqual(canonical["terms"], ["Valid", "Next"])
+        self.assertEqual(canonical["rejected_count"], 1)
+        self.assertEqual(canonical["validation_reasons"], ["term_length"])

@@ -37,6 +37,7 @@ from whisper_live.meeting import (
     SummaryTemplateStore,
     count_hotwords,
     hotword_text_to_prompt,
+    normalize_asr_hotwords,
     normalize_hotword_text,
     parse_hotword_config,
 )
@@ -81,7 +82,14 @@ class ClientManager:
             "client_name": options.get("client_name") or options.get("meeting_name") or f"Client-{str(uid)[:8]}",
             "meeting_name": options.get("meeting_name") or "",
             "hotwords_file": options.get("hotwords_file") or "",
+            "hotwords_source": options.get("hotwords_source") or "none",
             "hotwords_count": int(options.get("hotwords_count") or count_hotwords(options.get("hotwords"))),
+            "hotwords_original_count": int(options.get("hotwords_original_count") or 0),
+            "hotwords_rejected_count": int(options.get("hotwords_rejected_count") or 0),
+            "hotwords_truncated": bool(options.get("hotwords_truncated", False)),
+            "hotwords_truncation_reasons": list(options.get("hotwords_truncation_reasons") or []),
+            "hotwords_enabled": bool(options.get("hotwords_enabled", False)),
+            "hotwords_disabled_reason": options.get("hotwords_disabled_reason") or "",
             "hotwords_locked": True,
             "connected": True,
             "connected_at": now,
@@ -427,6 +435,21 @@ class TranscriptionServer:
     def hotwords_preview(value, limit=10):
         if not value:
             return []
+        if isinstance(value, dict):
+            terms = value.get("terms") or value.get("hotwords") or []
+        elif isinstance(value, (list, tuple, set)):
+            terms = value
+        else:
+            terms = None
+        if terms is not None:
+            preview = []
+            for term in terms:
+                term = str(term or "").strip()
+                if term and term not in preview:
+                    preview.append(term)
+                if limit is not None and len(preview) >= limit:
+                    break
+            return preview
         text = str(value or "")
         if "\n" in text or "\r" in text:
             try:
@@ -465,32 +488,113 @@ class TranscriptionServer:
             logging.info(f"Hotwords file is empty: {path}")
             return None
 
-        return " ".join(hotwords)
+        return "\n".join(hotwords)
+
+    @staticmethod
+    def canonical_hotwords_from_options(options):
+        terms = options.get("hotword_terms")
+        if terms:
+            return normalize_asr_hotwords(terms=terms)
+        return normalize_asr_hotwords(options.get("hotwords"))
+
+    @staticmethod
+    def apply_canonical_hotwords(options, canonical, source="none", filename=None, locked=None):
+        canonical = canonical or normalize_asr_hotwords(terms=[])
+        prompt = canonical.get("prompt")
+        if prompt:
+            options["hotwords"] = prompt
+        else:
+            options.pop("hotwords", None)
+        options["hotword_terms"] = list(canonical.get("terms") or [])
+        options["hotwords_source"] = source
+        options["hotwords_count"] = int(canonical.get("accepted_count") or 0)
+        options["hotwords_original_count"] = int(canonical.get("original_count") or 0)
+        options["hotwords_rejected_count"] = int(canonical.get("rejected_count") or 0)
+        options["hotwords_truncated"] = bool(canonical.get("truncated", False))
+        options["hotwords_truncation_reasons"] = list(canonical.get("truncation_reasons") or [])
+        options["hotwords_enabled"] = bool(prompt)
+        options["hotwords_disabled_reason"] = ""
+        if filename is not None:
+            options["hotwords_file"] = filename or ""
+        if locked is not None:
+            options["hotwords_locked"] = bool(locked)
+
+    @staticmethod
+    def asr_hotwords_enabled(options):
+        return options.get("service_mode") == "accurate"
+
+    @classmethod
+    def disable_canonical_hotwords(cls, options, canonical, source="none", filename=None, locked=None, reason="service_mode"):
+        canonical = canonical or normalize_asr_hotwords(terms=[])
+        options.pop("hotwords", None)
+        options["hotword_terms"] = []
+        options["hotwords_source"] = source
+        options["hotwords_count"] = 0
+        options["hotwords_original_count"] = int(canonical.get("original_count") or 0)
+        options["hotwords_rejected_count"] = int(canonical.get("rejected_count") or 0)
+        options["hotwords_truncated"] = bool(canonical.get("truncated", False))
+        options["hotwords_truncation_reasons"] = list(canonical.get("truncation_reasons") or [])
+        options["hotwords_enabled"] = False
+        options["hotwords_disabled_reason"] = reason if canonical.get("original_count") else ""
+        if filename is not None:
+            options["hotwords_file"] = filename or ""
+        if locked is not None:
+            options["hotwords_locked"] = bool(locked)
+
+    def apply_asr_hotword_policy(self, options, canonical, source="none", filename=None, locked=None):
+        if self.asr_hotwords_enabled(options):
+            self.apply_canonical_hotwords(options, canonical, source=source, filename=filename, locked=locked)
+            return
+        self.disable_canonical_hotwords(options, canonical, source=source, filename=filename, locked=locked)
 
     def apply_meeting_hotwords(self, options):
-        if options.get("hotwords_locked") and options.get("hotwords"):
-            options["translation_terms"] = self.extract_translation_terms(options.get("hotwords"))
+        has_client_hotwords = bool(options.get("hotwords") or options.get("hotword_terms"))
+        has_client_glossary = bool(options.get("translation_glossary"))
+        if options.get("hotwords_locked") and (has_client_hotwords or has_client_glossary):
+            canonical = self.canonical_hotwords_from_options(options) if has_client_hotwords else normalize_asr_hotwords(terms=[])
+            self.apply_asr_hotword_policy(options, canonical, source="client", locked=True)
+            options["translation_terms"] = self.extract_translation_terms(options.get("translation_glossary") or canonical.get("terms"))
             return
         meeting_name = options.get("meeting_name")
         if not meeting_name or not self.meeting_hotwords:
             return
         stored = self.meeting_hotwords.get(meeting_name)
-        prompt = hotword_text_to_prompt(stored.get("text"))
-        if prompt and not options.get("hotwords"):
-            options["hotwords"] = prompt
-        if prompt or stored.get("translation_glossary"):
-            options["hotwords_count"] = stored.get("count") or count_hotwords(stored.get("text"))
+        canonical = normalize_asr_hotwords(stored.get("text"))
+        if has_client_hotwords:
+            self.apply_asr_hotword_policy(options, self.canonical_hotwords_from_options(options), source="client", locked=True)
+        elif canonical.get("prompt"):
+            self.apply_asr_hotword_policy(
+                options,
+                canonical,
+                source="meeting",
+                filename=stored.get("filename") or "",
+                locked=True,
+            )
+        if canonical.get("prompt") or stored.get("translation_glossary"):
             options["hotwords_file"] = stored.get("filename") or ""
             options["hotwords_locked"] = True
             options["translation_glossary"] = dict(stored.get("translation_glossary") or {})
             options["translation_glossary_count"] = int(stored.get("translation_count") or 0)
             options["translation_terms"] = self.extract_translation_terms(stored.get("text"))
+            if not canonical.get("prompt") and not has_client_hotwords:
+                self.apply_asr_hotword_policy(
+                    options,
+                    canonical,
+                    source="meeting",
+                    filename=stored.get("filename") or "",
+                    locked=True,
+                )
 
     def apply_default_hotwords(self, options):
         if options.get("hotwords") or options.get("hotwords_locked"):
             return
-        if self.default_hotwords:
-            options["hotwords"] = self.default_hotwords
+        if self.default_hotwords and self.asr_hotwords_enabled(options):
+            self.apply_asr_hotword_policy(
+                options,
+                normalize_asr_hotwords(self.default_hotwords),
+                source="default",
+                locked=False,
+            )
 
     def get_admin_clients_payload(self):
         backend = self.backend.value if isinstance(getattr(self, "backend", None), BackendType) else str(getattr(self, "backend", "") or "")
@@ -1173,6 +1277,7 @@ class TranscriptionServer:
                     cache_path=self.cache_path,
                     translation_queue=translation_queue,
                     hotwords=options.get("hotwords"),
+                    hotword_terms=options.get("hotword_terms"),
                     diarization=self._create_diarizer(options),
                     word_timestamps=options.get("word_timestamps", False),
                     mixed_interpretation=options.get("translation_mode") == "mixed_interpretation",
@@ -1300,14 +1405,23 @@ class TranscriptionServer:
             self.apply_meeting_hotwords(options)
             self.apply_default_hotwords(options)
 
-            hotwords_all = self.hotwords_preview(options.get("hotwords"), limit=None)
+            hotword_terms = options.get("hotword_terms") or []
+            hotwords_all = self.hotwords_preview(hotword_terms or options.get("hotwords"), limit=None)
             hotwords_preview = hotwords_all[:10]
             hotwords_count = int(options.get("hotwords_count") or len(hotwords_all))
             logging.info(
-                "Client hotwords: uid=%s translation_mode=%s count=%s file=%s preview=%s batch_inference=%s",
+                "Client hotwords: uid=%s service_mode=%s translation_mode=%s source=%s enabled=%s disabled_reason=%s count=%s original_count=%s rejected_count=%s truncated=%s reasons=%s file=%s preview=%s batch_inference=%s",
                 options.get("uid"),
+                options.get("service_mode") or "",
                 options.get("translation_mode", "standard"),
+                options.get("hotwords_source") or "none",
+                bool(options.get("hotwords_enabled", False)),
+                options.get("hotwords_disabled_reason") or "",
                 hotwords_count,
+                int(options.get("hotwords_original_count") or len(hotword_terms or [])),
+                int(options.get("hotwords_rejected_count") or 0),
+                bool(options.get("hotwords_truncated", False)),
+                list(options.get("hotwords_truncation_reasons") or []),
                 options.get("hotwords_file") or "",
                 hotwords_preview,
                 self.batch_config is not None,

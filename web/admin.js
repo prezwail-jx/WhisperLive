@@ -126,13 +126,19 @@ function render(data) {
   els.rows.innerHTML = clients.map((client) => {
     const [stateClass, stateText] = clientState(client);
     const hotwordFile = client.hotwords_file || "-";
+    const hotwordSource = client.hotwords_source || "none";
+    const hotwordOriginal = Number(client.hotwords_original_count || 0);
+    const hotwordAccepted = Number(client.hotwords_count || 0);
+    const hotwordRejected = Number(client.hotwords_rejected_count || 0);
+    const hotwordTruncated = client.hotwords_truncated ? ` / 截断:${(client.hotwords_truncation_reasons || []).join(",") || "yes"}` : "";
+    const hotwordTitle = `来源:${hotwordSource} / 接受:${hotwordAccepted} / 原始:${hotwordOriginal} / 拒绝:${hotwordRejected}${hotwordTruncated} / 文件:${hotwordFile}`;
     const actionTitle = client.connected ? "断开并删除" : "删除记录";
     return `<tr>
       <td><span class="state ${stateClass}">${stateText}</span></td>
       <td class="name" title="${escapeHtml(client.client_name)}">${escapeHtml(client.client_name || "-")}</td>
       <td class="uid" title="${escapeHtml(client.uid)}">${escapeHtml(client.uid)}</td>
       <td class="name" title="${escapeHtml(client.meeting_name)}">${escapeHtml(client.meeting_name || "-")}</td>
-      <td class="name" title="${escapeHtml(hotwordFile)}">${client.hotwords_locked ? "锁定" : "-"} / ${Number(client.hotwords_count || 0)} / ${escapeHtml(hotwordFile)}</td>
+      <td class="name" title="${escapeHtml(hotwordTitle)}">${client.hotwords_locked ? "锁定" : "-"} / ${escapeHtml(hotwordSource)} / ${hotwordAccepted} / ${escapeHtml(hotwordFile)}</td>
       <td>${fmtSeconds(client.connected_seconds)}</td>
       <td>${escapeHtml(client.language || "auto")}</td>
       <td class="model" title="${escapeHtml(client.model)}">${escapeHtml(client.model || "-")}</td>

@@ -403,6 +403,27 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
 
         self.assertEqual(mock_translation_client.call_args.kwargs["translation_device"], "cuda")
 
+    @mock.patch("whisper_live.server.threading.Thread")
+    @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    def test_initialize_client_passes_hotword_terms_to_faster_whisper(self, mock_faster_client, mock_thread):
+        mock_faster_client.return_value = MagicMock()
+        options = {
+            "uid": "test",
+            "language": "en",
+            "task": "transcribe",
+            "model": "small",
+            "hotwords": "Whisper small OpenAI",
+            "hotword_terms": ["Whisper small", "OpenAI"],
+            "service_mode": "accurate",
+        }
+
+        self.server.initialize_client(MagicMock(), options, None, None, False)
+
+        self.assertEqual(
+            mock_faster_client.call_args.kwargs["hotword_terms"],
+            ["Whisper small", "OpenAI"],
+        )
+
 
 class TestTranscriptionServerCleanup(unittest.TestCase):
     def setUp(self):
@@ -427,16 +448,21 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
             server.meeting_hotwords = MeetingHotwordStore(directory)
             server.default_hotwords = "Default"
 
-            options = {"uid": "client", "meeting_name": "会议A"}
+            options = {"uid": "client", "meeting_name": "会议A", "service_mode": "accurate"}
             server.apply_meeting_hotwords(options)
             server.apply_default_hotwords(options)
 
             self.assertEqual(options["hotwords"], "图灵科技 faster-whisper")
+            self.assertEqual(options["hotword_terms"], ["图灵科技", "faster-whisper"])
+            self.assertEqual(options["hotwords_source"], "meeting")
             self.assertEqual(options["hotwords_count"], 2)
+            self.assertEqual(options["hotwords_original_count"], 2)
+            self.assertEqual(options["hotwords_rejected_count"], 0)
+            self.assertFalse(options["hotwords_truncated"])
             self.assertEqual(options["hotwords_file"], "会议A.txt")
             self.assertTrue(options["hotwords_locked"])
 
-            options = {"uid": "client", "meeting_name": "会议A", "hotwords": "Custom"}
+            options = {"uid": "client", "meeting_name": "会议A", "hotwords": "Custom", "service_mode": "accurate"}
             server.apply_meeting_hotwords(options)
             server.apply_default_hotwords(options)
             self.assertEqual(options["hotwords"], "Custom")
@@ -455,6 +481,7 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
 
             self.assertNotIn("hotwords", options)
             self.assertEqual(options["hotwords_count"], 0)
+            self.assertEqual(options["hotwords_source"], "meeting")
             self.assertEqual(options["translation_glossary"], {"NICE": "长三角国家技术创新中心"})
             self.assertEqual(options["translation_glossary_count"], 1)
             self.assertTrue(options["hotwords_locked"])
@@ -465,14 +492,90 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
                 file.write("OpenAI => 开放人工智能\n普通热词")
             server = TranscriptionServer()
             server.meeting_hotwords = MeetingHotwordStore(directory)
-            options = {"uid": "client", "meeting_name": "会议A", "hotwords": "Custom"}
+            options = {"uid": "client", "meeting_name": "会议A", "hotwords": "Custom", "service_mode": "accurate"}
 
             server.apply_meeting_hotwords(options)
 
             self.assertEqual(options["hotwords"], "Custom")
+            self.assertEqual(options["hotwords_source"], "client")
             self.assertEqual(options["translation_glossary"], {"OpenAI": "开放人工智能"})
             self.assertEqual(options["translation_glossary_count"], 1)
             self.assertEqual(options["hotwords_count"], 1)
+
+    def test_client_hotword_terms_preserve_phrase_boundary(self):
+        server = TranscriptionServer()
+        server.default_hotwords = "Default"
+        options = {
+            "uid": "client",
+            "hotwords": "Whisper small OpenAI",
+            "hotword_terms": ["Whisper small", "OpenAI"],
+            "hotwords_locked": True,
+            "service_mode": "accurate",
+        }
+
+        server.apply_meeting_hotwords(options)
+        server.apply_default_hotwords(options)
+
+        self.assertEqual(options["hotwords"], "Whisper small OpenAI")
+        self.assertEqual(options["hotword_terms"], ["Whisper small", "OpenAI"])
+        self.assertEqual(options["hotwords_source"], "client")
+        self.assertEqual(options["hotwords_count"], 2)
+
+    def test_standard_mode_disables_asr_hotwords_but_preserves_translation_glossary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "会议A.txt"), "w", encoding="utf-8") as file:
+                file.write("WhisperLive\nOpenAI => 开放人工智能")
+            server = TranscriptionServer()
+            server.meeting_hotwords = MeetingHotwordStore(directory)
+            server.default_hotwords = "Default"
+            options = {"uid": "client", "meeting_name": "会议A", "service_mode": "standard"}
+
+            server.apply_meeting_hotwords(options)
+            server.apply_default_hotwords(options)
+
+            self.assertNotIn("hotwords", options)
+            self.assertEqual(options["hotword_terms"], [])
+            self.assertEqual(options["hotwords_source"], "meeting")
+            self.assertFalse(options["hotwords_enabled"])
+            self.assertEqual(options["hotwords_disabled_reason"], "service_mode")
+            self.assertEqual(options["hotwords_original_count"], 1)
+            self.assertEqual(options["hotwords_count"], 0)
+            self.assertEqual(options["translation_glossary"], {"OpenAI": "开放人工智能"})
+
+    def test_missing_service_mode_disables_client_asr_hotwords(self):
+        server = TranscriptionServer()
+        options = {
+            "uid": "client",
+            "hotwords": "WhisperLive",
+            "hotword_terms": ["WhisperLive"],
+            "hotwords_locked": True,
+            "translation_glossary": {"OpenAI": "开放人工智能"},
+        }
+
+        server.apply_meeting_hotwords(options)
+
+        self.assertNotIn("hotwords", options)
+        self.assertEqual(options["hotwords_source"], "client")
+        self.assertFalse(options["hotwords_enabled"])
+        self.assertEqual(options["hotwords_disabled_reason"], "service_mode")
+        self.assertEqual(options["translation_glossary"], {"OpenAI": "开放人工智能"})
+
+    def test_client_translation_only_upload_blocks_default_hotwords(self):
+        server = TranscriptionServer()
+        server.default_hotwords = "Default"
+        options = {
+            "uid": "client",
+            "hotwords_locked": True,
+            "translation_glossary": {"OpenAI": "开放人工智能"},
+        }
+
+        server.apply_meeting_hotwords(options)
+        server.apply_default_hotwords(options)
+
+        self.assertNotIn("hotwords", options)
+        self.assertEqual(options["hotwords_source"], "client")
+        self.assertEqual(options["hotwords_count"], 0)
+        self.assertEqual(options["translation_glossary"], {"OpenAI": "开放人工智能"})
 
 
 class TestMeetingSummaryIntegration(unittest.TestCase):
@@ -529,6 +632,11 @@ class TestClientManagerAdminStatus(unittest.TestCase):
             "meeting_name": "会议A",
             "hotwords": "图灵科技 faster-whisper",
             "hotwords_count": 2,
+            "hotwords_source": "meeting",
+            "hotwords_original_count": 3,
+            "hotwords_rejected_count": 1,
+            "hotwords_truncated": True,
+            "hotwords_truncation_reasons": ["term_count"],
             "hotwords_file": "terms.txt",
             "language": "zh",
             "model": "model/asr/small",
@@ -545,7 +653,12 @@ class TestClientManagerAdminStatus(unittest.TestCase):
         self.assertEqual(status["uid"], "uid-1")
         self.assertEqual(status["client_name"], "会议室A")
         self.assertEqual(status["meeting_name"], "会议A")
+        self.assertEqual(status["hotwords_source"], "meeting")
         self.assertEqual(status["hotwords_count"], 2)
+        self.assertEqual(status["hotwords_original_count"], 3)
+        self.assertEqual(status["hotwords_rejected_count"], 1)
+        self.assertTrue(status["hotwords_truncated"])
+        self.assertEqual(status["hotwords_truncation_reasons"], ["term_count"])
         self.assertEqual(status["hotwords_file"], "terms.txt")
         self.assertTrue(status["hotwords_locked"])
         self.assertTrue(status["connected"])

@@ -34,7 +34,7 @@ class TestBatchInferenceWorker(unittest.TestCase):
             audio=self._make_audio(),
             language="en",
             use_vad=False,
-            hotwords="FunASR WhisperLive",
+            hotwords="Whisper small OpenAI",
         )
         self.worker.submit(req)
         req.future.wait(timeout=5)
@@ -46,7 +46,7 @@ class TestBatchInferenceWorker(unittest.TestCase):
         self.mock_transcriber.transcribe.assert_called_once()
         self.assertEqual(
             self.mock_transcriber.transcribe.call_args.kwargs.get("hotwords"),
-            "FunASR WhisperLive",
+            "Whisper small OpenAI",
         )
 
     @mock.patch('whisper_live.batch_inference.get_suppressed_tokens', return_value=[-1])
@@ -87,7 +87,7 @@ class TestBatchInferenceWorker(unittest.TestCase):
             None,
         )
 
-        hotwords = ["FunASR WhisperLive"] * 3
+        hotwords = ["Whisper small OpenAI"] * 3
         requests = [
             BatchRequest(
                 audio=self._make_audio(),
@@ -134,6 +134,36 @@ class TestBatchInferenceWorker(unittest.TestCase):
             self.assertTrue(req.future.is_set())
             self.assertIsNone(req.error)
             self.assertEqual(req.result, [fake_segment])
+
+        self.assertEqual(self.mock_transcriber.transcribe.call_count, 2)
+        self.mock_transcriber.encode.assert_not_called()
+
+    def test_same_hotwords_with_different_initial_prompt_fall_back_to_single_requests(self):
+        """Prompt-incompatible initial prompts should also avoid batched generate."""
+        fake_segment = MagicMock()
+        fake_info = MagicMock()
+        self.mock_transcriber.transcribe.return_value = ([fake_segment], fake_info)
+
+        requests = [
+            BatchRequest(
+                audio=self._make_audio(),
+                language="en",
+                use_vad=False,
+                initial_prompt="meeting one",
+                hotwords="Whisper small OpenAI",
+            ),
+            BatchRequest(
+                audio=self._make_audio(),
+                language="en",
+                use_vad=False,
+                initial_prompt="meeting two",
+                hotwords="Whisper small OpenAI",
+            ),
+        ]
+        for req in requests:
+            self.worker.submit(req)
+        for req in requests:
+            req.future.wait(timeout=5)
 
         self.assertEqual(self.mock_transcriber.transcribe.call_count, 2)
         self.mock_transcriber.encode.assert_not_called()

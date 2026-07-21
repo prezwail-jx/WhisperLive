@@ -4,6 +4,7 @@ import re
 import threading
 import time
 import queue
+import unicodedata
 import numpy as np
 
 from whisper_live import metrics as wl_metrics
@@ -146,6 +147,9 @@ class ServeClientBase(object):
     }
     MAX_BOUNDARY_DEDUPE_WORDS = 6
     MAX_SHORT_GRATITUDE_SECONDS = 0.5
+    HOTWORD_DOMINANCE_THRESHOLD = 0.80
+    HOTWORD_NO_SPEECH_THRESHOLD = 0.35
+    MIN_HOTWORD_MATCH_CHARS = 2
 
     def __init__(
         self,
@@ -162,6 +166,7 @@ class ServeClientBase(object):
         max_incomplete_segment_seconds=0.0,
         min_transcription_chunk_seconds=1.0,
         stable_utterance_ids=False,
+        hotword_terms=None,
     ):
         self.client_uid = client_uid
         self.websocket = websocket
@@ -198,6 +203,8 @@ class ServeClientBase(object):
         self.stable_utterance_ids = bool(stable_utterance_ids)
         self.utterance_sequence = 0
         self.current_utterance_id = None
+        self.hotword_terms = tuple(str(term or "") for term in (hotword_terms or []) if str(term or "").strip())
+        self.hotword_match_terms = self._prepare_hotword_match_terms(self.hotword_terms)
 
         # Optional post-processing callable for segments.
         # If set, called with a segment dict and must return a segment dict.
@@ -566,6 +573,105 @@ class ServeClientBase(object):
         return re.sub(r"\s+", " ", re.sub(r"[^\w\s']+", " ", str(text or "").lower())).strip()
 
     @classmethod
+    def _compact_hotword_text(cls, text):
+        normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
+        return re.sub(r"[^\w]+", "", normalized, flags=re.UNICODE)
+
+    @classmethod
+    def _prepare_hotword_match_terms(cls, terms):
+        prepared = []
+        seen = set()
+        for term in terms or []:
+            compact = cls._compact_hotword_text(term)
+            if len(compact) < cls.MIN_HOTWORD_MATCH_CHARS or compact in seen:
+                continue
+            seen.add(compact)
+            prepared.append(compact)
+        prepared.sort(key=len, reverse=True)
+        return tuple(prepared)
+
+    @staticmethod
+    def _merged_coverage_length(spans):
+        if not spans:
+            return 0
+        spans = sorted(spans)
+        total = 0
+        cur_start, cur_end = spans[0]
+        for start, end in spans[1:]:
+            if start <= cur_end:
+                cur_end = max(cur_end, end)
+                continue
+            total += cur_end - cur_start
+            cur_start, cur_end = start, end
+        total += cur_end - cur_start
+        return total
+
+    def _hotword_dominance(self, text):
+        if not self.hotword_match_terms:
+            return 0.0
+        compact_text = self._compact_hotword_text(text)
+        if not compact_text:
+            return 0.0
+        spans = []
+        for term in self.hotword_match_terms:
+            start = 0
+            while True:
+                index = compact_text.find(term, start)
+                if index < 0:
+                    break
+                end = index + len(term)
+                spans.append((index, end))
+                start = index + 1
+        covered = self._merged_coverage_length(spans)
+        return covered / len(compact_text) if covered else 0.0
+
+    def _log_hotword_hallucination_drop(self, stage, reason, text, dominance, no_speech_prob, rms, rms_threshold):
+        logging.info(
+            "[HOTWORD_HALLUCINATION_DROP] uid=%s stage=%s reason=%s dominance=%.3f no_speech=%.3f rms=%s rms_threshold=%.6f text=%r",
+            self.client_uid,
+            stage,
+            reason,
+            dominance,
+            no_speech_prob,
+            "none" if rms is None else f"{rms:.6f}",
+            rms_threshold,
+            str(text or "").strip()[:80],
+        )
+
+    def _hotword_hallucination_drop_reason(self, segment, start, end, duration, text, stage):
+        dominance = self._hotword_dominance(text)
+        if dominance < self.HOTWORD_DOMINANCE_THRESHOLD:
+            return None
+
+        no_speech_prob = float(self.get_segment_no_speech_prob(segment) or 0.0)
+        no_speech_threshold = min(float(self.no_speech_thresh), self.HOTWORD_NO_SPEECH_THRESHOLD)
+        if no_speech_prob >= no_speech_threshold:
+            self._log_hotword_hallucination_drop(
+                stage,
+                "no_speech",
+                text,
+                dominance,
+                no_speech_prob,
+                None,
+                self.min_segment_rms,
+            )
+            return "no_speech"
+
+        rms = self._audio_rms_for_relative_range(start, end, duration)
+        if rms is not None and rms < self.min_segment_rms:
+            self._log_hotword_hallucination_drop(
+                stage,
+                "low_energy",
+                text,
+                dominance,
+                no_speech_prob,
+                rms,
+                self.min_segment_rms,
+            )
+            return "low_energy"
+        return None
+
+    @classmethod
     def _is_silence_hallucination_phrase(cls, text):
         normalized = cls._normalized_phrase(text)
         return normalized in cls.SILENCE_HALLUCINATION_PHRASES
@@ -794,6 +900,9 @@ class ServeClientBase(object):
                     end = self.timestamp_offset + rel_end
                 if start >= end:
                     continue
+                if self._hotword_hallucination_drop_reason(s, rel_start, rel_end, duration, text_, "completed"):
+                    offset = rel_end
+                    continue
                 if self.get_segment_no_speech_prob(s) > self.no_speech_thresh:
                     continue
                 if self._is_mixed_interpretation_noise_text(text_):
@@ -836,6 +945,8 @@ class ServeClientBase(object):
                 offset = rel_end
             elif self._is_probable_gratitude_hallucination(segments[-1].text, rel_start, rel_end, False):
                 offset = rel_end
+            elif self._hotword_hallucination_drop_reason(segments[-1], rel_start, rel_end, duration, segments[-1].text, "partial"):
+                pass
             elif self._is_low_energy_range(rel_start, rel_end, duration, segments[-1].text):
                 offset = rel_end
             else:

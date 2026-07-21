@@ -60,7 +60,7 @@ class TestServerDefaultHotwords(unittest.TestCase):
         try:
             self.assertEqual(
                 TranscriptionServer.load_hotwords_file(path),
-                "ACE Docker Whisper small",
+                "ACE\nDocker\nWhisper small",
             )
         finally:
             os.remove(path)
@@ -71,17 +71,21 @@ class TestServerDefaultHotwords(unittest.TestCase):
     def test_apply_default_hotwords_only_when_client_did_not_send_value(self):
         server = TranscriptionServer()
         server.default_hotwords = "ACE Docker"
-        options = {"uid": "client"}
+        options = {"uid": "client", "service_mode": "accurate"}
         server.apply_default_hotwords(options)
         self.assertEqual(options["hotwords"], "ACE Docker")
 
-        options = {"uid": "client", "hotwords": "Custom"}
+        options = {"uid": "client", "hotwords": "Custom", "service_mode": "accurate"}
         server.apply_default_hotwords(options)
         self.assertEqual(options["hotwords"], "Custom")
 
-        options = {"uid": "client", "hotwords": ""}
+        options = {"uid": "client", "hotwords": "", "service_mode": "accurate"}
         server.apply_default_hotwords(options)
         self.assertEqual(options["hotwords"], "ACE Docker")
+
+        options = {"uid": "client", "service_mode": "standard"}
+        server.apply_default_hotwords(options)
+        self.assertNotIn("hotwords", options)
 
         options = {"uid": "client", "hotwords_locked": True, "translation_glossary": {"NICE": "长三角国家技术创新中心"}}
         server.apply_default_hotwords(options)

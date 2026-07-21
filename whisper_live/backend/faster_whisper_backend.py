@@ -36,6 +36,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         cache_path="~/.cache/whisper-live/",
         translation_queue=None,
         hotwords=None,
+        hotword_terms=None,
         diarization=None,
         word_timestamps=False,
         min_segment_rms=0.0015,
@@ -79,6 +80,7 @@ class ServeClientFasterWhisper(ServeClientBase):
             max_incomplete_segment_seconds=max_incomplete_segment_seconds,
             min_transcription_chunk_seconds=min_transcription_chunk_seconds,
             stable_utterance_ids=True,
+            hotword_terms=hotword_terms,
         )
         self.cache_path = cache_path
         self.model_sizes = [
@@ -89,10 +91,11 @@ class ServeClientFasterWhisper(ServeClientBase):
         ]
 
         self.model_size_or_path = model
-        self.language = "en" if self.model_size_or_path.endswith("en") else language
+        self.language = "en" if self.model_size_or_path and self.model_size_or_path.endswith("en") else language
         self.task = task
         self.initial_prompt = initial_prompt
         self.vad_parameters = vad_parameters or {"threshold": 0.5}
+        self.use_vad = use_vad
         self.hotwords = hotwords
         self.mixed_interpretation = bool(mixed_interpretation)
         self.asr_device_index = int(asr_device_index or 0)

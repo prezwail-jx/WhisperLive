@@ -40,6 +40,7 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertEqual(client.same_output_threshold, 10)
         self.assertAlmostEqual(client.min_segment_rms, 0.0015)
         self.assertAlmostEqual(client.min_transcription_chunk_seconds, 1.0)
+        self.assertEqual(client.hotword_match_terms, ())
         self.assertIsNone(client.frames_np)
         self.assertAlmostEqual(client.timestamp_offset, 0.0)
         self.assertFalse(client.exit)
@@ -66,6 +67,15 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertAlmostEqual(client.min_segment_rms, 0.002)
         self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
         self.assertIs(client.translation_queue, q)
+
+    def test_hotword_match_terms_are_precomputed(self):
+        client = ConcreteServeClient(
+            client_uid="uid3",
+            websocket=MagicMock(),
+            hotword_terms=["ＯｐｅｎＡＩ", "Whisper small", "我"],
+        )
+
+        self.assertEqual(client.hotword_match_terms, ("whispersmall", "openai"))
 
 
 class AutoLanguageClient(ConcreteServeClient):
@@ -525,6 +535,68 @@ class TestUpdateSegments(unittest.TestCase):
         last = self.client.update_segments([seg], duration=2.0)
         self.assertIsNotNone(last)
         self.assertIn("quiet speech", last["text"])
+
+    def test_hotword_dominated_completed_segment_with_weak_no_speech_is_dropped(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["OpenAI"])
+        segs = [
+            self._make_segment(0.0, 1.0, " OpenAI", no_speech_prob=0.40),
+            self._make_segment(1.0, 2.0, " next", no_speech_prob=0.0),
+        ]
+
+        with self.assertLogs(level="INFO") as logs:
+            last = self.client.update_segments(segs, duration=3.0)
+
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertIsNotNone(last)
+        self.assertIn("HOTWORD_HALLUCINATION_DROP", "\n".join(logs.output))
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_hotword_dominated_partial_segment_with_weak_no_speech_waits_for_more_audio(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["OpenAI"])
+        seg = self._make_segment(0.0, 1.0, " OpenAI", no_speech_prob=0.40)
+
+        last = self.client.update_segments([seg], duration=2.0)
+
+        self.assertIsNone(last)
+        self.assertEqual(self.client.timestamp_offset, 0.0)
+        self.assertEqual(self.client.current_out, "")
+        self.assertEqual(len(self.client.transcript), 0)
+
+    def test_spoken_hotword_with_strong_evidence_is_retained(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["OpenAI"])
+        segs = [
+            self._make_segment(0.0, 1.0, " OpenAI", no_speech_prob=0.10),
+            self._make_segment(1.0, 2.0, " next", no_speech_prob=0.0),
+        ]
+
+        self.client.update_segments(segs, duration=3.0)
+
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertIn("OpenAI", self.client.transcript[0]["text"])
+
+    def test_sentence_containing_hotword_is_not_hotword_dominated(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["OpenAI"])
+        seg = self._make_segment(0.0, 1.0, " we discuss OpenAI models today", no_speech_prob=0.40)
+
+        last = self.client.update_segments([seg], duration=2.0)
+
+        self.assertIsNotNone(last)
+        self.assertIn("OpenAI", last["text"])
+
+    def test_hotword_dominated_low_energy_completed_segment_is_logged_separately(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["OpenAI"])
+        self.client.frames_np = np.zeros(16000 * 5, dtype=np.float32)
+        segs = [
+            self._make_segment(0.0, 1.0, " OpenAI", no_speech_prob=0.10),
+            self._make_segment(1.0, 2.0, " next", no_speech_prob=0.0),
+        ]
+
+        with self.assertLogs(level="INFO") as logs:
+            self.client.update_segments(segs, duration=3.0)
+
+        output = "\n".join(logs.output)
+        self.assertIn("HOTWORD_HALLUCINATION_DROP", output)
+        self.assertIn("reason=low_energy", output)
 
     def test_timestamp_offset_advances(self):
         segs = [

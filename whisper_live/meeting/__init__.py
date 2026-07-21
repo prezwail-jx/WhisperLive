@@ -1,7 +1,12 @@
 from .hotwords import (
+    MAX_ASR_HOTWORD_PROMPT_CHARS,
+    MAX_ASR_HOTWORD_TERM_CHARS,
+    MAX_ASR_HOTWORD_TERMS,
     MeetingHotwordStore,
     count_hotwords,
     hotword_text_to_prompt,
+    normalize_asr_hotword_term,
+    normalize_asr_hotwords,
     normalize_hotword_text,
     parse_hotword_config,
 )
@@ -28,8 +33,13 @@ __all__ = [
     "MeetingSummaryService",
     "SummaryGenerationError",
     "SummaryTemplateStore",
+    "MAX_ASR_HOTWORD_PROMPT_CHARS",
+    "MAX_ASR_HOTWORD_TERM_CHARS",
+    "MAX_ASR_HOTWORD_TERMS",
     "count_hotwords",
     "hotword_text_to_prompt",
+    "normalize_asr_hotword_term",
+    "normalize_asr_hotwords",
     "normalize_hotword_text",
     "parse_hotword_config",
 ]

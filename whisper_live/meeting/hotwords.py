@@ -1,6 +1,88 @@
 import logging
 import os
+import re
 import threading
+import unicodedata
+
+
+MAX_ASR_HOTWORD_TERMS = 20
+MAX_ASR_HOTWORD_TERM_CHARS = 64
+MAX_ASR_HOTWORD_PROMPT_CHARS = 180
+
+
+def _unique_reasons(reasons):
+    return list(dict.fromkeys(reasons))
+
+
+def normalize_asr_hotword_term(value):
+    term = unicodedata.normalize("NFKC", str(value or ""))
+    return re.sub(r"\s+", " ", term).strip()
+
+
+def normalize_asr_hotwords(
+    value=None,
+    terms=None,
+    max_terms=MAX_ASR_HOTWORD_TERMS,
+    max_term_chars=MAX_ASR_HOTWORD_TERM_CHARS,
+    max_prompt_chars=MAX_ASR_HOTWORD_PROMPT_CHARS,
+):
+    if terms is None:
+        if isinstance(value, dict):
+            terms = value.get("terms") or value.get("hotwords") or []
+        elif isinstance(value, (list, tuple, set)):
+            terms = value
+        else:
+            terms = parse_hotword_config(value).get("hotwords") or []
+
+    candidates = []
+    invalid_reasons = []
+    for item in terms or []:
+        term = normalize_asr_hotword_term(item)
+        if not term:
+            continue
+        candidates.append(term)
+
+    accepted = []
+    seen = set()
+    prompt = ""
+    reasons = []
+
+    for term in candidates:
+        if len(term) > max_term_chars:
+            invalid_reasons.append("term_length")
+            continue
+        key = term.casefold()
+        if key in seen:
+            invalid_reasons.append("duplicate")
+            continue
+        if len(accepted) >= max_terms:
+            reasons.append("term_count")
+            break
+        next_prompt = term if not prompt else f"{prompt} {term}"
+        if len(next_prompt) > max_prompt_chars:
+            reasons.append("prompt_chars")
+            break
+        accepted.append(term)
+        seen.add(key)
+        prompt = next_prompt
+
+    original_count = len(candidates)
+    accepted_count = len(accepted)
+    truncation_reasons = _unique_reasons(reasons)
+    validation_reasons = _unique_reasons(invalid_reasons)
+    return {
+        "terms": accepted,
+        "prompt": prompt or None,
+        "original_count": original_count,
+        "accepted_count": accepted_count,
+        "rejected_count": max(0, original_count - accepted_count),
+        "truncated": bool(truncation_reasons),
+        "truncation_reasons": truncation_reasons,
+        "validation_reasons": validation_reasons,
+        "max_terms": max_terms,
+        "max_term_chars": max_term_chars,
+        "max_prompt_chars": max_prompt_chars,
+    }
 
 
 def parse_hotword_config(text):
@@ -40,7 +122,7 @@ def hotword_text_to_prompt(text):
     parsed = parse_hotword_config(text)
     if not parsed["hotwords"]:
         return None
-    return " ".join(parsed["hotwords"])
+    return normalize_asr_hotwords(terms=parsed["hotwords"])["prompt"]
 
 
 def count_hotwords(text):

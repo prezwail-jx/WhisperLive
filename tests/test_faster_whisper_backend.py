@@ -127,6 +127,51 @@ class TestServeClientFasterWhisperSingleModelInit(unittest.TestCase):
         self.assertIsNone(client.language)
         self.assertEqual(client.current_language, "zh")
 
+    def test_standard_transcribe_forwards_canonical_hotwords(self):
+        client = ServeClientFasterWhisper(
+            websocket=mock.Mock(),
+            model=None,
+            client_uid="client",
+            language="en",
+            hotwords="Whisper small OpenAI",
+        )
+        info = mock.Mock()
+        client.transcriber = mock.Mock()
+        client.transcriber.transcribe.return_value = ([], info)
+
+        client.transcribe_audio([])
+
+        self.assertEqual(
+            client.transcriber.transcribe.call_args.kwargs.get("hotwords"),
+            "Whisper small OpenAI",
+        )
+
+    def test_batch_request_forwards_canonical_hotwords(self):
+        captured = []
+
+        class FakeBatchWorker:
+            def submit(self, request):
+                captured.append(request)
+                request.result = []
+                request.info = mock.Mock()
+                request.future.set()
+
+        ServeClientFasterWhisper.BATCH_WORKER = FakeBatchWorker()
+        client = ServeClientFasterWhisper(
+            websocket=mock.Mock(),
+            model=None,
+            client_uid="client",
+            language="en",
+            initial_prompt="meeting prompt",
+            hotwords="Whisper small OpenAI",
+        )
+
+        client.transcribe_audio([])
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].initial_prompt, "meeting prompt")
+        self.assertEqual(captured[0].hotwords, "Whisper small OpenAI")
+
     def make_mixed_language_client(self):
         return ServeClientFasterWhisper(
             websocket=mock.Mock(),

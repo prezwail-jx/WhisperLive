@@ -120,7 +120,7 @@ let customSummaryTemplates = [];
 let transcriptEditorData = null;
 let translationModels = [];
 const translationModelByValue = new Map();
-let lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0, translationGlossary: {} };
+let lockedHotwords = { hotwords: "", terms: [], filename: "", count: 0, translationCount: 0, translationGlossary: {} };
 let clientInstanceId = null;
 let displayMode = "split";
 let singleLanguageMode = "translation";
@@ -1481,6 +1481,7 @@ async function loadUploadedHotwords(file) {
   const parsed = parseHotwordText(text);
   lockedHotwords = {
     hotwords: parsed.hotwords.join(" "),
+    terms: parsed.hotwords,
     filename,
     count: parsed.hotwords.length,
     translationCount: parsed.translationCount,
@@ -1494,7 +1495,7 @@ async function loadUploadedHotwords(file) {
 }
 
 function clearUploadedHotwords() {
-  lockedHotwords = { hotwords: "", filename: "", count: 0, translationCount: 0, translationGlossary: {} };
+  lockedHotwords = { hotwords: "", terms: [], filename: "", count: 0, translationCount: 0, translationGlossary: {} };
   if (elements.hotwordFile) elements.hotwordFile.value = "";
   updateHotwordStatus("未上传热词");
 }
@@ -2165,6 +2166,7 @@ function sendConfig(event) {
   const translationMode = autoDetectMode ? "mixed_interpretation" : "standard";
   const translationProvider = selectedTranslationProviderConfig();
   const meetingName = elements.meetingName.value.trim();
+  const asrHotwordsEnabled = serviceMode === "accurate";
   const payload = {
     uid,
     session_id: currentSessionId,
@@ -2174,8 +2176,9 @@ function sendConfig(event) {
     client_instance_id: clientInstanceId || getClientInstanceId(),
     client_name: meetingName || `Client-${uid.slice(0, 8)}`,
     meeting_name: meetingName,
-    hotwords: lockedHotwords.hotwords || null,
-    hotwords_count: lockedHotwords.count || 0,
+    hotwords: asrHotwordsEnabled ? lockedHotwords.hotwords || null : null,
+    hotword_terms: asrHotwordsEnabled ? lockedHotwords.terms || [] : [],
+    hotwords_count: asrHotwordsEnabled ? lockedHotwords.count || 0 : 0,
     hotwords_file: lockedHotwords.filename || "",
     hotwords_locked: true,
     translation_glossary: lockedHotwords.translationGlossary || {},
