@@ -34,6 +34,27 @@ class TestServeClientFasterWhisperSingleModelInit(unittest.TestCase):
             single_model=single_model,
         )
 
+    def test_default_max_pending_audio_seconds_is_base_default(self):
+        client = ServeClientFasterWhisper(
+            websocket=mock.Mock(),
+            model=None,
+            client_uid="client",
+        )
+
+        self.assertAlmostEqual(client.max_pending_audio_seconds, 8.0)
+
+    def test_custom_max_pending_audio_seconds_is_forwarded_to_base(self):
+        client = ServeClientFasterWhisper(
+            websocket=mock.Mock(),
+            model=None,
+            client_uid="client",
+            max_pending_audio_seconds=15.0,
+            min_transcription_chunk_seconds=2.5,
+        )
+
+        self.assertAlmostEqual(client.max_pending_audio_seconds, 15.0)
+        self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
+
     @mock.patch("whisper_live.backend.faster_whisper_backend.threading.Thread", DummyThread)
     @mock.patch("whisper_live.backend.faster_whisper_backend.torch.cuda.is_available", return_value=False)
     def test_concurrent_single_model_clients_load_shared_model_once(self, mock_cuda_available):

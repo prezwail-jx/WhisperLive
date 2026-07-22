@@ -2226,6 +2226,7 @@ function sendConfig(event) {
     min_segment_rms: 0.022,
     min_transcription_chunk_seconds: 2.5,
     max_incomplete_segment_seconds: 10.0,
+    max_pending_audio_seconds: serviceMode === "accurate" ? 15.0 : 8.0,
     service_mode: serviceMode,
     enable_diarization: elements.diarizationEnabled.checked,
     enable_translation: translationEnabled,

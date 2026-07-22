@@ -523,6 +523,16 @@ class TranscriptionServer:
     def asr_hotwords_enabled(options):
         return options.get("service_mode") == "accurate"
 
+    @staticmethod
+    def resolve_max_pending_audio_seconds(options):
+        value = options.get("max_pending_audio_seconds")
+        if value is None:
+            value = 15.0 if options.get("service_mode") == "accurate" else ServeClientBase.MAX_PENDING_AUDIO_SECONDS
+        return min(
+            ServeClientBase.MAX_CONFIGURABLE_PENDING_AUDIO_SECONDS,
+            max(1.0, float(value)),
+        )
+
     @classmethod
     def disable_canonical_hotwords(cls, options, canonical, source="none", filename=None, locked=None, reason="service_mode"):
         canonical = canonical or normalize_asr_hotwords(terms=[])
@@ -1277,6 +1287,13 @@ class TranscriptionServer:
                     options["model"] = faster_whisper_custom_model_path
                 else:
                     options["model"] = self.resolve_asr_model_path(options["model"])
+                max_pending_audio_seconds = self.resolve_max_pending_audio_seconds(options)
+                logging.info(
+                    "[ASR_BUFFER_CONFIG] uid=%s service_mode=%s max_pending=%.2f",
+                    options["uid"],
+                    options.get("service_mode"),
+                    max_pending_audio_seconds,
+                )
                 client = ServeClientFasterWhisper(
                     websocket,
                     language=options["language"],
@@ -1293,6 +1310,7 @@ class TranscriptionServer:
                     same_output_threshold=options.get("same_output_threshold", 10),
                     min_segment_rms=options.get("min_segment_rms", 0.0015),
                     max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 0.0),
+                    max_pending_audio_seconds=max_pending_audio_seconds,
                     min_transcription_chunk_seconds=options.get("min_transcription_chunk_seconds", 1.0),
                     cache_path=self.cache_path,
                     translation_queue=translation_queue,

@@ -36,10 +36,13 @@ class ServeClientBase(object):
     """Minimum RMS energy required before accepting an ASR segment."""
     max_incomplete_segment_seconds: float
     """Maximum audio duration to keep reprocessing a single incomplete segment."""
+    max_pending_audio_seconds: float
+    """Maximum unprocessed audio duration to keep before advancing the realtime offset."""
 
     MAX_TRANSCRIPT_LENGTH = 500
     MAX_TRANSLATION_QUEUE_SIZE = 100
     MAX_PENDING_AUDIO_SECONDS = 8.0
+    MAX_CONFIGURABLE_PENDING_AUDIO_SECONDS = 30.0
     OPENCC_CONFIG = "t2s"
     OPENCC_UNAVAILABLE_LOGGED = False
     SILENCE_HALLUCINATION_PHRASES = {
@@ -169,6 +172,7 @@ class ServeClientBase(object):
         min_transcription_chunk_seconds=1.0,
         stable_utterance_ids=False,
         hotword_terms=None,
+        max_pending_audio_seconds=None,
     ):
         self.client_uid = client_uid
         self.websocket = websocket
@@ -182,6 +186,12 @@ class ServeClientBase(object):
         if max_incomplete_segment_seconds is None:
             max_incomplete_segment_seconds = 0.0
         self.max_incomplete_segment_seconds = max(0.0, float(max_incomplete_segment_seconds))
+        if max_pending_audio_seconds is None:
+            max_pending_audio_seconds = self.MAX_PENDING_AUDIO_SECONDS
+        self.max_pending_audio_seconds = min(
+            self.MAX_CONFIGURABLE_PENDING_AUDIO_SECONDS,
+            max(1.0, float(max_pending_audio_seconds)),
+        )
         if min_transcription_chunk_seconds is None:
             min_transcription_chunk_seconds = 1.0
         self.min_transcription_chunk_seconds = max(0.1, float(min_transcription_chunk_seconds))
@@ -385,16 +395,16 @@ class ServeClientBase(object):
         self.lock.release()
 
     def trim_pending_audio_if_needed(self):
-        if self.frames_np is None or self.MAX_PENDING_AUDIO_SECONDS <= 0:
+        if self.frames_np is None or self.max_pending_audio_seconds <= 0:
             return
 
         frames_duration = self.frames_np.shape[0] / self.RATE
         processed_seconds = max(0.0, self.timestamp_offset - self.frames_offset)
         pending_seconds = max(0.0, frames_duration - processed_seconds)
-        if pending_seconds <= self.MAX_PENDING_AUDIO_SECONDS:
+        if pending_seconds <= self.max_pending_audio_seconds:
             return
 
-        new_timestamp_offset = self.frames_offset + frames_duration - self.MAX_PENDING_AUDIO_SECONDS
+        new_timestamp_offset = self.frames_offset + frames_duration - self.max_pending_audio_seconds
         dropped_seconds = max(0.0, new_timestamp_offset - self.timestamp_offset)
         if dropped_seconds <= 0:
             return
@@ -404,7 +414,7 @@ class ServeClientBase(object):
             "[REALTIME_DROP] uid=%s pending=%.2fs keep=%.2fs dropped=%.2fs",
             self.client_uid,
             pending_seconds,
-            self.MAX_PENDING_AUDIO_SECONDS,
+            self.max_pending_audio_seconds,
             dropped_seconds,
         )
 

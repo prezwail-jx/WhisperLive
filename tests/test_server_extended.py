@@ -424,6 +424,64 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
             ["Whisper small", "OpenAI"],
         )
 
+    @mock.patch("whisper_live.server.threading.Thread")
+    @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    def test_initialize_client_accurate_mode_defaults_max_pending_audio_to_15(self, mock_faster_client, mock_thread):
+        mock_faster_client.return_value = MagicMock()
+        options = {
+            "uid": "test",
+            "language": "en",
+            "task": "transcribe",
+            "model": "small",
+            "service_mode": "accurate",
+        }
+
+        self.server.initialize_client(MagicMock(), options, None, None, False)
+
+        self.assertAlmostEqual(
+            mock_faster_client.call_args.kwargs["max_pending_audio_seconds"],
+            15.0,
+        )
+
+    @mock.patch("whisper_live.server.threading.Thread")
+    @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    def test_initialize_client_non_accurate_mode_defaults_max_pending_audio_to_8(self, mock_faster_client, mock_thread):
+        mock_faster_client.return_value = MagicMock()
+        options = {
+            "uid": "test",
+            "language": "en",
+            "task": "transcribe",
+            "model": "small",
+            "service_mode": "standard",
+        }
+
+        self.server.initialize_client(MagicMock(), options, None, None, False)
+
+        self.assertAlmostEqual(
+            mock_faster_client.call_args.kwargs["max_pending_audio_seconds"],
+            8.0,
+        )
+
+    @mock.patch("whisper_live.server.threading.Thread")
+    @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    def test_initialize_client_explicit_max_pending_audio_overrides_mode_default(self, mock_faster_client, mock_thread):
+        mock_faster_client.return_value = MagicMock()
+        options = {
+            "uid": "test",
+            "language": "en",
+            "task": "transcribe",
+            "model": "small",
+            "service_mode": "accurate",
+            "max_pending_audio_seconds": 12.0,
+        }
+
+        self.server.initialize_client(MagicMock(), options, None, None, False)
+
+        self.assertAlmostEqual(
+            mock_faster_client.call_args.kwargs["max_pending_audio_seconds"],
+            12.0,
+        )
+
 
 class TestTranscriptionServerCleanup(unittest.TestCase):
     def setUp(self):

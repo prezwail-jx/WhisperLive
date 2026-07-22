@@ -40,6 +40,7 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertEqual(client.same_output_threshold, 10)
         self.assertAlmostEqual(client.min_segment_rms, 0.0015)
         self.assertAlmostEqual(client.min_transcription_chunk_seconds, 1.0)
+        self.assertAlmostEqual(client.max_pending_audio_seconds, 8.0)
         self.assertEqual(client.hotword_match_terms, ())
         self.assertIsNone(client.frames_np)
         self.assertAlmostEqual(client.timestamp_offset, 0.0)
@@ -58,6 +59,7 @@ class TestServeClientBaseInit(unittest.TestCase):
             same_output_threshold=20,
             min_segment_rms=0.002,
             min_transcription_chunk_seconds=2.5,
+            max_pending_audio_seconds=15.0,
             translation_queue=q,
         )
         self.assertEqual(client.send_last_n_segments, 5)
@@ -66,7 +68,15 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertEqual(client.same_output_threshold, 20)
         self.assertAlmostEqual(client.min_segment_rms, 0.002)
         self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
+        self.assertAlmostEqual(client.max_pending_audio_seconds, 15.0)
         self.assertIs(client.translation_queue, q)
+
+    def test_max_pending_audio_seconds_is_clamped(self):
+        low = ConcreteServeClient(client_uid="low", websocket=MagicMock(), max_pending_audio_seconds=-5.0)
+        high = ConcreteServeClient(client_uid="high", websocket=MagicMock(), max_pending_audio_seconds=60.0)
+
+        self.assertAlmostEqual(low.max_pending_audio_seconds, 1.0)
+        self.assertAlmostEqual(high.max_pending_audio_seconds, 30.0)
 
     def test_hotword_match_terms_are_precomputed(self):
         client = ConcreteServeClient(
@@ -147,6 +157,30 @@ class TestAddFrames(unittest.TestCase):
         self.client.add_frames(np.array([1.0], dtype=np.float32))
         # timestamp_offset should be bumped to at least frames_offset
         self.assertGreaterEqual(self.client.timestamp_offset, self.client.frames_offset)
+
+    def test_custom_pending_limit_keeps_audio_under_limit(self):
+        client = ConcreteServeClient(
+            client_uid="test",
+            websocket=self.ws,
+            max_pending_audio_seconds=15.0,
+        )
+        client.add_frames(np.zeros(12 * 16000, dtype=np.float32))
+
+        self.assertAlmostEqual(client.timestamp_offset, 0.0)
+
+    def test_custom_pending_limit_drops_only_excess_audio(self):
+        client = ConcreteServeClient(
+            client_uid="test",
+            websocket=self.ws,
+            max_pending_audio_seconds=15.0,
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            client.add_frames(np.zeros(16 * 16000, dtype=np.float32))
+
+        self.assertAlmostEqual(client.timestamp_offset, 1.0)
+        self.assertIn("[REALTIME_DROP]", "\n".join(logs.output))
+        self.assertIn("keep=15.00s", "\n".join(logs.output))
 
 
 class TestAddFramesThreadSafety(unittest.TestCase):
@@ -535,6 +569,20 @@ class TestUpdateSegments(unittest.TestCase):
         last = self.client.update_segments([seg], duration=2.0)
         self.assertIsNotNone(last)
         self.assertIn("quiet speech", last["text"])
+
+    def test_incomplete_segment_forces_complete_at_configured_duration(self):
+        self.client.max_incomplete_segment_seconds = 10.0
+        self.client.frames_np = np.full(16000 * 10, 0.01, dtype=np.float32)
+        seg = self._make_segment(0.0, 10.0, " long pending speech")
+
+        with self.assertLogs(level="INFO") as logs:
+            last = self.client.update_segments([seg], duration=10.0)
+
+        self.assertIsNone(last)
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertTrue(self.client.transcript[0]["completed"])
+        self.assertAlmostEqual(self.client.timestamp_offset, 10.0)
+        self.assertIn("[FORCE_COMPLETE_INCOMPLETE]", "\n".join(logs.output))
 
     def test_hotword_dominated_completed_segment_with_weak_no_speech_is_dropped(self):
         self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["OpenAI"])
