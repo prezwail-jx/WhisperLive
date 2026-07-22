@@ -319,14 +319,68 @@ class TestServeClientTranslationModelCache(unittest.TestCase):
 
 
 class TestServeClientTranslationOutputGuard(unittest.TestCase):
-    def make_client(self):
+    def make_client(self, **kwargs):
         with mock.patch.object(ServeClientTranslation, "load_translation_model"):
             client = ServeClientTranslation(
                 client_uid="client-guard",
                 websocket=mock.Mock(),
                 translation_queue=queue.Queue(),
+                **kwargs,
             )
         return client
+
+    def test_classifier_rejects_empty_output(self):
+        client = self.make_client()
+
+        reason = client.translation_output_failure_reason("技术词", "  ", "zh", "en")
+
+        self.assertEqual(reason, "empty_output")
+
+    def test_classifier_rejects_normalized_source_echo(self):
+        client = self.make_client()
+
+        reason = client.translation_output_failure_reason(" 农业机器人。", "农业机器人", "zh", "en")
+
+        self.assertEqual(reason, "source_echo")
+
+    def test_classifier_allows_bounded_ascii_proper_term_echo(self):
+        client = self.make_client()
+
+        for source, translated in (("OpenAI.", "OpenAI"), ("NICE T", "NICE T"), ("GPT-4", "GPT-4")):
+            with self.subTest(source=source):
+                reason = client.translation_output_failure_reason(source, translated, "zh", "en")
+                self.assertIsNone(reason)
+
+    def test_classifier_allows_configured_translation_term_echo(self):
+        client = self.make_client(translation_terms=["latency"])
+
+        reason = client.translation_output_failure_reason("latency", "latency", "zh", "en")
+
+        self.assertIsNone(reason)
+
+    def test_classifier_rejects_ordinary_ascii_sentence_echo(self):
+        client = self.make_client()
+
+        reason = client.translation_output_failure_reason(
+            "OpenAI is useful",
+            "OpenAI is useful",
+            "en",
+            "zh",
+        )
+
+        self.assertEqual(reason, "source_echo")
+
+    def test_classifier_reports_nllb_residual_cjk(self):
+        client = self.make_client(model_name="nllb_200_600m")
+
+        reason = client.translation_output_failure_reason(
+            "创新中心特邀专家",
+            "创新中心仍然没有完成翻译",
+            "zh",
+            "en",
+        )
+
+        self.assertEqual(reason, "residual_cjk")
 
     def test_guard_rejects_underscore_run(self):
         client = self.make_client()
@@ -334,7 +388,8 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
         guarded = client.guard_translation_output("技术词", translated, "zh", "en")
 
-        self.assertEqual(guarded, "技术词")
+        self.assertEqual(guarded, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "underscore_run")
         self.assertEqual(
             ServeClientTranslation.translation_output_guard_reason("技术词", translated),
             "underscore_run",
@@ -346,7 +401,8 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
         guarded = client.guard_translation_output("短句", translated, "zh", "en")
 
-        self.assertEqual(guarded, "短句")
+        self.assertEqual(guarded, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "length_ratio")
         self.assertEqual(
             ServeClientTranslation.translation_output_guard_reason("短句", translated),
             "length_ratio",
@@ -358,10 +414,25 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
         guarded = client.guard_translation_output("对对对", translated, "zh", "en")
 
-        self.assertEqual(guarded, "对对对")
+        self.assertEqual(guarded, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "low_unique_word_ratio")
         self.assertEqual(
             ServeClientTranslation.translation_output_guard_reason("对对对", translated),
             "low_unique_word_ratio",
+        )
+
+    def test_guard_rejects_repeated_ngram_output(self):
+        client = self.make_client()
+        translated = "alpha beta " * 8 + "one two three four five six seven eight"
+        source = "这是一段足够长的原文，用来避免长度比例规则先于重复短语规则触发。" * 4
+
+        guarded = client.guard_translation_output(source, translated, "zh", "en")
+
+        self.assertEqual(guarded, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "repeated_ngram")
+        self.assertEqual(
+            ServeClientTranslation.translation_output_guard_reason(source, translated),
+            "repeated_ngram",
         )
 
     def test_guard_allows_normal_output(self):
@@ -377,9 +448,21 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
         self.assertEqual(guarded, "从我的角度来看，主要关注点是稳定性。")
         self.assertIsNone(ServeClientTranslation.translation_output_guard_reason("hello", "你好"))
 
+    def test_guard_routes_through_unified_classifier(self):
+        client = self.make_client()
+        with mock.patch.object(
+            client,
+            "translation_output_failure_reason",
+            wraps=client.translation_output_failure_reason,
+        ) as classifier:
+            guarded = client.guard_translation_output("技术词", "Technology term", "zh", "en")
+
+        self.assertEqual(guarded, "Technology term")
+        classifier.assert_called_once_with("技术词", "Technology term", "zh", "en")
+
 
 class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
-    def make_client(self, model_name="nllb_200_600m", translations=None):
+    def make_client(self, model_name="nllb_200_600m", translations=None, **kwargs):
         with mock.patch.object(ServeClientTranslation, "load_translation_model"):
             client = ServeClientTranslation(
                 client_uid="client-residual",
@@ -387,6 +470,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
                 translation_queue=queue.Queue(),
                 model_name=model_name,
                 translation_merge_enabled=False,
+                **kwargs,
             )
         client.model_loaded = True
         client.translator = mock.Mock()
@@ -420,7 +504,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         translated, source_language, target_language = client.translate_text("创新中心特邀专家", "zh")
 
-        self.assertEqual(translated, "创新中心仍然没有完成翻译（翻译出错）")
+        self.assertEqual(translated, "翻译暂不可用")
         self.assertEqual(source_language, "zh")
         self.assertEqual(target_language, "en")
         self.assertEqual(client.pending_translation_warning, "residual_cjk")
@@ -443,7 +527,8 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         payload = self.get_last_payload(client)
         segment = payload["translated_segments"][0]
-        self.assertEqual(segment["text"], "创新中心仍然没有完成翻译（翻译出错）")
+        self.assertEqual(segment["text"], "翻译暂不可用")
+        self.assertEqual(segment["source_text"], "创新中心特邀专家举办主题讲座。")
         self.assertEqual(segment["translation_warning"], "residual_cjk")
 
     def test_helsinki_does_not_retry_residual_cjk(self):
@@ -486,6 +571,205 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
         self.assertEqual(target_language, "zh")
         self.assertIsNone(client.pending_translation_warning)
         self.assertEqual(client.translator.translate.call_count, 1)
+
+    def test_direct_translation_routes_result_through_unified_classifier(self):
+        client = self.make_client(
+            model_name="helsinki_zh_en",
+            translations=[("Technology term", "zh", "en")],
+        )
+        with mock.patch.object(
+            client,
+            "translation_output_failure_reason",
+            wraps=client.translation_output_failure_reason,
+        ) as classifier:
+            translated, _, _ = client.translate_text("技术词", "zh")
+
+        self.assertEqual(translated, "Technology term")
+        classifier.assert_called_once_with("技术词", "Technology term", "zh", "en")
+
+    def test_batch_translation_routes_result_through_unified_classifier(self):
+        client = self.make_client()
+        client.batch_worker = mock.Mock()
+        client.batch_worker.submit.return_value = ("Technology term", "zh", "en")
+        with mock.patch.object(
+            client,
+            "translation_output_failure_reason",
+            wraps=client.translation_output_failure_reason,
+        ) as classifier:
+            translated, _, _ = client.translate_text_with_batch("技术词", "zh")
+
+        self.assertEqual(translated, "Technology term")
+        classifier.assert_called_once_with("技术词", "Technology term", "zh", "en")
+
+    def test_direct_source_echo_retries_once_then_succeeds(self):
+        client = self.make_client(
+            model_name="helsinki_zh_en",
+            translations=[
+                ("创新中心特邀专家", "zh", "en"),
+                ("Experts invited by the Innovation Center", "zh", "en"),
+            ],
+        )
+
+        translated, _, _ = client.translate_text("创新中心特邀专家", "zh")
+
+        self.assertEqual(translated, "Experts invited by the Innovation Center")
+        self.assertIsNone(client.pending_translation_warning)
+        self.assertEqual(client.translator.translate.call_count, 2)
+
+    def test_direct_source_echo_exhaustion_returns_placeholder_and_logs(self):
+        client = self.make_client(
+            model_name="helsinki_zh_en",
+            translations=[
+                ("创新中心特邀专家", "zh", "en"),
+                ("创新中心特邀专家", "zh", "en"),
+            ],
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            translated, _, _ = client.translate_text("创新中心特邀专家", "zh")
+
+        output = "\n".join(logs.output)
+        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "source_echo")
+        self.assertEqual(client.translator.translate.call_count, 2)
+        self.assertIn("TRANSLATION_OUTPUT_RETRY", output)
+        self.assertIn("TRANSLATION_OUTPUT_FAILED", output)
+        self.assertIn("initial_reason=source_echo", output)
+        self.assertIn("final_reason=source_echo", output)
+
+    def test_direct_timeout_retries_once(self):
+        client = self.make_client(
+            model_name="helsinki_zh_en",
+            translations=[
+                TimeoutError("temporary timeout"),
+                ("Technology term", "zh", "en"),
+            ],
+        )
+
+        translated, _, _ = client.translate_text("技术词", "zh")
+
+        self.assertEqual(translated, "Technology term")
+        self.assertEqual(client.translator.translate.call_count, 2)
+
+    def test_direct_cuda_oom_does_not_retry(self):
+        client = self.make_client(
+            model_name="helsinki_zh_en",
+            translations=[RuntimeError("CUDA out of memory")],
+        )
+
+        translated, _, _ = client.translate_text("技术词", "zh")
+
+        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "cuda_oom")
+        self.assertEqual(client.translator.translate.call_count, 1)
+
+    def test_direct_unknown_exception_does_not_retry(self):
+        client = self.make_client(
+            model_name="helsinki_zh_en",
+            translations=[RuntimeError("unexpected failure")],
+        )
+
+        translated, _, _ = client.translate_text("技术词", "zh")
+
+        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "translation_exception")
+        self.assertEqual(client.translator.translate.call_count, 1)
+
+    def test_model_unavailable_returns_placeholder_without_inference(self):
+        client = self.make_client(model_name="helsinki_zh_en")
+        client.model_loaded = False
+        client.model_load_failure_reason = "model_unavailable"
+
+        translated, _, _ = client.translate_text("技术词", "zh")
+
+        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "model_unavailable")
+        client.translator.translate.assert_not_called()
+
+    def test_client_exit_returns_placeholder_without_inference(self):
+        client = self.make_client(model_name="helsinki_zh_en")
+        client.exit = True
+
+        translated, _, _ = client.translate_text("技术词", "zh")
+
+        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "client_exit")
+        client.translator.translate.assert_not_called()
+
+    def test_batch_invalid_output_retries_in_batch(self):
+        client = self.make_client(nllb_batch_translation=True)
+        client.batch_worker = mock.Mock()
+        client.batch_worker.submit.side_effect = [
+            ("创新中心特邀专家", "zh", "en"),
+            ("Experts invited by the Innovation Center", "zh", "en"),
+        ]
+
+        translated, _, _ = client.translate_text("创新中心特邀专家", "zh")
+
+        self.assertEqual(translated, "Experts invited by the Innovation Center")
+        self.assertEqual(client.batch_worker.submit.call_count, 2)
+        client.translator.translate.assert_not_called()
+
+    def test_batch_timeout_uses_one_direct_fallback(self):
+        client = self.make_client(
+            nllb_batch_translation=True,
+            translations=[("Technology term", "zh", "en")],
+        )
+        client.batch_worker = mock.Mock()
+        client.batch_worker.submit.side_effect = TimeoutError("batch timeout")
+
+        translated, _, _ = client.translate_text("技术词", "zh")
+
+        self.assertEqual(translated, "Technology term")
+        self.assertEqual(client.batch_worker.submit.call_count, 1)
+        self.assertEqual(client.translator.translate.call_count, 1)
+
+    def test_batch_timeout_direct_failure_does_not_attempt_third_inference(self):
+        client = self.make_client(
+            nllb_batch_translation=True,
+            translations=[("技术词", "zh", "en")],
+        )
+        client.batch_worker = mock.Mock()
+        client.batch_worker.submit.side_effect = TimeoutError("batch timeout")
+
+        translated, _, _ = client.translate_text("技术词", "zh")
+
+        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "source_echo")
+        self.assertEqual(client.batch_worker.submit.call_count, 1)
+        self.assertEqual(client.translator.translate.call_count, 1)
+
+    def test_second_batch_timeout_does_not_fall_back_to_direct(self):
+        client = self.make_client(nllb_batch_translation=True)
+        client.batch_worker = mock.Mock()
+        client.batch_worker.submit.side_effect = [
+            ("创新中心特邀专家", "zh", "en"),
+            TimeoutError("second batch timeout"),
+        ]
+
+        translated, _, _ = client.translate_text("创新中心特邀专家", "zh")
+
+        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "translation_timeout")
+        self.assertEqual(client.batch_worker.submit.call_count, 2)
+        client.translator.translate.assert_not_called()
+
+    def test_failed_glossary_translation_does_not_start_plain_third_attempt(self):
+        client = self.make_client(
+            model_name="helsinki_zh_en",
+            translations=[
+                ("Use ZZGLOSSARY0ZZ.", "en", "zh"),
+                ("Use ZZGLOSSARY0ZZ.", "en", "zh"),
+            ],
+        )
+        client.translation_glossary = {"OpenAI": "开放人工智能"}
+        client._translation_glossary_sources_cache = {}
+
+        translated, _, _ = client.translate_with_glossary("Use OpenAI.", "en")
+
+        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "source_echo")
+        self.assertEqual(client.translator.translate.call_count, 2)
 
 
 class TestServeClientTranslationBuffer(unittest.TestCase):
@@ -1034,6 +1318,92 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
 
         payload = self.get_last_payload(client)
         self.assertEqual(payload["translated_segments"][0]["text"], "hello")
+
+    def test_translation_warning_flushes_success_and_emits_independently(self):
+        client = self.make_client(
+            translation_merge_enabled=True,
+            translation_merge_max_chars=100,
+            translation_merge_max_delay=60,
+        )
+        client.enqueue_translated_segment({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "hello",
+            "completed": True,
+            "source_text": "你好",
+            "source_language": "zh",
+            "target_language": "en",
+            "translation_model": "helsinki_zh_en",
+            "utterance_id": "client:1:0.000",
+        })
+        client.enqueue_translated_segment({
+            "start": "0.500",
+            "end": "1.000",
+            "text": "翻译暂不可用",
+            "completed": True,
+            "source_text": "世界",
+            "source_language": "zh",
+            "target_language": "en",
+            "translation_model": "helsinki_zh_en",
+            "translation_warning": "source_echo",
+            "source_utterance_ids": ["client:2:0.500"],
+            "utterance_id": "client:2:0.500",
+        })
+        client.enqueue_translated_segment({
+            "start": "1.000",
+            "end": "1.500",
+            "text": "again",
+            "completed": True,
+            "source_text": "再见",
+            "source_language": "zh",
+            "target_language": "en",
+            "translation_model": "helsinki_zh_en",
+            "utterance_id": "client:3:1.000",
+        })
+
+        self.assertEqual(client.websocket.send.call_count, 2)
+        payload = self.get_last_payload(client)
+        self.assertEqual([item["text"] for item in payload["translated_segments"]], ["hello", "翻译暂不可用"])
+        warning_segment = payload["translated_segments"][1]
+        self.assertEqual(warning_segment["translation_warning"], "source_echo")
+        self.assertEqual(warning_segment["source_text"], "世界")
+        self.assertEqual(warning_segment["source_utterance_ids"], ["client:2:0.500"])
+        self.assertEqual(warning_segment["start"], "0.500")
+        self.assertEqual(warning_segment["end"], "1.000")
+        self.assertEqual(len(client.translation_merge_buffer), 1)
+        self.assertEqual(client.translation_merge_buffer[0]["text"], "again")
+
+        client.flush_merge_buffer(force=True)
+        payload = self.get_last_payload(client)
+        self.assertEqual(
+            [item["text"] for item in payload["translated_segments"]],
+            ["hello", "翻译暂不可用", "again"],
+        )
+        self.assertNotIn("translation_warning", payload["translated_segments"][2])
+
+    def test_cleanup_flushes_translation_merge_buffer(self):
+        client = self.make_client(
+            translation_merge_enabled=True,
+            translation_merge_max_chars=100,
+            translation_merge_max_delay=60,
+        )
+        client.enqueue_translated_segment({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "hello",
+            "completed": True,
+            "source_text": "你好",
+            "source_language": "zh",
+            "target_language": "en",
+            "translation_model": "helsinki_zh_en",
+            "utterance_id": "client:1:0.000",
+        })
+
+        client.cleanup()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "hello")
+        self.assertEqual(client.translation_merge_buffer, [])
 
     def test_auto_language_chinese_segment_is_inferred_for_auto_translation(self):
         client = self.make_client()

@@ -59,6 +59,47 @@ class TestMeetingLogStore(unittest.TestCase):
             self.assertTrue(os.path.isfile(info["json_path"]))
             self.assertTrue(os.path.isfile(info["md_path"]))
 
+    def test_session_log_preserves_translation_warning_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({"uid": "uid-1", "session_id": "session-warning", "meeting_name": "会议"})
+            store.append_segments("session-warning", "source", [
+                {
+                    "start": "0.000",
+                    "end": "1.000",
+                    "text": "你好世界",
+                    "completed": True,
+                    "utterance_id": "uid-1:1:0.000",
+                },
+            ])
+            store.append_segments("session-warning", "translation", [
+                {
+                    "start": "0.000",
+                    "end": "1.000",
+                    "text": "翻译暂不可用",
+                    "completed": True,
+                    "source_text": "你好世界",
+                    "translation_warning": "source_echo",
+                    "source_utterance_ids": ["uid-1:1:0.000"],
+                    "utterance_id": "uid-1:1:0.000",
+                },
+            ])
+
+            info = store.finish_session("session-warning")
+
+            with open(info["json_path"], "r", encoding="utf-8") as file:
+                data = json.load(file)
+            translation = data["translation_segments"][0]
+            self.assertEqual(translation["text"], "翻译暂不可用")
+            self.assertEqual(translation["source_text"], "你好世界")
+            self.assertEqual(translation["translation_warning"], "source_echo")
+            self.assertEqual(translation["source_utterance_ids"], ["uid-1:1:0.000"])
+
+            with open(info["md_path"], "r", encoding="utf-8") as file:
+                markdown = file.read()
+            self.assertIn("翻译暂不可用", markdown)
+            self.assertNotIn("source_echo", markdown)
+
     def test_finished_transcript_can_be_corrected_with_revision_tracking(self):
         with tempfile.TemporaryDirectory() as directory:
             store = MeetingLogStore(directory)

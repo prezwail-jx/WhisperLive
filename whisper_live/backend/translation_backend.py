@@ -4,6 +4,7 @@ import queue
 import re
 import threading
 import time
+import unicodedata
 from typing import Optional
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
@@ -561,7 +562,10 @@ class ServeClientTranslation(ServeClientBase):
     _REALTIME_MAX_ZH_CHARS = 120
     _RESIDUAL_CJK_MIN_CHARS = 8
     _RESIDUAL_CJK_MAX_RATIO = 0.25
-    _TRANSLATION_ERROR_SUFFIX = "（翻译出错）"
+    _TRANSLATION_UNAVAILABLE_TEXT = "翻译暂不可用"
+    _SOURCE_ECHO_PROPER_TERM_MAX_CHARS = 32
+    _SOURCE_ECHO_PROPER_TERM_MAX_TOKENS = 4
+    _TRANSLATION_COMPARISON_PUNCTUATION = " \t\r\n.,!?;:，。！？；：\"'“”‘’()[]{}"
     _INCOMPLETE_EN_ENDING_WORDS = {
         "a", "an", "and", "are", "as", "at", "because", "but", "by", "for",
         "from", "had", "has", "have", "if", "in", "into", "is", "it", "of",
@@ -647,6 +651,7 @@ class ServeClientTranslation(ServeClientBase):
         self.translator_lock = None
         self.batch_worker = None
         self.model_loaded = False
+        self.model_load_failure_reason = None
         self.load_translation_model()
 
     def get_translation_cache_key(self):
@@ -666,6 +671,7 @@ class ServeClientTranslation(ServeClientBase):
     def load_translation_model(self):
         """Load the translation model and tokenizer."""
         try:
+            self.model_load_failure_reason = None
             cache_key = self.get_translation_cache_key()
             with self._TRANSLATOR_CACHE_LOCK:
                 if cache_key not in self._TRANSLATOR_CACHE:
@@ -708,102 +714,311 @@ class ServeClientTranslation(ServeClientBase):
             self.translator = None
             self.translator_lock = None
             self.model_loaded = False
+            reason = self.translation_exception_reason(e)
+            self.model_load_failure_reason = reason if reason != "translation_exception" else "model_unavailable"
 
     def should_use_nllb_batch_translation(self):
         return self.nllb_batch_translation and self.is_nllb_model(self.model_name)
+
+    @staticmethod
+    def translation_exception_reason(error):
+        if isinstance(error, TimeoutError):
+            return "translation_timeout"
+        message = str(error or "").lower()
+        cuda_oom_type = getattr(torch.cuda, "OutOfMemoryError", ())
+        if (cuda_oom_type and isinstance(error, cuda_oom_type)) or "out of memory" in message:
+            return "cuda_oom"
+        if isinstance(error, ValueError) and "unsupported translation model" in message:
+            return "unsupported_model"
+        return "translation_exception"
+
+    def _resolved_failure_languages(self, source_language, target_language=None):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language) or source_language
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language)
+        return source_language, target_language or self._resolved_target_language(source_language)
+
+    def _log_translation_retry(
+        self,
+        text,
+        translated_text,
+        source_language,
+        target_language,
+        reason,
+        path,
+        attempt,
+        started_at,
+        fallback=None,
+    ):
+        logging.warning(
+            "[TRANSLATION_OUTPUT_RETRY] uid=%s model=%s path=%s attempt=%d reason=%s fallback=%s "
+            "source_language=%s target_language=%s source_len=%d translated_len=%d elapsed_ms=%.1f "
+            "source_preview=%r translated_preview=%r",
+            self.client_uid,
+            self.model_name,
+            path,
+            attempt,
+            reason,
+            fallback or "same_path",
+            source_language,
+            target_language,
+            len(str(text or "")),
+            len(str(translated_text or "")),
+            (time.monotonic() - started_at) * 1000.0,
+            str(text or "").strip()[:120],
+            str(translated_text or "").strip()[:160],
+        )
+
+    def _finalize_translation_failure(
+        self,
+        text,
+        source_language,
+        target_language,
+        initial_reason,
+        final_reason,
+        attempts,
+        path,
+        started_at,
+        translated_text=None,
+        error=None,
+    ):
+        source_language, target_language = self._resolved_failure_languages(source_language, target_language)
+        self.pending_translation_warning = final_reason
+        logging.warning(
+            "[TRANSLATION_OUTPUT_FAILED] uid=%s model=%s path=%s attempts=%d initial_reason=%s "
+            "final_reason=%s source_language=%s target_language=%s source_len=%d translated_len=%d "
+            "elapsed_ms=%.1f error_type=%s error_preview=%r source_preview=%r translated_preview=%r",
+            self.client_uid,
+            self.model_name,
+            path,
+            attempts,
+            initial_reason or final_reason,
+            final_reason,
+            source_language,
+            target_language,
+            len(str(text or "")),
+            len(str(translated_text or "")),
+            (time.monotonic() - started_at) * 1000.0,
+            type(error).__name__ if error is not None else "none",
+            str(error or "")[:160],
+            str(text or "").strip()[:120],
+            str(translated_text or "").strip()[:160],
+        )
+        return self._TRANSLATION_UNAVAILABLE_TEXT, source_language, target_language
 
     def translate_text_with_batch(self, text: str, source_language: Optional[str]):
         if not self.batch_worker:
             return None
         started_at = time.monotonic()
-        try:
-            translated_text, resolved_source_language, target_language = self.batch_worker.submit(
-                text,
-                source_language,
-                self.target_language,
-                self.client_uid,
-                timeout_seconds=self.nllb_batch_timeout_seconds,
-            )
-            generate_ms = (time.monotonic() - started_at) * 1000.0
-            if self.should_retry_nllb_residual_cjk(
-                translated_text,
-                resolved_source_language,
-                target_language,
-            ):
-                logging.warning(
-                    "[TRANSLATION_RESIDUAL_CJK_RETRY] uid=%s model=%s source_language=%s "
-                    "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
-                    self.client_uid,
-                    self.model_name,
-                    resolved_source_language,
-                    target_language,
-                    len(str(text or "")),
-                    len(str(translated_text or "")),
-                    str(text or "").strip()[:120],
-                    str(translated_text or "").strip()[:160],
-                )
-                retry_started_at = time.monotonic()
-                retry_text, retry_source_language, retry_target_language = self.batch_worker.submit(
+        generate_ms = 0.0
+        initial_reason = None
+        resolved_source_language, target_language = self._resolved_failure_languages(source_language)
+        for attempt in (1, 2):
+            attempt_started_at = time.monotonic()
+            try:
+                translated_text, resolved_source_language, target_language = self.batch_worker.submit(
                     text,
                     source_language,
                     self.target_language,
                     self.client_uid,
                     timeout_seconds=self.nllb_batch_timeout_seconds,
                 )
-                generate_ms += (time.monotonic() - retry_started_at) * 1000.0
-                translated_text = retry_text
-                resolved_source_language = retry_source_language
-                target_language = retry_target_language
-                if self.should_retry_nllb_residual_cjk(
-                    translated_text,
-                    resolved_source_language,
-                    target_language,
-                ):
-                    logging.warning(
-                        "[TRANSLATION_RESIDUAL_CJK_FAILED] uid=%s model=%s source_language=%s "
-                        "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
-                        self.client_uid,
-                        self.model_name,
+            except Exception as error:
+                generate_ms += (time.monotonic() - attempt_started_at) * 1000.0
+                reason = self.translation_exception_reason(error)
+                initial_reason = initial_reason or reason
+                if reason == "translation_timeout" and attempt == 1:
+                    self._log_translation_retry(
+                        text,
+                        "",
                         resolved_source_language,
                         target_language,
-                        len(str(text or "")),
-                        len(str(translated_text or "")),
-                        str(text or "").strip()[:120],
-                        str(translated_text or "").strip()[:160],
+                        reason,
+                        "batch",
+                        attempt,
+                        started_at,
+                        fallback="direct",
                     )
-                    self.pending_translation_warning = "residual_cjk"
-                    translated_text = f"{translated_text}{self._TRANSLATION_ERROR_SUFFIX}"
-            translated_text = self.guard_translation_output(
+                    raise
+                return self._finalize_translation_failure(
+                    text,
+                    resolved_source_language,
+                    target_language,
+                    initial_reason,
+                    reason,
+                    attempt,
+                    "batch",
+                    started_at,
+                    error=error,
+                )
+
+            generate_ms += (time.monotonic() - attempt_started_at) * 1000.0
+            reason = self.translation_output_failure_reason(
                 text,
                 translated_text,
                 resolved_source_language,
                 target_language,
             )
-            elapsed_ms = (time.monotonic() - started_at) * 1000.0
-            logging.info(
-                "[TRANSLATION_LATENCY] uid=%s model=%s device=%s source_language=%s "
-                "source_len=%d lock_wait_ms=%.1f generate_ms=%.1f total_ms=%.1f "
-                "queue_size=%s batch=true source_preview=%r",
-                self.client_uid,
-                self.model_name,
-                self.translation_device,
-                source_language,
-                len(str(text or "")),
-                0.0,
-                generate_ms,
-                elapsed_ms,
-                self.translation_queue_size(),
-                str(text or "").strip()[:80],
+            if not reason:
+                self._log_translation_latency(
+                    text,
+                    source_language,
+                    started_at,
+                    generate_ms,
+                    0.0,
+                    attempt,
+                    batch=True,
+                )
+                return translated_text, resolved_source_language, target_language
+
+            initial_reason = initial_reason or reason
+            if attempt == 1:
+                self._log_translation_retry(
+                    text,
+                    translated_text,
+                    resolved_source_language,
+                    target_language,
+                    reason,
+                    "batch",
+                    attempt,
+                    started_at,
+                )
+                continue
+            return self._finalize_translation_failure(
+                text,
+                resolved_source_language,
+                target_language,
+                initial_reason,
+                reason,
+                attempt,
+                "batch",
+                started_at,
+                translated_text=translated_text,
             )
-            return translated_text, resolved_source_language, target_language
-        except Exception as error:
-            logging.warning(
-                "[NLLB_BATCH_FALLBACK] uid=%s model=%s error=%s",
-                self.client_uid,
-                self.model_name,
-                error,
+
+    def _log_translation_latency(
+        self,
+        text,
+        source_language,
+        started_at,
+        generate_ms,
+        lock_wait_ms,
+        attempts,
+        batch=False,
+    ):
+        logging.info(
+            "[TRANSLATION_LATENCY] uid=%s model=%s device=%s source_language=%s source_len=%d "
+            "lock_wait_ms=%.1f generate_ms=%.1f total_ms=%.1f queue_size=%s batch=%s attempts=%d "
+            "source_preview=%r",
+            self.client_uid,
+            self.model_name,
+            self.translation_device,
+            source_language,
+            len(str(text or "")),
+            lock_wait_ms,
+            generate_ms,
+            (time.monotonic() - started_at) * 1000.0,
+            self.translation_queue_size(),
+            str(bool(batch)).lower(),
+            attempts,
+            str(text or "").strip()[:80],
+        )
+
+    def _translate_text_direct(
+        self,
+        text,
+        source_language,
+        max_attempts=2,
+        initial_reason=None,
+        attempt_offset=0,
+        started_at=None,
+    ):
+        started_at = started_at or time.monotonic()
+        generate_ms = 0.0
+        lock_wait_ms = 0.0
+        resolved_source_language, target_language = self._resolved_failure_languages(source_language)
+        for attempt in range(1, max_attempts + 1):
+            lock_started_at = time.monotonic()
+            self.translator_lock.acquire()
+            lock_wait_ms += (time.monotonic() - lock_started_at) * 1000.0
+            attempt_started_at = time.monotonic()
+            try:
+                translated_text, resolved_source_language, target_language = self.translator.translate(
+                    text,
+                    source_language,
+                    self.target_language,
+                )
+            except Exception as error:
+                generate_ms += (time.monotonic() - attempt_started_at) * 1000.0
+                reason = self.translation_exception_reason(error)
+                initial_reason = initial_reason or reason
+                if reason == "translation_timeout" and attempt < max_attempts:
+                    self._log_translation_retry(
+                        text,
+                        "",
+                        resolved_source_language,
+                        target_language,
+                        reason,
+                        "direct",
+                        attempt + attempt_offset,
+                        started_at,
+                    )
+                    continue
+                return self._finalize_translation_failure(
+                    text,
+                    resolved_source_language,
+                    target_language,
+                    initial_reason,
+                    reason,
+                    attempt + attempt_offset,
+                    "direct",
+                    started_at,
+                    error=error,
+                )
+            finally:
+                self.translator_lock.release()
+
+            generate_ms += (time.monotonic() - attempt_started_at) * 1000.0
+            reason = self.translation_output_failure_reason(
+                text,
+                translated_text,
+                resolved_source_language,
+                target_language,
             )
-            return None
+            if not reason:
+                self._log_translation_latency(
+                    text,
+                    source_language,
+                    started_at,
+                    generate_ms,
+                    lock_wait_ms,
+                    attempt + attempt_offset,
+                )
+                return translated_text, resolved_source_language, target_language
+
+            initial_reason = initial_reason or reason
+            if attempt < max_attempts:
+                self._log_translation_retry(
+                    text,
+                    translated_text,
+                    resolved_source_language,
+                    target_language,
+                    reason,
+                    "direct",
+                    attempt + attempt_offset,
+                    started_at,
+                )
+                continue
+            return self._finalize_translation_failure(
+                text,
+                resolved_source_language,
+                target_language,
+                initial_reason,
+                reason,
+                attempt + attempt_offset,
+                "direct",
+                started_at,
+                translated_text=translated_text,
+            )
 
     def translate_text(self, text: str, source_language: Optional[str]):
         """
@@ -813,121 +1028,52 @@ class ServeClientTranslation(ServeClientBase):
             text (str): Text to translate
 
         Returns:
-            str: Translated text or original text if translation fails
+            str: Translated text or a user-safe unavailable placeholder on failure
         """
         self.pending_translation_warning = None
-        if not self.model_loaded or not self.translator or not text.strip():
+        if not text.strip():
             return text, source_language, self.target_language
-
-        if self.exit:
-            return text, source_language, self.target_language
-
-        if self.should_use_nllb_batch_translation():
-            batch_result = self.translate_text_with_batch(text, source_language)
-            if batch_result is not None:
-                return batch_result
 
         started_at = time.monotonic()
-        lock_wait_ms = 0.0
-        generate_ms = 0.0
-        try:
-            lock_started_at = time.monotonic()
-            self.translator_lock.acquire()
-            lock_wait_ms = (time.monotonic() - lock_started_at) * 1000.0
+        if not self.model_loaded or not self.translator or not self.translator_lock:
+            reason = self.model_load_failure_reason or "model_unavailable"
+            return self._finalize_translation_failure(
+                text,
+                source_language,
+                None,
+                reason,
+                reason,
+                0,
+                "none",
+                started_at,
+            )
+
+        if self.exit:
+            return self._finalize_translation_failure(
+                text,
+                source_language,
+                None,
+                "client_exit",
+                "client_exit",
+                0,
+                "none",
+                started_at,
+            )
+
+        if self.should_use_nllb_batch_translation() and self.batch_worker:
             try:
-                generate_started_at = time.monotonic()
-                translated_text, resolved_source_language, target_language = self.translator.translate(
+                return self.translate_text_with_batch(text, source_language)
+            except TimeoutError:
+                return self._translate_text_direct(
                     text,
                     source_language,
-                    self.target_language,
+                    max_attempts=1,
+                    initial_reason="translation_timeout",
+                    attempt_offset=1,
+                    started_at=started_at,
                 )
-                generate_ms = (time.monotonic() - generate_started_at) * 1000.0
-                if self.should_retry_nllb_residual_cjk(
-                    translated_text,
-                    resolved_source_language,
-                    target_language,
-                ):
-                    logging.warning(
-                        "[TRANSLATION_RESIDUAL_CJK_RETRY] uid=%s model=%s source_language=%s "
-                        "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
-                        self.client_uid,
-                        self.model_name,
-                        resolved_source_language,
-                        target_language,
-                        len(str(text or "")),
-                        len(str(translated_text or "")),
-                        str(text or "").strip()[:120],
-                        str(translated_text or "").strip()[:160],
-                    )
-                    retry_started_at = time.monotonic()
-                    try:
-                        retry_text, retry_source_language, retry_target_language = self.translator.translate(
-                            text,
-                            source_language,
-                            self.target_language,
-                        )
-                    except Exception as retry_error:
-                        logging.warning(
-                            "[TRANSLATION_RESIDUAL_CJK_RETRY_FAILED] uid=%s model=%s error=%s",
-                            self.client_uid,
-                            self.model_name,
-                            retry_error,
-                        )
-                        retry_text = translated_text
-                        retry_source_language = resolved_source_language
-                        retry_target_language = target_language
-                    generate_ms += (time.monotonic() - retry_started_at) * 1000.0
-                    translated_text = retry_text
-                    resolved_source_language = retry_source_language
-                    target_language = retry_target_language
-                    if self.should_retry_nllb_residual_cjk(
-                        translated_text,
-                        resolved_source_language,
-                        target_language,
-                    ):
-                        logging.warning(
-                            "[TRANSLATION_RESIDUAL_CJK_FAILED] uid=%s model=%s source_language=%s "
-                            "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
-                            self.client_uid,
-                            self.model_name,
-                            resolved_source_language,
-                            target_language,
-                            len(str(text or "")),
-                            len(str(translated_text or "")),
-                            str(text or "").strip()[:120],
-                            str(translated_text or "").strip()[:160],
-                        )
-                        self.pending_translation_warning = "residual_cjk"
-                        translated_text = f"{translated_text}{self._TRANSLATION_ERROR_SUFFIX}"
-            finally:
-                self.translator_lock.release()
-            translated_text = self.guard_translation_output(
-                text,
-                translated_text,
-                resolved_source_language,
-                target_language,
-            )
-            return translated_text, resolved_source_language, target_language
-        except Exception as e:
-            logging.error(f"Translation failed for text '{text}': {e}")
-            return text, source_language, self.target_language
-        finally:
-            elapsed_ms = (time.monotonic() - started_at) * 1000.0
-            logging.info(
-                "[TRANSLATION_LATENCY] uid=%s model=%s device=%s source_language=%s "
-                "source_len=%d lock_wait_ms=%.1f generate_ms=%.1f total_ms=%.1f "
-                "queue_size=%s source_preview=%r",
-                self.client_uid,
-                self.model_name,
-                self.translation_device,
-                source_language,
-                len(str(text or "")),
-                lock_wait_ms,
-                generate_ms,
-                elapsed_ms,
-                self.translation_queue_size(),
-                str(text or "").strip()[:80],
-            )
+
+        return self._translate_text_direct(text, source_language, started_at=started_at)
 
     def translation_queue_size(self):
         try:
@@ -950,6 +1096,78 @@ class ServeClientTranslation(ServeClientBase):
         if visible_count <= 0:
             return False
         return (cjk_count / visible_count) >= self._RESIDUAL_CJK_MAX_RATIO
+
+    @classmethod
+    def normalize_translation_comparison_text(cls, text):
+        normalized = unicodedata.normalize("NFKC", str(text or ""))
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized.strip(cls._TRANSLATION_COMPARISON_PUNCTUATION).casefold()
+
+    @staticmethod
+    def _is_proper_term_token(token):
+        token = str(token or "")
+        letters = [char for char in token if char.isalpha()]
+        uppercase_count = sum(char.isupper() for char in letters)
+        return any(char.isdigit() for char in token) or token.isupper() or uppercase_count >= 2
+
+    def _is_exempt_source_echo_term(self, text):
+        value = unicodedata.normalize("NFKC", str(text or ""))
+        value = re.sub(r"\s+", " ", value).strip()
+        value = value.strip(self._TRANSLATION_COMPARISON_PUNCTUATION)
+        if not value or self._count_cjk(value) or len(value) > self._SOURCE_ECHO_PROPER_TERM_MAX_CHARS:
+            return False
+
+        normalized = self.normalize_translation_comparison_text(value)
+        configured_terms = {
+            self.normalize_translation_comparison_text(term)
+            for term in self.translation_terms
+            if str(term or "").strip()
+        }
+        if normalized in configured_terms:
+            return True
+
+        proper_term_pattern = r"[A-Za-z0-9][A-Za-z0-9+#._/-]*(?:\s+[A-Za-z0-9][A-Za-z0-9+#._/-]*){0,3}"
+        if not re.fullmatch(proper_term_pattern, value):
+            return False
+        tokens = value.split()
+        return (
+            len(tokens) <= self._SOURCE_ECHO_PROPER_TERM_MAX_TOKENS
+            and all(self._is_proper_term_token(token) for token in tokens)
+        )
+
+    def translation_output_failure_reason(
+        self,
+        source_text,
+        translated_text,
+        source_language,
+        target_language,
+    ):
+        translated_text = str(translated_text or "")
+        if not translated_text.strip():
+            return "empty_output"
+
+        normalized_source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        normalized_target_language = HelsinkiZhEnTranslator.normalize_language(target_language) or "auto"
+        source_comparison = self.normalize_translation_comparison_text(source_text)
+        translated_comparison = self.normalize_translation_comparison_text(translated_text)
+        if (
+            normalized_source_language in ("zh", "en")
+            and normalized_target_language in ("zh", "en")
+            and normalized_source_language != normalized_target_language
+            and source_comparison
+            and source_comparison == translated_comparison
+            and not self._is_exempt_source_echo_term(source_text)
+        ):
+            return "source_echo"
+
+        if self.should_retry_nllb_residual_cjk(
+            translated_text,
+            normalized_source_language,
+            normalized_target_language,
+        ):
+            return "residual_cjk"
+
+        return self.translation_output_guard_reason(source_text, translated_text)
 
     @classmethod
     def _output_words(cls, text):
@@ -1001,24 +1219,26 @@ class ServeClientTranslation(ServeClientBase):
         source_language: Optional[str],
         target_language: Optional[str],
     ):
-        reason = self.translation_output_guard_reason(source_text, translated_text)
-        if not reason:
-            return translated_text
-
-        logging.warning(
-            "[TRANSLATION_OUTPUT_GUARD] uid=%s reason=%s model=%s source_language=%s "
-            "target_language=%s source_len=%d translated_len=%d source_preview=%r translated_preview=%r",
-            self.client_uid,
-            reason,
-            self.model_name,
+        reason = self.translation_output_failure_reason(
+            source_text,
+            translated_text,
             source_language,
             target_language,
-            len(str(source_text or "")),
-            len(str(translated_text or "")),
-            str(source_text or "").strip()[:120],
-            str(translated_text or "").strip()[:160],
         )
-        return source_text
+        if not reason:
+            return translated_text
+        failed_text, _, _ = self._finalize_translation_failure(
+            source_text,
+            source_language,
+            target_language,
+            reason,
+            reason,
+            1,
+            "guard",
+            time.monotonic(),
+            translated_text=translated_text,
+        )
+        return failed_text
 
     @staticmethod
     def normalize_translation_glossary(glossary):
@@ -1120,6 +1340,8 @@ class ServeClientTranslation(ServeClientBase):
             protected_text,
             source_language,
         )
+        if self.pending_translation_warning:
+            return translated_text, normalized_source, target_language
         restored_text = translated_text
         for index, (_, target) in enumerate(replacements):
             marker_pattern = self._glossary_marker_pattern(index)
@@ -1573,11 +1795,19 @@ class ServeClientTranslation(ServeClientBase):
             return time.monotonic() - self.translation_merge_started_at >= self.translation_merge_max_delay
         return False
 
+    def emit_translated_segment(self, translated_segment):
+        self.translated_segments.append(translated_segment)
+        segments_to_send = self.prepare_translated_segments()
+        self.send_translation_to_client(segments_to_send)
+
     def enqueue_translated_segment(self, translated_segment):
         if not self.translation_merge_enabled:
-            self.translated_segments.append(translated_segment)
-            segments_to_send = self.prepare_translated_segments()
-            self.send_translation_to_client(segments_to_send)
+            self.emit_translated_segment(translated_segment)
+            return
+
+        if translated_segment.get("translation_warning"):
+            self.flush_merge_buffer(force=True)
+            self.emit_translated_segment(translated_segment)
             return
 
         if self._should_split_merge_buffer_before(translated_segment):
@@ -1620,7 +1850,6 @@ class ServeClientTranslation(ServeClientBase):
         merged_segment = self.build_merged_translation_segment()
         self.translation_merge_buffer = []
         self.translation_merge_started_at = None
-        self.translated_segments.append(merged_segment)
         logging.info(
             "[TRANSLATION_MERGE_FLUSH] uid=%s items=%d text_len=%d start=%s end=%s",
             self.client_uid,
@@ -1629,8 +1858,7 @@ class ServeClientTranslation(ServeClientBase):
             merged_segment.get("start"),
             merged_segment.get("end"),
         )
-        segments_to_send = self.prepare_translated_segments()
-        self.send_translation_to_client(segments_to_send)
+        self.emit_translated_segment(merged_segment)
 
     def drain_translation_backlog(self, first_segment):
         queue_size = self.translation_queue_size()
@@ -1793,6 +2021,10 @@ class ServeClientTranslation(ServeClientBase):
             self.flush_translation_buffer(force=True)
         except Exception as e:
             logging.error(f"Failed to flush translation buffer during cleanup: {e}")
+        try:
+            self.flush_merge_buffer(force=True)
+        except Exception as e:
+            logging.error(f"Failed to flush translation merge buffer during cleanup: {e}")
         self.exit = True
 
         try:
@@ -1803,6 +2035,8 @@ class ServeClientTranslation(ServeClientBase):
         self.translated_segments.clear()
         self.translation_buffer.clear()
         self.translation_buffer_started_at = None
+        self.translation_merge_buffer.clear()
+        self.translation_merge_started_at = None
         self.last_translated_source_text = ""
         self.translator = None
         self.translator_lock = None

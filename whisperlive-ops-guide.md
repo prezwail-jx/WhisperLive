@@ -185,13 +185,17 @@ bash scripts/start_summary_llm_service.sh
 
 ## 7. 中控使用
 
-打开 `https://app.cmtbs.com:57890/admin.html`。“Admin API”输入框填写基础地址，不要附加 `/admin/clients`。统一入口通常填写：
+打开 `https://app.cmtbs.com:57890/admin.html`。“Admin API”输入框填写基础地址，不要附加 `/admin/clients`。双卡环境按用途填写：
 
-```text
-https://app.cmtbs.com:57890
-```
+| 用途 | Admin API 输入框 |
+| --- | --- |
+| 默认入口（当前转到 GPU0） | `https://app.cmtbs.com:57890` |
+| 显式查看 GPU0 | `https://app.cmtbs.com:57890/admin-gpu0` |
+| 查看 GPU1 | `https://app.cmtbs.com:57890/admin-gpu1` |
 
-逐节点排障时，可按生产 Nginx 配置填写 `/admin-gpu0` 或 `/admin-gpu1` 基础地址。
+中控会在输入值后自动拼接 `/admin/clients`、`/admin/hotwords`、`/admin/warmup/status` 等接口路径。一个中控页面一次只查看一个后端；切换 GPU 时先停止当前轮询，替换输入值，再点击“开始”。
+
+按当前生产 Nginx 配置，默认 `/admin/` 固定代理到 GPU0，不是双卡聚合服务。热词查看、服务预热、客户端断开和删除等操作只作用于当前输入地址对应的后端。两个后端未共享会议日志时，默认入口也无法看到 GPU1 独立保存的会议记录。
 
 中控支持：
 

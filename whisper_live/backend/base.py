@@ -99,6 +99,7 @@ class ServeClientBase(object):
         "哦",
         "啊",
         "Obrigado",
+        "按订阅 继续合発舞",
     }
     GRATITUDE_HALLUCINATION_PHRASES = {
         "thank you",

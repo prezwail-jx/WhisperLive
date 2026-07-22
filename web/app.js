@@ -1840,19 +1840,18 @@ function groupSegmentsForDisplay(segments) {
   segments.forEach((segment, index) => {
     const key = segmentGroupKey(segment, index);
     const previous = groups.at(-1);
-    if (previous && previous.group_key === key && segment.utterance_id) {
+    const segmentHasWarning = hasTranslationWarning(segment);
+    if (previous && previous.group_key === key && segment.utterance_id && !previous.has_translation_warning && !segmentHasWarning) {
       previous.text = joinDisplayText(previous.text, segment.text);
       previous.end = segment.end;
       previous.completed = previous.completed !== false && segment.completed !== false;
-      previous.translation_warning = previous.translation_warning || segment.translation_warning;
-      previous.has_translation_warning = previous.has_translation_warning || hasTranslationWarning(segment);
       return;
     }
     groups.push({
       ...segment,
       group_key: key,
       text: String(segment.text || "").trim(),
-      has_translation_warning: hasTranslationWarning(segment),
+      has_translation_warning: segmentHasWarning,
     });
   });
   return groups;
@@ -1927,8 +1926,10 @@ function areIndexesContiguous(indexes) {
 
 function interleavedTranslationKey(translation, sourceIndexes) {
   const sourceIds = translationSourceIds(translation);
-  if (sourceIds.length) return `translation-group:${sourceIds.join(",")}`;
-  return `translation-range:${Number(translation.start || 0).toFixed(3)}:${Number(translation.end || 0).toFixed(3)}:${sourceIndexes.join(",")}`;
+  const start = Number(translation.start || 0).toFixed(3);
+  const end = Number(translation.end || 0).toFixed(3);
+  if (sourceIds.length) return `translation-group:${sourceIds.join(",")}:${start}:${end}`;
+  return `translation-range:${start}:${end}:${sourceIndexes.join(",")}`;
 }
 
 function buildInterleavedCompletedRows(sources, translations) {
@@ -1937,14 +1938,14 @@ function buildInterleavedCompletedRows(sources, translations) {
   const unmatchedTranslations = [];
 
   translations.forEach((translation) => {
-    const indexes = matchedSourceIndexes(sources, translation)
-      .filter((index) => !consumedSourceIndexes.has(index));
+    const indexes = matchedSourceIndexes(sources, translation);
     if (!indexes.length || !areIndexesContiguous(indexes)) {
       unmatchedTranslations.push(translation);
       return;
     }
 
     const matchedSources = indexes.map((index) => sources[index]);
+    const repeatedSource = indexes.some((index) => consumedSourceIndexes.has(index));
     const sourceText = matchedSources
       .map((source) => String(source.text || "").trim())
       .filter(Boolean)
@@ -1953,7 +1954,7 @@ function buildInterleavedCompletedRows(sources, translations) {
     rows.push({
       key: interleavedTranslationKey(translation, indexes),
       start: Number(matchedSources[0]?.start ?? translation.start) || 0,
-      source: sourceText,
+      source: repeatedSource ? "（同一原文片段）" : sourceText,
       translation: translationDisplayText(translation.text),
       translationWarning: hasTranslationWarning(translation),
       pending: false,
@@ -1972,7 +1973,6 @@ function buildInterleavedCompletedRows(sources, translations) {
   });
 
   unmatchedTranslations.forEach((translation, index) => {
-    if (translationSourceIds(translation).length) return;
     rows.push({
       key: `translation:${translation.group_key || index}`,
       start: Number(translation.start) || 0,
