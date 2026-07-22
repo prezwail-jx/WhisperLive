@@ -474,7 +474,7 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
             server = TranscriptionServer()
             server.meeting_hotwords = MeetingHotwordStore(directory)
             server.default_hotwords = "Default"
-            options = {"uid": "client", "meeting_name": "会议A"}
+            options = {"uid": "client", "meeting_name": "会议A", "service_mode": "accurate"}
 
             server.apply_meeting_hotwords(options)
             server.apply_default_hotwords(options)
@@ -521,26 +521,30 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
         self.assertEqual(options["hotwords_source"], "client")
         self.assertEqual(options["hotwords_count"], 2)
 
-    def test_standard_mode_disables_asr_hotwords_but_preserves_translation_glossary(self):
+    def test_non_accurate_modes_disable_all_hotword_features(self):
         with tempfile.TemporaryDirectory() as directory:
             with open(os.path.join(directory, "会议A.txt"), "w", encoding="utf-8") as file:
                 file.write("WhisperLive\nOpenAI => 开放人工智能")
             server = TranscriptionServer()
             server.meeting_hotwords = MeetingHotwordStore(directory)
             server.default_hotwords = "Default"
-            options = {"uid": "client", "meeting_name": "会议A", "service_mode": "standard"}
+            for mode in ("standard", "conversation", "transcription"):
+                with self.subTest(mode=mode):
+                    options = {"uid": "client", "meeting_name": "会议A", "service_mode": mode}
 
-            server.apply_meeting_hotwords(options)
-            server.apply_default_hotwords(options)
+                    server.apply_meeting_hotwords(options)
+                    server.apply_default_hotwords(options)
 
-            self.assertNotIn("hotwords", options)
-            self.assertEqual(options["hotword_terms"], [])
-            self.assertEqual(options["hotwords_source"], "meeting")
-            self.assertFalse(options["hotwords_enabled"])
-            self.assertEqual(options["hotwords_disabled_reason"], "service_mode")
-            self.assertEqual(options["hotwords_original_count"], 1)
-            self.assertEqual(options["hotwords_count"], 0)
-            self.assertEqual(options["translation_glossary"], {"OpenAI": "开放人工智能"})
+                    self.assertNotIn("hotwords", options)
+                    self.assertEqual(options["hotword_terms"], [])
+                    self.assertEqual(options["hotwords_source"], "none")
+                    self.assertFalse(options["hotwords_enabled"])
+                    self.assertEqual(options["hotwords_disabled_reason"], "service_mode")
+                    self.assertEqual(options["hotwords_count"], 0)
+                    self.assertEqual(options["hotwords_file"], "")
+                    self.assertEqual(options["translation_glossary"], {})
+                    self.assertEqual(options["translation_glossary_count"], 0)
+                    self.assertEqual(options["translation_terms"], [])
 
     def test_missing_service_mode_disables_client_asr_hotwords(self):
         server = TranscriptionServer()
@@ -558,7 +562,8 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
         self.assertEqual(options["hotwords_source"], "client")
         self.assertFalse(options["hotwords_enabled"])
         self.assertEqual(options["hotwords_disabled_reason"], "service_mode")
-        self.assertEqual(options["translation_glossary"], {"OpenAI": "开放人工智能"})
+        self.assertEqual(options["translation_glossary"], {})
+        self.assertEqual(options["translation_glossary_count"], 0)
 
     def test_client_translation_only_upload_blocks_default_hotwords(self):
         server = TranscriptionServer()
@@ -575,7 +580,8 @@ class TestMeetingHotwordIntegration(unittest.TestCase):
         self.assertNotIn("hotwords", options)
         self.assertEqual(options["hotwords_source"], "client")
         self.assertEqual(options["hotwords_count"], 0)
-        self.assertEqual(options["translation_glossary"], {"OpenAI": "开放人工智能"})
+        self.assertEqual(options["translation_glossary"], {})
+        self.assertEqual(options["translation_glossary_count"], 0)
 
 
 class TestMeetingSummaryIntegration(unittest.TestCase):

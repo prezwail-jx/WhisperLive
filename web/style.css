@@ -288,6 +288,8 @@ body.drawer-open { overflow: hidden; }
 .summary-drawer .summary-fields .button-row { grid-template-columns: 1fr 1fr; }
 .hotword-upload-inline { display: grid; gap: 9px; padding: 10px; border: 1px dashed var(--line-strong); border-radius: 10px; background: rgba(0, 0, 0, .1); }
 .hotword-upload-inline input[type="file"] { min-height: 36px; padding: 8px; font-size: 11px; }
+.settings-card.hotword-disabled { opacity: .62; }
+.settings-card.hotword-disabled .hotword-upload-inline { border-color: var(--line); }
 .summary-template-inline { display: grid; gap: 8px; padding: 10px; border: 1px dashed var(--line-strong); border-radius: 10px; background: rgba(0, 0, 0, .1); }
 .inline-tool-heading { display: grid; gap: 3px; }
 .inline-tool-heading strong { color: var(--text); font-size: 12px; line-height: 1.25; }

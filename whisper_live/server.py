@@ -547,9 +547,29 @@ class TranscriptionServer:
             return
         self.disable_canonical_hotwords(options, canonical, source=source, filename=filename, locked=locked)
 
+    @classmethod
+    def disable_hotword_features(cls, options, canonical=None, source="none"):
+        cls.disable_canonical_hotwords(
+            options,
+            canonical,
+            source=source,
+            filename="",
+            locked=True,
+            reason="service_mode",
+        )
+        options["hotwords_disabled_reason"] = "service_mode"
+        options["translation_glossary"] = {}
+        options["translation_glossary_count"] = 0
+        options["translation_terms"] = []
+
     def apply_meeting_hotwords(self, options):
         has_client_hotwords = bool(options.get("hotwords") or options.get("hotword_terms"))
         has_client_glossary = bool(options.get("translation_glossary"))
+        if not self.asr_hotwords_enabled(options):
+            canonical = self.canonical_hotwords_from_options(options) if has_client_hotwords else None
+            source = "client" if has_client_hotwords or has_client_glossary else "none"
+            self.disable_hotword_features(options, canonical, source=source)
+            return
         if options.get("hotwords_locked") and (has_client_hotwords or has_client_glossary):
             canonical = self.canonical_hotwords_from_options(options) if has_client_hotwords else normalize_asr_hotwords(terms=[])
             self.apply_asr_hotword_policy(options, canonical, source="client", locked=True)

@@ -55,7 +55,7 @@ models/
 /model/
 .cache/
 third_party/
-docker-compose.local.yml
+docker-compose.local.yml/
 
 # Docker/image archives and generated docs
 *.tar

@@ -7,6 +7,8 @@ const elements = {
   hotwordFile: document.getElementById("hotwordFileInput"),
   clearHotwordFile: document.getElementById("clearHotwordFileButton"),
   hotwordStatus: document.getElementById("hotwordStatus"),
+  hotwordSettingsCard: document.getElementById("hotwordSettingsCard"),
+  hotwordModeHint: document.getElementById("hotwordModeHint"),
   language: document.getElementById("languageInput"),
   translationModeHint: document.getElementById("translationModeHint"),
   translationProvider: document.getElementById("translationProviderInput"),
@@ -576,7 +578,7 @@ function initializeDefaults() {
   setServiceMode(serviceMode, false);
   setDisplayMode(displayMode);
   updateMeetingTitle();
-  updateHotwordStatus("未上传热词");
+  updateHotwordControls();
   applyBackendLanguageDefault().catch(() => applyBackendLanguageFallback());
   loadTranslationModels(defaultTranslationProviderForMode(serviceMode)).catch(() => {});
   loadSummarySessions().catch(() => {});
@@ -623,6 +625,33 @@ function hotwordPromptFromText(text) {
 
 function updateHotwordStatus(text = "") {
   elements.hotwordStatus.textContent = text || "等待加载";
+}
+
+function uploadedHotwordStatusText() {
+  return lockedHotwords.filename
+    ? `${lockedHotwords.filename} · ${lockedHotwords.count} 个识别热词 · ${lockedHotwords.translationCount} 条固定翻译`
+    : "未上传热词";
+}
+
+function updateHotwordControls(forceConnectionLocked = false) {
+  const modeEnabled = serviceMode === "accurate";
+  const controlsDisabled = Boolean(forceConnectionLocked || !modeEnabled);
+  if (elements.hotwordFile) elements.hotwordFile.disabled = controlsDisabled;
+  if (elements.clearHotwordFile) elements.clearHotwordFile.disabled = controlsDisabled;
+  if (elements.hotwordSettingsCard) {
+    elements.hotwordSettingsCard.classList.toggle("hotword-disabled", !modeEnabled);
+    elements.hotwordSettingsCard.setAttribute("aria-disabled", String(!modeEnabled));
+  }
+  if (elements.hotwordModeHint) {
+    elements.hotwordModeHint.textContent = modeEnabled ? "本页上传，当次会议有效" : "仅高精同传可用";
+  }
+  if (modeEnabled) {
+    updateHotwordStatus(uploadedHotwordStatusText());
+  } else if (lockedHotwords.filename) {
+    updateHotwordStatus(`${lockedHotwords.filename} · 已保留，仅高精同传生效`);
+  } else {
+    updateHotwordStatus("仅高精同传可用");
+  }
 }
 
 function updateMeetingTitle() {
@@ -730,6 +759,7 @@ function updateTranslationControls(forceConnectionLocked = false) {
   }
   updateModeToolbar(forceConnectionLocked);
   updateDrawerTranslationStatus();
+  updateHotwordControls(forceConnectionLocked);
 }
 
 function normalizeLanguage(value) {
@@ -1487,17 +1517,13 @@ async function loadUploadedHotwords(file) {
     translationCount: parsed.translationCount,
     translationGlossary: parsed.translationGlossary,
   };
-  updateHotwordStatus(
-    filename
-      ? `${filename} · ${lockedHotwords.count} 个识别热词 · ${lockedHotwords.translationCount} 条固定翻译`
-      : "未上传热词"
-  );
+  updateHotwordControls();
 }
 
 function clearUploadedHotwords() {
   lockedHotwords = { hotwords: "", terms: [], filename: "", count: 0, translationCount: 0, translationGlossary: {} };
   if (elements.hotwordFile) elements.hotwordFile.value = "";
-  updateHotwordStatus("未上传热词");
+  updateHotwordControls();
 }
 
 function setStatus(text, state = "idle") {
@@ -2166,7 +2192,7 @@ function sendConfig(event) {
   const translationMode = autoDetectMode ? "mixed_interpretation" : "standard";
   const translationProvider = selectedTranslationProviderConfig();
   const meetingName = elements.meetingName.value.trim();
-  const asrHotwordsEnabled = serviceMode === "accurate";
+  const hotwordsEnabled = serviceMode === "accurate";
   const payload = {
     uid,
     session_id: currentSessionId,
@@ -2176,13 +2202,13 @@ function sendConfig(event) {
     client_instance_id: clientInstanceId || getClientInstanceId(),
     client_name: meetingName || `Client-${uid.slice(0, 8)}`,
     meeting_name: meetingName,
-    hotwords: asrHotwordsEnabled ? lockedHotwords.hotwords || null : null,
-    hotword_terms: asrHotwordsEnabled ? lockedHotwords.terms || [] : [],
-    hotwords_count: asrHotwordsEnabled ? lockedHotwords.count || 0 : 0,
-    hotwords_file: lockedHotwords.filename || "",
+    hotwords: hotwordsEnabled ? lockedHotwords.hotwords || null : null,
+    hotword_terms: hotwordsEnabled ? lockedHotwords.terms || [] : [],
+    hotwords_count: hotwordsEnabled ? lockedHotwords.count || 0 : 0,
+    hotwords_file: hotwordsEnabled ? lockedHotwords.filename || "" : "",
     hotwords_locked: true,
-    translation_glossary: lockedHotwords.translationGlossary || {},
-    translation_glossary_count: lockedHotwords.translationCount || 0,
+    translation_glossary: hotwordsEnabled ? lockedHotwords.translationGlossary || {} : {},
+    translation_glossary_count: hotwordsEnabled ? lockedHotwords.translationCount || 0 : 0,
     backend: currentServerBackend || DEFAULT_BACKEND,
     language: selectedLanguage,
     task: "transcribe",
@@ -2311,11 +2337,7 @@ async function startCapture() {
     window.localStorage.setItem("whisperlive_meeting_name", meetingName);
   }
   updateMeetingTitle();
-  updateHotwordStatus(
-    lockedHotwords.filename
-      ? `${lockedHotwords.filename} · ${lockedHotwords.count} 个识别热词 · ${lockedHotwords.translationCount} 条固定翻译`
-      : "未上传热词"
-  );
+  updateHotwordControls(true);
 
   mediaStream = await requestMicrophoneStream();
 
