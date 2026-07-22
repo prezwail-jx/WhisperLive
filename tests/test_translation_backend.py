@@ -408,6 +408,59 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
             "length_ratio",
         )
 
+    def test_guard_allows_longer_zh_to_en_expansion(self):
+        client = self.make_client()
+        source = "这是一个关于农业机器人在复杂农场环境中稳定运行和协作部署的正常说明"
+        translated = (
+            "This is a normal explanation about agricultural robots operating stably "
+            "in complex farm environments while supporting practical collaboration "
+            "and deployment across different production scenarios."
+        )
+
+        guarded = client.guard_translation_output(source, translated, "zh", "en")
+
+        self.assertEqual(guarded, translated)
+        self.assertIsNone(client.pending_translation_warning)
+        self.assertIsNone(
+            ServeClientTranslation.translation_output_guard_reason(source, translated, "zh", "en")
+        )
+
+    def test_guard_allows_zh_to_en_under_six_times_after_240_chars(self):
+        source = "这是一个用于验证中译英长译文比例阈值的正常中文段落，内容足够长以避免误判，并且描述农业机器人部署、供应链协作和农场测试场景。"
+        translated = (
+            "This is a deliberately longer but still normal English translation used to verify "
+            "the language-aware length ratio threshold for Chinese to English output. It should "
+            "remain acceptable because the text is below six times the source length even though "
+            "it is longer than two hundred and forty characters in total."
+        )
+
+        self.assertGreaterEqual(len(translated), ServeClientTranslation._OUTPUT_GUARD_ZH_EN_MIN_LONG_OUTPUT_CHARS)
+        self.assertLessEqual(
+            len(translated),
+            len(source) * ServeClientTranslation._OUTPUT_GUARD_ZH_EN_MAX_LENGTH_RATIO,
+        )
+        self.assertIsNone(
+            ServeClientTranslation.translation_output_guard_reason(source, translated, "zh", "en")
+        )
+
+    def test_guard_rejects_zh_to_en_above_language_specific_ratio(self):
+        source = "短中文输入"
+        translated = "extended English output " * 12
+
+        self.assertEqual(
+            ServeClientTranslation.translation_output_guard_reason(source, translated, "zh", "en"),
+            "length_ratio",
+        )
+
+    def test_guard_keeps_default_length_ratio_for_en_to_zh(self):
+        source = "short English"
+        translated = "中文" * 90
+
+        self.assertEqual(
+            ServeClientTranslation.translation_output_guard_reason(source, translated, "en", "zh"),
+            "length_ratio",
+        )
+
     def test_guard_rejects_repetitive_output(self):
         client = self.make_client()
         translated = "yes " * 30

@@ -552,6 +552,8 @@ class ServeClientTranslation(ServeClientBase):
     _SHORT_ZH_BUFFER_WAIT_SECONDS = 3.5
     _OUTPUT_GUARD_MAX_LENGTH_RATIO = 4.0
     _OUTPUT_GUARD_MIN_LONG_OUTPUT_CHARS = 160
+    _OUTPUT_GUARD_ZH_EN_MAX_LENGTH_RATIO = 6.0
+    _OUTPUT_GUARD_ZH_EN_MIN_LONG_OUTPUT_CHARS = 240
     _OUTPUT_GUARD_UNDERSCORE_RUN = 20
     _OUTPUT_GUARD_MIN_REPEAT_WORDS = 24
     _OUTPUT_GUARD_MAX_UNIQUE_WORD_RATIO = 0.28
@@ -1167,7 +1169,12 @@ class ServeClientTranslation(ServeClientBase):
         ):
             return "residual_cjk"
 
-        return self.translation_output_guard_reason(source_text, translated_text)
+        return self.translation_output_guard_reason(
+            source_text,
+            translated_text,
+            normalized_source_language,
+            normalized_target_language,
+        )
 
     @classmethod
     def _output_words(cls, text):
@@ -1191,15 +1198,23 @@ class ServeClientTranslation(ServeClientBase):
         return False
 
     @classmethod
-    def translation_output_guard_reason(cls, source_text, translated_text):
+    def translation_output_guard_reason(cls, source_text, translated_text, source_language=None, target_language=None):
         source_text = str(source_text or "")
         translated_text = str(translated_text or "")
         if re.search(rf"_{{{cls._OUTPUT_GUARD_UNDERSCORE_RUN},}}", translated_text):
             return "underscore_run"
 
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language)
+        min_long_output_chars = cls._OUTPUT_GUARD_MIN_LONG_OUTPUT_CHARS
+        max_length_ratio = cls._OUTPUT_GUARD_MAX_LENGTH_RATIO
+        if source_language == "zh" and target_language == "en":
+            min_long_output_chars = cls._OUTPUT_GUARD_ZH_EN_MIN_LONG_OUTPUT_CHARS
+            max_length_ratio = cls._OUTPUT_GUARD_ZH_EN_MAX_LENGTH_RATIO
+
         if (
-            len(translated_text) >= cls._OUTPUT_GUARD_MIN_LONG_OUTPUT_CHARS
-            and len(translated_text) > max(len(source_text), 1) * cls._OUTPUT_GUARD_MAX_LENGTH_RATIO
+            len(translated_text) >= min_long_output_chars
+            and len(translated_text) > max(len(source_text), 1) * max_length_ratio
         ):
             return "length_ratio"
 

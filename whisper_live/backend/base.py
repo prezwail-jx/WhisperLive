@@ -150,6 +150,7 @@ class ServeClientBase(object):
     MAX_SHORT_GRATITUDE_SECONDS = 0.5
     HOTWORD_DOMINANCE_THRESHOLD = 0.80
     HOTWORD_NO_SPEECH_THRESHOLD = 0.35
+    HOTWORD_REPEAT_THRESHOLD = 3
     MIN_HOTWORD_MATCH_CHARS = 2
 
     def __init__(
@@ -626,13 +627,35 @@ class ServeClientBase(object):
         covered = self._merged_coverage_length(spans)
         return covered / len(compact_text) if covered else 0.0
 
-    def _log_hotword_hallucination_drop(self, stage, reason, text, dominance, no_speech_prob, rms, rms_threshold):
+    def _max_repeated_hotword_count(self, text):
+        if not self.hotword_match_terms:
+            return 0
+        compact_text = self._compact_hotword_text(text)
+        if not compact_text:
+            return 0
+        max_count = 0
+        for term in self.hotword_match_terms:
+            if not term:
+                continue
+            count = 0
+            start = 0
+            while True:
+                index = compact_text.find(term, start)
+                if index < 0:
+                    break
+                count += 1
+                start = index + len(term)
+            max_count = max(max_count, count)
+        return max_count
+
+    def _log_hotword_hallucination_drop(self, stage, reason, text, dominance, no_speech_prob, rms, rms_threshold, repeat_count=0):
         logging.info(
-            "[HOTWORD_HALLUCINATION_DROP] uid=%s stage=%s reason=%s dominance=%.3f no_speech=%.3f rms=%s rms_threshold=%.6f text=%r",
+            "[HOTWORD_HALLUCINATION_DROP] uid=%s stage=%s reason=%s dominance=%.3f repeat_count=%d no_speech=%.3f rms=%s rms_threshold=%.6f text=%r",
             self.client_uid,
             stage,
             reason,
             dominance,
+            repeat_count,
             no_speech_prob,
             "none" if rms is None else f"{rms:.6f}",
             rms_threshold,
@@ -645,6 +668,20 @@ class ServeClientBase(object):
             return None
 
         no_speech_prob = float(self.get_segment_no_speech_prob(segment) or 0.0)
+        repeat_count = self._max_repeated_hotword_count(text)
+        if repeat_count >= self.HOTWORD_REPEAT_THRESHOLD:
+            self._log_hotword_hallucination_drop(
+                stage,
+                "repeated_hotword",
+                text,
+                dominance,
+                no_speech_prob,
+                None,
+                self.min_segment_rms,
+                repeat_count=repeat_count,
+            )
+            return "repeated_hotword"
+
         no_speech_threshold = min(float(self.no_speech_thresh), self.HOTWORD_NO_SPEECH_THRESHOLD)
         if no_speech_prob >= no_speech_threshold:
             self._log_hotword_hallucination_drop(
@@ -655,6 +692,7 @@ class ServeClientBase(object):
                 no_speech_prob,
                 None,
                 self.min_segment_rms,
+                repeat_count=repeat_count,
             )
             return "no_speech"
 
@@ -668,6 +706,7 @@ class ServeClientBase(object):
                 no_speech_prob,
                 rms,
                 self.min_segment_rms,
+                repeat_count=repeat_count,
             )
             return "low_energy"
         return None

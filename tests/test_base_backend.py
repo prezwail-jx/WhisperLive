@@ -598,6 +598,63 @@ class TestUpdateSegments(unittest.TestCase):
         self.assertIn("HOTWORD_HALLUCINATION_DROP", output)
         self.assertIn("reason=low_energy", output)
 
+    def test_repeated_hotword_completed_segment_is_dropped_with_strong_audio(self):
+        q = queue.Queue()
+        self.client.translation_queue = q
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["国创中心"])
+        self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
+        segs = [
+            self._make_segment(0.0, 1.0, "国创中心 国创中心 国创中心", no_speech_prob=0.10),
+            self._make_segment(1.0, 2.0, " next", no_speech_prob=0.0),
+        ]
+
+        with self.assertLogs(level="INFO") as logs:
+            last = self.client.update_segments(segs, duration=3.0)
+
+        output = "\n".join(logs.output)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertTrue(q.empty())
+        self.assertIsNotNone(last)
+        self.assertIn("next", last["text"])
+        self.assertIn("reason=repeated_hotword", output)
+        self.assertIn("repeat_count=3", output)
+
+    def test_repeated_hotword_partial_segment_waits_for_more_audio(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["国创中心"])
+        self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
+        seg = self._make_segment(0.0, 1.0, "国创中心 国创中心 国创中心", no_speech_prob=0.10)
+
+        last = self.client.update_segments([seg], duration=2.0)
+
+        self.assertIsNone(last)
+        self.assertEqual(self.client.current_out, "")
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertEqual(self.client.timestamp_offset, 0.0)
+
+    def test_hotword_repeated_twice_is_retained(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["国创中心"])
+        segs = [
+            self._make_segment(0.0, 1.0, "国创中心 国创中心", no_speech_prob=0.10),
+            self._make_segment(1.0, 2.0, " next", no_speech_prob=0.0),
+        ]
+
+        self.client.update_segments(segs, duration=3.0)
+
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertIn("国创中心", self.client.transcript[0]["text"])
+
+    def test_different_hotwords_do_not_accumulate_as_repetition(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["国创中心", "NICE", "长三角"])
+        segs = [
+            self._make_segment(0.0, 1.0, "国创中心 NICE 长三角", no_speech_prob=0.10),
+            self._make_segment(1.0, 2.0, " next", no_speech_prob=0.0),
+        ]
+
+        self.client.update_segments(segs, duration=3.0)
+
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertIn("国创中心", self.client.transcript[0]["text"])
+
     def test_timestamp_offset_advances(self):
         segs = [
             self._make_segment(0.0, 1.0, " first"),
