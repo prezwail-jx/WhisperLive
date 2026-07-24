@@ -136,6 +136,21 @@ python run_server.py \
 
 新增启动参数时，应同步检查 `run_server.py` 与 `whisper_live/server.py` 中的 `TranscriptionServer.run()`。
 
+### 手动启动 Web 网关
+
+后端容器启动后，可在项目根目录运行：
+
+```bash
+docker run --rm -it \
+  --name whisperlive-web-gateway \
+  --network whisperlive-net \
+  --add-host=host.docker.internal:host-gateway \
+  -p 9093:80 \
+  -v "$PWD/web:/usr/share/nginx/html:ro" \
+  -v "$PWD/deploy/nginx/whisperlive.conf:/etc/nginx/conf.d/default.conf:ro" \
+  nginx:alpine
+```
+
 ## 4. 可选 FunASR 后端
 
 FunASR 仍受项目支持，但不是当前 5090×2 生产主线。需要提前准备：
