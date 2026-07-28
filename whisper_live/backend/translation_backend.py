@@ -560,7 +560,7 @@ class ServeClientTranslation(ServeClientBase):
     _OUTPUT_GUARD_MAX_REPEATED_BIGRAM_COUNT = 8
     _BACKLOG_DROP_THRESHOLD = 5
     _BACKLOG_KEEP_LATEST = 3
-    _REALTIME_MAX_EN_CHARS = 180
+    _REALTIME_MAX_EN_CHARS = 280
     _REALTIME_MAX_ZH_CHARS = 120
     _RESIDUAL_CJK_MIN_CHARS = 8
     _RESIDUAL_CJK_MAX_RATIO = 0.25
@@ -595,6 +595,7 @@ class ServeClientTranslation(ServeClientBase):
         translation_min_chars=12,
         translation_max_chars=220,
         translation_max_wait_seconds=3.0,
+        translation_context_seconds=0.0,
         translation_sentence_endings="。！？.!?",
         translation_glossary=None,
         translation_terms=None,
@@ -626,9 +627,10 @@ class ServeClientTranslation(ServeClientBase):
         self.en_zh_model_path = en_zh_model_path
         self.nllb_model_path = nllb_model_path
         self.translation_device = HelsinkiZhEnTranslator.normalize_device_name(translation_device)
-        self.translation_min_chars = translation_min_chars
-        self.translation_max_chars = translation_max_chars
-        self.translation_max_wait_seconds = translation_max_wait_seconds
+        self.translation_min_chars = max(0, int(translation_min_chars or 0))
+        self.translation_max_chars = max(1, int(translation_max_chars or 220))
+        self.translation_max_wait_seconds = max(0.1, float(translation_max_wait_seconds or 3.0))
+        self.translation_context_seconds = max(0.0, float(translation_context_seconds or 0.0))
         self.translation_sentence_endings = translation_sentence_endings
         self.translation_glossary = self.normalize_translation_glossary(translation_glossary)
         self._translation_glossary_sources_cache = {}
@@ -654,6 +656,17 @@ class ServeClientTranslation(ServeClientBase):
         self.batch_worker = None
         self.model_loaded = False
         self.model_load_failure_reason = None
+        logging.info(
+            "[TRANSLATION_CONFIG] uid=%s model=%s mode=%s context_seconds=%.2f "
+            "max_wait=%.2f max_chars=%d merge=%s",
+            self.client_uid,
+            self.model_name,
+            self.translation_mode,
+            self.translation_context_seconds,
+            self.translation_max_wait_seconds,
+            self.translation_max_chars,
+            self.translation_merge_enabled,
+        )
         self.load_translation_model()
 
     def get_translation_cache_key(self):
@@ -1477,6 +1490,17 @@ class ServeClientTranslation(ServeClientBase):
             return min(self.translation_max_chars, self._REALTIME_MAX_EN_CHARS)
         return self.translation_max_chars
 
+    def translation_buffer_audio_seconds(self):
+        total = 0.0
+        for segment in self.translation_buffer:
+            try:
+                start = float(segment.get("start"))
+                end = float(segment.get("end"))
+            except (TypeError, ValueError):
+                continue
+            total += max(0.0, end - start)
+        return total
+
     @classmethod
     def _split_english_sentence_chunks(cls, text):
         parts = []
@@ -1606,15 +1630,13 @@ class ServeClientTranslation(ServeClientBase):
         if self.translation_buffer_started_at is not None:
             elapsed = time.monotonic() - self.translation_buffer_started_at
         source_language = self.get_buffer_source_language()
-        if (
-            self.translation_mode == "mixed_interpretation"
-            and source_language == "zh"
-            and self._count_cjk(text) < self._SHORT_ZH_BUFFER_CJK_CHARS
-            and elapsed < self._SHORT_ZH_BUFFER_WAIT_SECONDS
-        ):
-            return None
         if text.endswith(tuple(self.translation_sentence_endings)):
             return "sentence_end"
+        if (
+            self.translation_context_seconds > 0
+            and self.translation_buffer_audio_seconds() >= self.translation_context_seconds
+        ):
+            return "context_seconds"
         if (
             source_language == "en"
             and self.english_text_ends_incomplete(text)
@@ -1624,6 +1646,13 @@ class ServeClientTranslation(ServeClientBase):
             return None
         if len(text) >= self.realtime_max_source_chars(source_language):
             return "max_chars"
+        if (
+            self.translation_mode == "mixed_interpretation"
+            and source_language == "zh"
+            and self._count_cjk(text) < self._SHORT_ZH_BUFFER_CJK_CHARS
+            and elapsed < min(self._SHORT_ZH_BUFFER_WAIT_SECONDS, self.translation_max_wait_seconds)
+        ):
+            return None
         if (
             self.translation_buffer_started_at is not None
             and elapsed >= self.translation_max_wait_seconds

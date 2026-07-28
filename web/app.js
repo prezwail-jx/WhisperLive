@@ -104,6 +104,7 @@ let sourceSegments = [];
 let translatedSegments = [];
 const sourceSegmentStore = new Map();
 const translationSegmentStore = new Map();
+const translationRevealStates = new Map();
 const translatedSourceIds = new Set();
 let sourceClearedBefore = null;
 let translationClearedBefore = null;
@@ -145,6 +146,9 @@ const DEFAULT_SERVICE_MODE = "standard";
 const SERVICE_MODES = ["standard", "accurate", "conversation", "transcription"];
 const TRANSLATION_ERROR_SUFFIX = "（翻译出错）";
 const MAX_SESSION_SEGMENTS = 500;
+const TRANSLATION_REVEAL_MIN_MS = 300;
+const TRANSLATION_REVEAL_MAX_MS = 700;
+const TRANSLATION_REVEAL_MODES = new Set(["standard", "accurate"]);
 const DEFAULT_CAPTION_STYLE = {
   sourceFontSize: 20,
   sourceFontColor: "#f4f7f5",
@@ -215,6 +219,31 @@ function syncWebSocketUrlForMode(mode = serviceMode) {
 
 function translationDeviceForMode(mode = serviceMode) {
   return mode === "accurate" ? "cuda:1" : "cpu";
+}
+
+function translationRuntimeConfigForMode(mode = serviceMode) {
+  if (mode === "accurate") {
+    return {
+      translationContextSeconds: 5.0,
+      translationMaxWaitSeconds: 2.0,
+      translationMaxChars: 240,
+      translationMergeEnabled: false,
+    };
+  }
+  if (mode === "standard") {
+    return {
+      translationContextSeconds: 0.0,
+      translationMaxWaitSeconds: 3.0,
+      translationMaxChars: 180,
+      translationMergeEnabled: false,
+    };
+  }
+  return {
+    translationContextSeconds: 0.0,
+    translationMaxWaitSeconds: 3.0,
+    translationMaxChars: 180,
+    translationMergeEnabled: true,
+  };
 }
 
 function clampCaptionFontSize(value, fallback) {
@@ -1713,6 +1742,81 @@ function translationSegmentStoreKey(segment) {
   return `translation:${sourceIds}:${segmentTimeValue(segment?.start).toFixed(3)}:${segmentTimeValue(segment?.end).toFixed(3)}`;
 }
 
+function shouldRevealTranslations() {
+  return TRANSLATION_REVEAL_MODES.has(serviceMode) && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+}
+
+function translationRevealUnits(text, language) {
+  const value = String(text || "");
+  if (!value) return [];
+  const isChinese = normalizeLanguage(language) === "zh" || /[\u3400-\u4dbf\u4e00-\u9fff]/.test(value);
+  if (isChinese) return [...value];
+  return value.match(/\S+\s*/g) || [value];
+}
+
+function translationRevealTextForKey(key, fallbackText) {
+  const state = translationRevealStates.get(key);
+  if (!state) return fallbackText;
+  if (state.completed) return state.fullText;
+  return state.visibleText || state.fullText;
+}
+
+function cancelTranslationReveal(key) {
+  const state = translationRevealStates.get(key);
+  if (state?.timer) clearTimeout(state.timer);
+  translationRevealStates.delete(key);
+}
+
+function cancelAllTranslationReveals() {
+  Array.from(translationRevealStates.keys()).forEach(cancelTranslationReveal);
+}
+
+function pruneTranslationReveals() {
+  translationRevealStates.forEach((_state, key) => {
+    if (!translationSegmentStore.has(key)) cancelTranslationReveal(key);
+  });
+}
+
+function scheduleTranslationReveal(key) {
+  const state = translationRevealStates.get(key);
+  if (!state || state.completed) return;
+  const elapsed = performance.now() - state.startedAt;
+  const progress = Math.min(1, elapsed / state.duration);
+  const visibleCount = Math.max(1, Math.ceil(state.units.length * progress));
+  state.visibleText = state.units.slice(0, visibleCount).join("");
+  if (progress >= 1 || visibleCount >= state.units.length) {
+    state.visibleText = state.fullText;
+    state.completed = true;
+    state.timer = null;
+    renderTranscriptViews();
+    return;
+  }
+  renderTranscriptViews();
+  state.timer = setTimeout(() => scheduleTranslationReveal(key), 50);
+}
+
+function startTranslationReveal(key, segment) {
+  if (!shouldRevealTranslations() || hasTranslationWarning(segment)) return;
+  const fullText = translationDisplayText(segment?.text);
+  const units = translationRevealUnits(fullText, segment?.target_language);
+  if (units.length <= 1) return;
+  cancelTranslationReveal(key);
+  const duration = Math.min(
+    TRANSLATION_REVEAL_MAX_MS,
+    Math.max(TRANSLATION_REVEAL_MIN_MS, units.length * 35),
+  );
+  translationRevealStates.set(key, {
+    fullText,
+    visibleText: units[0],
+    units,
+    startedAt: performance.now(),
+    duration,
+    completed: false,
+    timer: null,
+  });
+  scheduleTranslationReveal(key);
+}
+
 function sortSegmentsByTime(segments) {
   return segments.sort((left, right) => {
     const startDelta = segmentTimeValue(left.start) - segmentTimeValue(right.start);
@@ -1777,9 +1881,18 @@ function mergeTranslationSnapshot(segments) {
         ? segment.source_utterance_ids.slice()
         : segment.source_utterance_ids,
     };
-    translationSegmentStore.set(translationSegmentStoreKey(copy), copy);
+    const key = translationSegmentStoreKey(copy);
+    const previous = translationSegmentStore.get(key);
+    copy._translation_key = key;
+    translationSegmentStore.set(key, copy);
+    if (!previous) {
+      startTranslationReveal(key, copy);
+    } else if (translationDisplayText(previous.text) !== translationDisplayText(copy.text)) {
+      startTranslationReveal(key, copy);
+    }
   });
   pruneSegmentStore(translationSegmentStore);
+  pruneTranslationReveals();
   syncSegmentArrays();
 }
 
@@ -1789,6 +1902,7 @@ function clearSourceSegmentState() {
 }
 
 function clearTranslationSegmentState() {
+  cancelAllTranslationReveals();
   translationSegmentStore.clear();
   translatedSourceIds.clear();
   translatedSegments = [];
@@ -1801,6 +1915,8 @@ function clearTranscriptState() {
 }
 
 function segmentGroupKey(segment, index) {
+  const translationKey = String(segment?._translation_key || "").trim();
+  if (translationKey) return translationKey;
   const utteranceId = String(segment?.utterance_id || "").trim();
   if (utteranceId) return `utterance:${utteranceId}`;
   return `segment:${index}:${segment?.start ?? ""}:${segment?.end ?? ""}`;
@@ -1866,20 +1982,45 @@ function renderSegments(target, segments, emptyText) {
     target.dataset.lastGroupKey = "";
     return;
   }
+  const isTranslationPane = target === elements.translationText;
   const previousLastGroupKey = target.dataset.lastGroupKey || "";
   const nextLastGroupKey = displaySegments.at(-1)?.group_key || "";
   target.classList.remove("muted");
-  target.innerHTML = "";
-  const fragment = document.createDocumentFragment();
-  displaySegments.forEach((segment) => {
-    const paragraph = document.createElement("p");
-    paragraph.className = `segment${segment.completed ? "" : " incomplete"}`;
-    const isTranslationPane = target === elements.translationText;
-    paragraph.textContent = isTranslationPane ? translationDisplayText(segment.text) : String(segment.text || "").trim();
-    if (isTranslationPane && segment.has_translation_warning) appendTranslationWarningMark(paragraph);
-    fragment.appendChild(paragraph);
-  });
-  target.appendChild(fragment);
+  if (!isTranslationPane) {
+    target.innerHTML = "";
+    const fragment = document.createDocumentFragment();
+    displaySegments.forEach((segment) => {
+      const paragraph = document.createElement("p");
+      paragraph.className = `segment${segment.completed ? "" : " incomplete"}`;
+      paragraph.textContent = String(segment.text || "").trim();
+      fragment.appendChild(paragraph);
+    });
+    target.appendChild(fragment);
+  } else {
+    if (!target.querySelector(".segment[data-segment-key]")) {
+      target.replaceChildren();
+    }
+    const existing = new Map(
+      Array.from(target.querySelectorAll(".segment[data-segment-key]"))
+        .map((node) => [node.dataset.segmentKey, node])
+    );
+    const visibleKeys = new Set(displaySegments.map((segment) => segment.group_key));
+    existing.forEach((node, key) => {
+      if (!visibleKeys.has(key)) node.remove();
+    });
+    displaySegments.forEach((segment) => {
+      let paragraph = existing.get(segment.group_key);
+      if (!paragraph) {
+        paragraph = document.createElement("p");
+        paragraph.dataset.segmentKey = segment.group_key;
+      }
+      paragraph.className = `segment${segment.completed ? "" : " incomplete"}`;
+      const fullText = translationDisplayText(segment.text);
+      paragraph.textContent = translationRevealTextForKey(segment.group_key, fullText);
+      if (segment.has_translation_warning) appendTranslationWarningMark(paragraph);
+      target.appendChild(paragraph);
+    });
+  }
   if (previousLastGroupKey !== nextLastGroupKey || target.scrollTop + target.clientHeight >= target.scrollHeight - 24) {
     target.scrollTop = target.scrollHeight;
   }
@@ -1954,6 +2095,7 @@ function buildInterleavedCompletedRows(sources, translations) {
     indexes.forEach((index) => consumedSourceIndexes.add(index));
     rows.push({
       key: interleavedTranslationKey(translation, indexes),
+      translationKey: translation.group_key,
       start: Number(matchedSources[0]?.start ?? translation.start) || 0,
       source: repeatedSource ? "（同一原文片段）" : sourceText,
       translation: translationDisplayText(translation.text),
@@ -1976,6 +2118,7 @@ function buildInterleavedCompletedRows(sources, translations) {
   unmatchedTranslations.forEach((translation, index) => {
     rows.push({
       key: `translation:${translation.group_key || index}`,
+      translationKey: translation.group_key,
       start: Number(translation.start) || 0,
       source: "（原文片段处理中）",
       translation: translationDisplayText(translation.text),
@@ -1999,7 +2142,9 @@ function updateInterleavedRow(container, row) {
   }
   source.textContent = row.source || "（原文片段处理中）";
   translation.className = `interleaved-translation${row.pending ? " pending" : ""}`;
-  translation.textContent = row.translation;
+  translation.textContent = row.pending
+    ? row.translation
+    : translationRevealTextForKey(row.translationKey || row.key, row.translation);
   if (row.translationWarning) appendTranslationWarningMark(translation);
 }
 
@@ -2192,6 +2337,7 @@ function sendConfig(event) {
   const selectedTranslationTarget = translationEnabled ? selectedFaceToFaceTarget() : "auto";
   const translationMode = autoDetectMode ? "mixed_interpretation" : "standard";
   const translationProvider = selectedTranslationProviderConfig();
+  const translationRuntimeConfig = translationRuntimeConfigForMode(serviceMode);
   const meetingName = elements.meetingName.value.trim();
   const hotwordsEnabled = serviceMode === "accurate";
   const payload = {
@@ -2235,7 +2381,10 @@ function sendConfig(event) {
     translation_mode: translationMode,
     translation_provider: translationProvider.provider,
     translation_device: translationDeviceForMode(serviceMode),
-    translation_merge_enabled: true,
+    translation_max_chars: translationRuntimeConfig.translationMaxChars,
+    translation_max_wait_seconds: translationRuntimeConfig.translationMaxWaitSeconds,
+    translation_context_seconds: translationRuntimeConfig.translationContextSeconds,
+    translation_merge_enabled: translationRuntimeConfig.translationMergeEnabled,
     translation_merge_max_chars: 240,
     translation_merge_max_delay: 1.8,
     translation_merge_gap_seconds: 1.0,

@@ -914,6 +914,119 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         segment = payload["translated_segments"][0]
         self.assertEqual(segment["text"], "translated:明天见")
 
+    def test_context_seconds_flushes_after_accumulated_audio_duration(self):
+        client = self.make_client(
+            translation_context_seconds=5.0,
+            translation_max_wait_seconds=60.0,
+            translation_max_chars=240,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "2.000",
+            "text": "we discuss mining",
+            "completed": True,
+            "language": "en",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "3.000",
+            "end": "6.000",
+            "text": "research centers",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "translated:we discuss mining research centers")
+
+    def test_context_seconds_does_not_count_silent_gaps(self):
+        client = self.make_client(
+            translation_context_seconds=5.0,
+            translation_max_wait_seconds=60.0,
+            translation_max_chars=240,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "2.000",
+            "text": "we discuss mining",
+            "completed": True,
+            "language": "en",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "20.000",
+            "end": "22.000",
+            "text": "research centers",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        client.websocket.send.assert_not_called()
+        self.assertEqual(len(client.translation_buffer), 2)
+
+    def test_single_long_segment_context_seconds_flushes_immediately(self):
+        client = self.make_client(
+            translation_context_seconds=5.0,
+            translation_max_wait_seconds=60.0,
+            translation_max_chars=240,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "6.000",
+            "text": "we discuss mining research centers",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "translated:we discuss mining research centers")
+
+    def test_english_max_chars_can_be_raised_to_240(self):
+        client = self.make_client(
+            translation_max_chars=240,
+            translation_max_wait_seconds=60.0,
+        )
+        text = "a" * 239
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": text,
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+        client.websocket.send.assert_not_called()
+
+        client.add_segment_to_translation_buffer({
+            "start": "1.000",
+            "end": "2.000",
+            "text": "b",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], f"translated:{text} b")
+
+    def test_sentence_ending_flushes_before_short_chinese_wait(self):
+        client = self.make_client(
+            translation_mode="mixed_interpretation",
+            translation_max_wait_seconds=2.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "好的。",
+            "completed": True,
+            "language": "zh",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "translated:好的。")
+
     def test_exit_signal_flushes_remaining_buffer(self):
         client = self.make_client()
         client.translation_queue.put({

@@ -405,6 +405,34 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
 
     @mock.patch("whisper_live.server.threading.Thread")
     @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    @mock.patch("whisper_live.backend.translation_backend.ServeClientTranslation")
+    def test_initialize_client_passes_translation_buffer_config(
+        self, mock_translation_client, mock_faster_client, mock_thread
+    ):
+        mock_faster_client.return_value = MagicMock()
+        mock_translation_client.return_value = MagicMock()
+        options = {
+            "uid": "test",
+            "language": "en",
+            "task": "transcribe",
+            "model": "small",
+            "enable_translation": True,
+            "translation_max_chars": 240,
+            "translation_max_wait_seconds": 2.0,
+            "translation_context_seconds": 5.0,
+            "translation_merge_enabled": False,
+        }
+
+        self.server.initialize_client(MagicMock(), options, None, None, False)
+
+        kwargs = mock_translation_client.call_args.kwargs
+        self.assertEqual(kwargs["translation_max_chars"], 240)
+        self.assertEqual(kwargs["translation_max_wait_seconds"], 2.0)
+        self.assertEqual(kwargs["translation_context_seconds"], 5.0)
+        self.assertFalse(kwargs["translation_merge_enabled"])
+
+    @mock.patch("whisper_live.server.threading.Thread")
+    @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
     def test_initialize_client_passes_hotword_terms_to_faster_whisper(self, mock_faster_client, mock_thread):
         mock_faster_client.return_value = MagicMock()
         options = {
