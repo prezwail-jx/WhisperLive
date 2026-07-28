@@ -257,6 +257,57 @@ class TestMeetingLogStore(unittest.TestCase):
             self.assertEqual(restored_info["latest_version"], 2)
             self.assertEqual(len(restored.list_sessions()["sessions"]), 1)
 
+    def test_shared_directory_discovers_external_session_without_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            admin_store = MeetingLogStore(directory, refresh_interval_seconds=0)
+            worker_store = MeetingLogStore(directory, refresh_interval_seconds=0)
+
+            worker_store.start_session({"uid": "uid-1", "session_id": "gpu1-session", "meeting_name": "GPU1会议"})
+            worker_store.append_segments("gpu1-session", "source", [
+                {"start": "0.000", "end": "1.000", "text": "来自GPU1的日志", "completed": True},
+            ])
+            worker_store.finish_session("gpu1-session")
+
+            sessions = admin_store.list_sessions()["sessions"]
+            self.assertEqual([item["session_id"] for item in sessions], ["gpu1-session"])
+            self.assertEqual(sessions[0]["status"], "finished")
+            self.assertEqual(sessions[0]["source_count"], 1)
+
+            log_file = admin_store.get_session_file("gpu1-session", "md")
+            self.assertIsNotNone(log_file)
+            with open(log_file[0], "r", encoding="utf-8") as file:
+                self.assertIn("来自GPU1的日志", file.read())
+
+    def test_shared_directory_external_session_supports_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            admin_store = MeetingLogStore(directory, refresh_interval_seconds=0)
+            worker_store = MeetingLogStore(directory, refresh_interval_seconds=0)
+
+            worker_store.start_session({"uid": "uid-1", "session_id": "gpu1-summary", "meeting_name": "GPU1会议"})
+            worker_store.append_segments("gpu1-summary", "source", [
+                {"start": "0.000", "end": "1.000", "text": "需要总结的内容", "completed": True},
+            ])
+            worker_store.finish_session("gpu1-summary")
+
+            info = admin_store.write_summary("gpu1-summary", {
+                "session_id": "gpu1-summary",
+                "meeting_name": "GPU1会议",
+                "generated_at": "2026-07-28T10:00:00",
+                "overview": "总结内容",
+                "topics": ["跨卡日志"],
+                "decisions": [],
+                "action_items": [],
+                "risks": [],
+                "follow_ups": [],
+            })
+
+            self.assertTrue(info["has_summary"])
+            self.assertEqual(info["latest_version"], 1)
+            summary_file = admin_store.get_summary_file("gpu1-summary", "md")
+            self.assertIsNotNone(summary_file)
+            with open(summary_file[0], "r", encoding="utf-8") as file:
+                self.assertIn("总结内容", file.read())
+
     def test_session_can_be_interrupted_and_resumed_without_overwriting_segments(self):
         with tempfile.TemporaryDirectory() as directory:
             store = MeetingLogStore(directory)

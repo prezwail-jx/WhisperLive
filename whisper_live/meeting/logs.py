@@ -29,21 +29,35 @@ from .transcript import (
 class MeetingLogStore:
     UNSAFE_FILENAME_CHARS = set('/\\:*?"<>|')
 
-    def __init__(self, directory="logs"):
+    def __init__(self, directory="logs", refresh_interval_seconds=0.5):
         self.directory = directory or "logs"
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.sessions = {}
+        self.local_session_ids = set()
+        self.session_file_mtimes = {}
+        self.refresh_interval_seconds = max(0.0, float(refresh_interval_seconds))
+        self.last_refresh_at = 0.0
         os.makedirs(self.directory, exist_ok=True)
-        self._load_existing_sessions()
+        self._load_existing_sessions(force=True)
 
-    def _load_existing_sessions(self):
+    def _load_existing_sessions(self, force=False):
         loaded = 0
         for root, directories, filenames in os.walk(self.directory):
             directories[:] = [name for name in directories if not name.endswith("-summaries")]
             for filename in filenames:
-                if not filename.endswith(".json") or filename.endswith("-summary.json"):
+                if not filename.endswith(".json"):
                     continue
+                if filename.endswith("-summary.json"):
+                    base_name = filename[: -len("-summary.json")] + ".json"
+                    if os.path.exists(os.path.join(root, base_name)):
+                        continue
                 json_path = os.path.join(root, filename)
+                try:
+                    mtime = os.path.getmtime(json_path)
+                except OSError:
+                    continue
+                if not force and self.session_file_mtimes.get(json_path) == mtime:
+                    continue
                 try:
                     with open(json_path, "r", encoding="utf-8") as file:
                         payload = json.load(file)
@@ -56,7 +70,8 @@ class MeetingLogStore:
                 normalize_transcript(payload)
                 session_id = str(payload["session_id"])
                 current = self.sessions.get(session_id)
-                if current and str(current["payload"].get("updated_at") or "") >= str(payload.get("updated_at") or ""):
+                if current and session_id in self.local_session_ids and current["payload"].get("status") == SESSION_ACTIVE:
+                    self.session_file_mtimes[json_path] = mtime
                     continue
                 stem, _ext = os.path.splitext(json_path)
                 md_path = f"{stem}.md"
@@ -73,9 +88,18 @@ class MeetingLogStore:
                     "json_filename": filename,
                     "md_filename": os.path.basename(md_path),
                 }
+                self.session_file_mtimes[json_path] = mtime
                 loaded += 1
         if loaded:
-            logging.info("Restored %d meeting log sessions from %s", loaded, self.directory)
+            logging.debug("Refreshed %d meeting log sessions from %s", loaded, self.directory)
+
+    def refresh_sessions(self, force=False):
+        now = time.time()
+        with self.lock:
+            if not force and now - self.last_refresh_at < self.refresh_interval_seconds:
+                return
+            self.last_refresh_at = now
+            self._load_existing_sessions(force=force)
 
     @classmethod
     def safe_name(cls, value):
@@ -168,12 +192,14 @@ class MeetingLogStore:
             raise ValueError("session_id is required")
         directory, _stem, json_path, md_path = self.session_paths(payload)
         with self.lock:
+            self.refresh_sessions(force=True)
             os.makedirs(directory, exist_ok=True)
             if session_id in self.sessions:
                 raise ValueError("session_id already exists; use resume_session")
             record = {"payload": payload, "source_keys": set(), "translation_keys": set(), "json_path": json_path, "md_path": md_path,
                       "json_filename": os.path.basename(json_path), "md_filename": os.path.basename(md_path)}
             self.sessions[session_id] = record
+            self.local_session_ids.add(session_id)
             self._write_record(record)
         return self.session_info(session_id)
 
@@ -182,6 +208,7 @@ class MeetingLogStore:
         if not session_id:
             raise ValueError("session_id is required")
         with self.lock:
+            self.refresh_sessions(force=True)
             record = self.sessions.get(session_id)
             if not record:
                 raise KeyError("meeting log session not found")
@@ -197,6 +224,7 @@ class MeetingLogStore:
             payload["updated_at"] = now
             payload["resumed_at"] = now
             payload["connection_count"] = int(payload.get("connection_count") or 1) + 1
+            self.local_session_ids.add(session_id)
             payload["timeline_offset_seconds"] = round(offset, 3)
             if last_time:
                 payload.setdefault("audio_gaps", []).append({
@@ -211,6 +239,7 @@ class MeetingLogStore:
         if not session_id:
             return None
         with self.lock:
+            self.refresh_sessions(force=True)
             record = self.sessions.get(session_id)
             if not record:
                 return None
@@ -255,6 +284,7 @@ class MeetingLogStore:
         if not session_id:
             return None
         with self.lock:
+            self.refresh_sessions(force=True)
             record = self.sessions.get(session_id)
             if not record:
                 return None
@@ -269,11 +299,13 @@ class MeetingLogStore:
         return json.loads(json.dumps(payload, ensure_ascii=False))
 
     def get_session_payload(self, session_id):
+        self.refresh_sessions()
         with self.lock:
             record = self.sessions.get(session_id)
             return self._clone_payload(record["payload"]) if record else None
 
     def get_transcript(self, session_id):
+        self.refresh_sessions()
         with self.lock:
             record = self.sessions.get(session_id)
             return self._clone_payload(transcript_view(record["payload"])) if record else None
@@ -295,6 +327,7 @@ class MeetingLogStore:
         return self._clone_payload(transcript_view(payload))
 
     def update_transcript_segment(self, session_id, segment_id, text, speaker_id, expected_revision):
+        self.refresh_sessions()
         with self.lock:
             record = self.sessions.get(session_id)
             if not record:
@@ -309,6 +342,7 @@ class MeetingLogStore:
             return self._clone_payload(transcript_view(record["payload"]))
 
     def add_transcript_speaker(self, session_id, name, expected_revision):
+        self.refresh_sessions()
         with self.lock:
             record = self.sessions.get(session_id)
             if not record:
@@ -318,6 +352,7 @@ class MeetingLogStore:
             return self._save_transcript_change(record)
 
     def rename_transcript_speaker(self, session_id, speaker_id, name, expected_revision):
+        self.refresh_sessions()
         with self.lock:
             record = self.sessions.get(session_id)
             if not record:
@@ -332,6 +367,7 @@ class MeetingLogStore:
             return self._clone_payload(transcript_view(record["payload"]))
 
     def merge_transcript_speakers(self, session_id, source_id, target_id, expected_revision):
+        self.refresh_sessions()
         with self.lock:
             record = self.sessions.get(session_id)
             if not record:
@@ -414,41 +450,44 @@ class MeetingLogStore:
         return self._version_entries(record)
 
     def session_info(self, session_id):
-        record = self.sessions.get(session_id)
-        if not record:
-            return None
-        summary = self.summary_info(session_id)
-        return {
-            "session_id": session_id,
-            "meeting_name": record["payload"].get("meeting_name") or record["payload"].get("client_name") or "",
-            "created_at": record["payload"].get("created_at"),
-            "updated_at": record["payload"].get("updated_at"),
-            "json_path": record["json_path"],
-            "md_path": record["md_path"],
-            "json_filename": record["json_filename"],
-            "md_filename": record["md_filename"],
-            "summary_json_path": summary["json_path"],
-            "summary_md_path": summary["md_path"],
-            "summary_json_filename": summary["json_filename"],
-            "summary_md_filename": summary["md_filename"],
-            "has_summary": summary["has_summary"],
-            "latest_summary_version": summary["latest_version"],
-            "source_count": len(record["payload"].get("source_segments", [])),
-            "translation_count": len(record["payload"].get("translation_segments", [])),
-            "status": record["payload"].get("status"),
-            "connection_count": record["payload"].get("connection_count") or 1,
-            "timeline_offset_seconds": record["payload"].get("timeline_offset_seconds") or 0.0,
-            "interrupted_at": record["payload"].get("interrupted_at"),
-            "resumed_at": record["payload"].get("resumed_at"),
-            "audio_gaps": list(record["payload"].get("audio_gaps") or []),
-            "transcript_revision": int(record["payload"].get("transcript_revision") or 0),
-            "translation_stale": bool(record["payload"].get("translation_stale")),
-            "summary_stale": bool(record["payload"].get("summary_stale")),
-        }
+        self.refresh_sessions()
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                return None
+            summary = self.summary_info(session_id)
+            return {
+                "session_id": session_id,
+                "meeting_name": record["payload"].get("meeting_name") or record["payload"].get("client_name") or "",
+                "created_at": record["payload"].get("created_at"),
+                "updated_at": record["payload"].get("updated_at"),
+                "json_path": record["json_path"],
+                "md_path": record["md_path"],
+                "json_filename": record["json_filename"],
+                "md_filename": record["md_filename"],
+                "summary_json_path": summary["json_path"],
+                "summary_md_path": summary["md_path"],
+                "summary_json_filename": summary["json_filename"],
+                "summary_md_filename": summary["md_filename"],
+                "has_summary": summary["has_summary"],
+                "latest_summary_version": summary["latest_version"],
+                "source_count": len(record["payload"].get("source_segments", [])),
+                "translation_count": len(record["payload"].get("translation_segments", [])),
+                "status": record["payload"].get("status"),
+                "connection_count": record["payload"].get("connection_count") or 1,
+                "timeline_offset_seconds": record["payload"].get("timeline_offset_seconds") or 0.0,
+                "interrupted_at": record["payload"].get("interrupted_at"),
+                "resumed_at": record["payload"].get("resumed_at"),
+                "audio_gaps": list(record["payload"].get("audio_gaps") or []),
+                "transcript_revision": int(record["payload"].get("transcript_revision") or 0),
+                "translation_stale": bool(record["payload"].get("translation_stale")),
+                "summary_stale": bool(record["payload"].get("summary_stale")),
+            }
 
     def list_sessions(self):
+        self.refresh_sessions()
         with self.lock:
-            sessions = [self.session_info(session_id) for session_id in self.sessions]
+            sessions = [self.session_info(session_id) for session_id in list(self.sessions)]
         sessions = [item for item in sessions if item]
         sessions.sort(key=lambda item: item.get("created_at") or "", reverse=True)
         return {"sessions": sessions}
@@ -456,6 +495,7 @@ class MeetingLogStore:
     def get_session_file(self, session_id, file_format="md", layout="sections"):
         file_format = str(file_format or "md").lower()
         layout = str(layout or "sections").lower()
+        self.refresh_sessions(force=True)
         with self.lock:
             record = self.sessions.get(session_id)
             if not record:
@@ -478,6 +518,7 @@ class MeetingLogStore:
             return md_path, "text/markdown; charset=utf-8", md_filename
 
     def write_summary(self, session_id, summary):
+        self.refresh_sessions(force=True)
         with self.lock:
             record = self.sessions.get(session_id)
             if not record:
@@ -502,28 +543,31 @@ class MeetingLogStore:
         return self.summary_info(session_id)
 
     def summary_info(self, session_id):
-        record = self.sessions.get(session_id)
-        if not record:
-            return None
-        summary_json, summary_md = self.summary_paths_for_record(record)
-        versions = self._version_entries(record)
-        latest = versions[-1] if versions else None
-        return {
-            "session_id": session_id,
-            "json_path": summary_json,
-            "md_path": summary_md,
-            "json_filename": os.path.basename(summary_json),
-            "md_filename": os.path.basename(summary_md),
-            "has_summary": os.path.isfile(summary_json) and os.path.isfile(summary_md),
-            "latest_version": latest["version"] if latest else None,
-            "latest_template": latest["template"] if latest else None,
-            "transcript_revision": int(record["payload"].get("transcript_revision") or 0),
-            "summary_stale": bool(record["payload"].get("summary_stale")),
-            "versions": versions,
-        }
+        self.refresh_sessions()
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if not record:
+                return None
+            summary_json, summary_md = self.summary_paths_for_record(record)
+            versions = self._version_entries(record)
+            latest = versions[-1] if versions else None
+            return {
+                "session_id": session_id,
+                "json_path": summary_json,
+                "md_path": summary_md,
+                "json_filename": os.path.basename(summary_json),
+                "md_filename": os.path.basename(summary_md),
+                "has_summary": os.path.isfile(summary_json) and os.path.isfile(summary_md),
+                "latest_version": latest["version"] if latest else None,
+                "latest_template": latest["template"] if latest else None,
+                "transcript_revision": int(record["payload"].get("transcript_revision") or 0),
+                "summary_stale": bool(record["payload"].get("summary_stale")),
+                "versions": versions,
+            }
 
     def get_summary_file(self, session_id, file_format="md", version=None):
         file_format = str(file_format or "md").lower()
+        self.refresh_sessions(force=True)
         with self.lock:
             record = self.sessions.get(session_id)
             if not record:
@@ -560,10 +604,12 @@ class MeetingLogStore:
 
     def _write_record(self, record):
         payload = record["payload"]
-        with open(record["json_path"], "w", encoding="utf-8") as file:
-            json.dump(payload, file, ensure_ascii=False, indent=2); file.write("\n")
-        with open(record["md_path"], "w", encoding="utf-8") as file:
-            file.write(self.render_markdown(payload))
+        self._atomic_write(record["json_path"], json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        self._atomic_write(record["md_path"], self.render_markdown(payload))
+        try:
+            self.session_file_mtimes[record["json_path"]] = os.path.getmtime(record["json_path"])
+        except OSError:
+            pass
 
     @staticmethod
     def render_markdown(payload, layout="sections"):

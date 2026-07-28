@@ -1559,10 +1559,11 @@ function filenameFromContentDisposition(value, fallback) {
 }
 
 async function exportMeetingLog(format = "md", layout = "sections") {
-  if (!currentSessionId) throw new Error("当前没有可导出的后端日志 session");
+  const sessionId = selectedSummarySessionId || currentSessionId;
+  if (!sessionId) throw new Error("请先选择一个会议日志");
   const normalizedFormat = format === "docx" ? "docx" : "md";
   const normalizedLayout = layout === "interleaved" ? "interleaved" : "sections";
-  const response = await fetch(meetingLogDownloadUrl(currentSessionId, normalizedFormat, normalizedLayout), { cache: "no-store" });
+  const response = await fetch(meetingLogDownloadUrl(sessionId, normalizedFormat, normalizedLayout), { cache: "no-store" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const blob = await response.blob();
   const filenamePrefix = safeExportFilenamePrefix((currentConfig && (currentConfig.meeting_name || currentConfig.client_name)) || elements.meetingName.value.trim());
@@ -1574,7 +1575,7 @@ async function exportMeetingLog(format = "md", layout = "sections") {
     setToolStatus("中英穿插会议日志 DOCX 已下载。", "success");
   } else {
     setStatus(normalizedFormat === "docx" ? "日志 DOCX 已下载" : "后端日志已下载", "ready");
-    setToolStatus(normalizedFormat === "docx" ? "当前会议日志 DOCX 已下载。" : "当前会议日志已下载。", "success");
+    setToolStatus(normalizedFormat === "docx" ? "会议日志 DOCX 已下载。" : "会议日志已下载。", "success");
   }
 }
 

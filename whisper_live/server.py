@@ -1041,6 +1041,8 @@ class TranscriptionServer:
             return None
 
     def generate_meeting_summary(self, session_id, template="auto", custom_template_id=None):
+        if hasattr(self.meeting_logs, "refresh_sessions"):
+            self.meeting_logs.refresh_sessions(force=True)
         info = self.meeting_logs.session_info(session_id)
         if not info:
             raise KeyError("meeting log session not found")
