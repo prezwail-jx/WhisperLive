@@ -16,7 +16,7 @@ class HelsinkiZhEnTranslator:
     """Local zh<->en translator backed by two Marian/Helsinki models."""
 
     SUPPORTED_TARGETS = {"auto", "zh", "en"}
-    MAX_NEW_TOKENS = 96
+    MAX_NEW_TOKENS = 128
     ENGLISH_TERM_PATTERN = re.compile(
         r"(?<![A-Za-z0-9])"
         r"(?:[A-Za-z][A-Za-z0-9+#._/-]*"
@@ -290,7 +290,7 @@ class HelsinkiZhEnTranslator:
             generated_tokens = model.generate(
                 **encoded_input,
                 max_new_tokens=self.MAX_NEW_TOKENS,
-                num_beams=1,
+                num_beams=3,
             )
         output = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
         translated_text = output[0] if output else text
@@ -382,7 +382,7 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
                 **encoded_input,
                 forced_bos_token_id=forced_bos_token_id,
                 max_new_tokens=self.MAX_NEW_TOKENS,
-                num_beams=1,
+                num_beams=3,
             )
         output = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
         translated_text = output[0] if output else text
@@ -443,7 +443,7 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
                     **encoded_input,
                     forced_bos_token_id=forced_bos_token_id,
                     max_new_tokens=self.MAX_NEW_TOKENS,
-                    num_beams=1,
+                    num_beams=3,
                 )
             outputs = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
             for entry, translated_text in zip(group, outputs):

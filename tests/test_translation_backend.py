@@ -155,8 +155,8 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
         self.assertEqual(translated, "translated")
         self.assertEqual(source_language, "en")
         self.assertEqual(target_language, "zh")
-        self.assertEqual(model.last_generate_kwargs["max_new_tokens"], HelsinkiZhEnTranslator.MAX_NEW_TOKENS)
-        self.assertEqual(model.last_generate_kwargs["num_beams"], 1)
+        self.assertEqual(model.last_generate_kwargs["max_new_tokens"], 128)
+        self.assertEqual(model.last_generate_kwargs["num_beams"], 3)
 
     def test_nllb_generate_uses_realtime_length_limit(self):
         translator = NLLBTranslator()
@@ -172,8 +172,8 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
         self.assertEqual(translated, "translated")
         self.assertEqual(source_language, "en")
         self.assertEqual(target_language, "zh")
-        self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], HelsinkiZhEnTranslator.MAX_NEW_TOKENS)
-        self.assertEqual(translator.model.last_generate_kwargs["num_beams"], 1)
+        self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], 128)
+        self.assertEqual(translator.model.last_generate_kwargs["num_beams"], 3)
         self.assertEqual(translator.model.last_generate_kwargs["forced_bos_token_id"], 2)
 
     def test_pure_chinese_has_no_terms_to_protect(self):
