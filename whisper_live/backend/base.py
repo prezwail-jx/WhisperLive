@@ -81,6 +81,7 @@ class ServeClientBase(object):
         "aha",
         "eh",
         "优优独播剧场——YoYo Television Series Exclusive优优独播剧场",
+        "优优独播剧场——YoYo Television Series Exclusive",
         "erm",
         "hello",
         "hi",
