@@ -1621,7 +1621,7 @@ class TranscriptionServer:
             summary_timeout=600,
             summary_ready_timeout=300,
             summary_max_chars_per_chunk=4000,
-            summary_idle_shutdown_seconds=600,
+            summary_idle_shutdown_seconds=60,
             summary_templates_dir="config/summary_templates",
             segment_post_processor=None):
         """
@@ -2200,27 +2200,30 @@ class TranscriptionServer:
         logging.info(f"Admin API available at http://0.0.0.0:{rest_port}/admin/clients")
 
         # Original WebSocket server (always supported)
-        with serve(
-            functools.partial(
-                self.recv_audio,
-                backend=BackendType(backend),
-                faster_whisper_custom_model_path=faster_whisper_custom_model_path,
-                whisper_tensorrt_path=whisper_tensorrt_path,
-                funasr_model=funasr_model,
-                funasr_mode=funasr_mode,
-                funasr_punc_model=funasr_punc_model,
-                funasr_vad_model=funasr_vad_model,
-                funasr_final_model=funasr_final_model,
-                funasr_final_device=funasr_final_device,
-                funasr_final_refine=funasr_final_refine,
-                funasr_device=funasr_device,
-                trt_multilingual=trt_multilingual,
-                trt_py_session=trt_py_session,
-            ),
-            host,
-            port
-        ) as server:
-            server.serve_forever()
+        try:
+            with serve(
+                functools.partial(
+                    self.recv_audio,
+                    backend=BackendType(backend),
+                    faster_whisper_custom_model_path=faster_whisper_custom_model_path,
+                    whisper_tensorrt_path=whisper_tensorrt_path,
+                    funasr_model=funasr_model,
+                    funasr_mode=funasr_mode,
+                    funasr_punc_model=funasr_punc_model,
+                    funasr_vad_model=funasr_vad_model,
+                    funasr_final_model=funasr_final_model,
+                    funasr_final_device=funasr_final_device,
+                    funasr_final_refine=funasr_final_refine,
+                    funasr_device=funasr_device,
+                    trt_multilingual=trt_multilingual,
+                    trt_py_session=trt_py_session,
+                ),
+                host,
+                port
+            ) as server:
+                server.serve_forever()
+        finally:
+            self.meeting_summary.close()
 
     def voice_activity(self, websocket, frame_np):
         """

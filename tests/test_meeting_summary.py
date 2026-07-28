@@ -9,6 +9,54 @@ from whisper_live.meeting import MeetingLogStore, MeetingSummaryService, Summary
 
 
 class TestMeetingSummaryService(unittest.TestCase):
+    def test_idle_shutdown_defaults_to_60_seconds_and_allows_disabling(self):
+        self.assertEqual(MeetingSummaryService().idle_shutdown_seconds, 60)
+        self.assertEqual(
+            MeetingSummaryService(idle_shutdown_seconds=0).idle_shutdown_seconds,
+            0,
+        )
+
+    def test_operation_schedules_shutdown_only_after_last_concurrent_request(self):
+        service = MeetingSummaryService(startup_command="")
+        service._begin_operation()
+        service._begin_operation()
+        with mock.patch.object(service, "schedule_idle_shutdown") as schedule:
+            service._end_operation()
+            schedule.assert_not_called()
+            service._end_operation()
+            schedule.assert_called_once_with()
+
+    def test_generate_schedules_shutdown_when_generation_fails(self):
+        service = MeetingSummaryService(startup_command="")
+        payload = {
+            "source_segments": [{"start": 0, "end": 1, "text": "测试原文"}],
+        }
+        with mock.patch.object(service, "ensure_ready"), mock.patch.object(
+            service, "generate_staged", side_effect=RuntimeError("generation failed")
+        ), mock.patch.object(service, "schedule_idle_shutdown") as schedule:
+            with self.assertRaisesRegex(RuntimeError, "generation failed"):
+                service.generate(payload)
+        schedule.assert_called_once_with()
+
+    def test_stale_idle_timer_does_not_stop_service(self):
+        service = MeetingSummaryService(startup_command="")
+        process = mock.MagicMock()
+        service.process = process
+        service.started_by_us = True
+        service.shutdown_generation = 2
+        with mock.patch.object(service, "_terminate_process") as terminate:
+            service.shutdown_if_idle(generation=1)
+        terminate.assert_not_called()
+        self.assertIs(service.process, process)
+
+    def test_close_leaves_external_service_running(self):
+        service = MeetingSummaryService(startup_command="")
+        service.process = mock.MagicMock()
+        service.started_by_us = False
+        with mock.patch.object(service, "_terminate_process") as terminate:
+            service.close()
+        terminate.assert_called_once_with(None)
+
     def test_extract_meeting_text_prefers_source_segments(self):
         service = MeetingSummaryService(startup_command="")
         payload = {"source_segments": [{"start": "0", "end": "1", "text": "hello"}], "translation_segments": [{"text": "你好"}]}

@@ -166,7 +166,7 @@ if __name__ == "__main__":
     parser.add_argument('--summary_timeout', type=int, default=600)
     parser.add_argument('--summary_ready_timeout', type=int, default=300)
     parser.add_argument('--summary_max_chars_per_chunk', type=int, default=8000)
-    parser.add_argument('--summary_idle_shutdown_seconds', type=int, default=600)
+    parser.add_argument('--summary_idle_shutdown_seconds', type=int, default=60)
     parser.add_argument('--summary_templates_dir', default='config/summary_templates')
     args = parser.parse_args()
 
