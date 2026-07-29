@@ -1759,7 +1759,7 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
             "translated:we really feel that we are at the frontier.",
         )
 
-    def test_incomplete_english_flushes_with_warning_after_incomplete_timeout(self):
+    def test_incomplete_english_flushes_without_warning_after_incomplete_timeout(self):
         client = self.make_client(
             translation_context_seconds=5.0,
             translation_max_wait_seconds=2.0,
@@ -1778,7 +1778,7 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         payload = self.get_last_payload(client)
         segment = payload["translated_segments"][0]
         self.assertEqual(segment["text"], "translated:I want really")
-        self.assertEqual(segment["translation_warning"], "undertranslation")
+        self.assertNotIn("translation_warning", segment)
 
     def test_complete_english_sentence_flushes_immediately(self):
         client = self.make_client(translation_max_wait_seconds=3.0)

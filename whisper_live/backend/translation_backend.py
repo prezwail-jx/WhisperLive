@@ -3022,13 +3022,19 @@ class ServeClientTranslation(ServeClientBase):
             self.pending_translation_warning = None
             return
         translation_warning = self.pending_translation_warning
-        if (
-            not translation_warning
-            and flush_reason == "incomplete_timeout"
-            and source_language == "en"
-            and HelsinkiZhEnTranslator.normalize_language(target_language) == "zh"
-        ):
-            translation_warning = "undertranslation"
+        if flush_reason == "incomplete_timeout":
+            logging.info(
+                "[TRANSLATION_INCOMPLETE_TIMEOUT] uid=%s model=%s source_language=%s target_language=%s "
+                "source_len=%d translated_len=%d start=%s end=%s",
+                self.client_uid,
+                self.model_name,
+                source_language,
+                target_language,
+                len(original_text),
+                len(str(translated_text or "")),
+                buffered_segments[0].get("start"),
+                buffered_segments[-1].get("end"),
+            )
         self.pending_translation_warning = None
         self.record_readability_context(
             original_text,
