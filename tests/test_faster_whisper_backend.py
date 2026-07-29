@@ -49,10 +49,12 @@ class TestServeClientFasterWhisperSingleModelInit(unittest.TestCase):
             model=None,
             client_uid="client",
             max_pending_audio_seconds=15.0,
+            sentence_completion_min_seconds=4.0,
             min_transcription_chunk_seconds=2.5,
         )
 
         self.assertAlmostEqual(client.max_pending_audio_seconds, 15.0)
+        self.assertAlmostEqual(client.sentence_completion_min_seconds, 4.0)
         self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
 
     @mock.patch("whisper_live.backend.faster_whisper_backend.threading.Thread", DummyThread)

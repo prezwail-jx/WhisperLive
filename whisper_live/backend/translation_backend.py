@@ -580,6 +580,11 @@ class ServeClientTranslation(ServeClientBase):
     _TRANSLATION_UNAVAILABLE_TEXT = "翻译暂不可用"
     _SOURCE_ECHO_PROPER_TERM_MAX_CHARS = 32
     _SOURCE_ECHO_PROPER_TERM_MAX_TOKENS = 4
+    _UNDERTRANSLATION_MIN_EN_WORDS = 16
+    _UNDERTRANSLATION_TARGET_UNITS_PERCENT = 120
+    _UNDERTRANSLATION_REPAIR_SECONDS = 3.0
+    _UNDERTRANSLATION_MAX_CHUNKS = 3
+    _UNDERTRANSLATION_MIN_CHUNK_WORDS = 6
     _TRANSLATION_COMPARISON_PUNCTUATION = " \t\r\n.,!?;:，。！？；：\"'“”‘’()[]{}"
     _INCOMPLETE_EN_ENDING_WORDS = {
         "a", "an", "and", "are", "as", "at", "because", "but", "by", "for",
@@ -1917,7 +1922,8 @@ class ServeClientTranslation(ServeClientBase):
             or not self.readability_context_eligible(source_language)
             or not self.readability_context_snapshot(source_language)
         ):
-            return self._translate_text_current_only(text, source_language)
+            translated_text, resolved_source, target_language = self._translate_text_current_only(text, source_language)
+            return self.repair_en_zh_undertranslation_if_needed(text, translated_text, resolved_source, target_language)
 
         translated_text, resolved_source, target_language, failure_reason, used_context = (
             self.translate_with_readability_context_once(
@@ -1955,8 +1961,8 @@ class ServeClientTranslation(ServeClientBase):
                         len(str(text or "")),
                         len(str(direct_text or "")),
                     )
-                return direct_text, direct_source, direct_target
-            return translated_text, resolved_source, target_language
+                return self.repair_en_zh_undertranslation_if_needed(text, direct_text, direct_source, direct_target)
+            return self.repair_en_zh_undertranslation_if_needed(text, translated_text, resolved_source, target_language)
 
         if used_context:
             logging.info(
@@ -1965,7 +1971,173 @@ class ServeClientTranslation(ServeClientBase):
                 failure_reason,
                 len(str(text or "")),
             )
-        return self._translate_text_current_only(text, source_language)
+        translated_text, resolved_source, target_language = self._translate_text_current_only(text, source_language)
+        return self.repair_en_zh_undertranslation_if_needed(text, translated_text, resolved_source, target_language)
+
+    def en_zh_undertranslation_reason(self, source_text, translated_text, source_language, target_language):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language)
+        if (
+            self.service_mode != "accurate"
+            or not self.is_nllb_model(self.model_name)
+            or source_language != "en"
+            or target_language != "zh"
+        ):
+            return None
+        source_words = len(self._word_spans(source_text))
+        if source_words < self._UNDERTRANSLATION_MIN_EN_WORDS:
+            return None
+        target_units = self._count_cjk(translated_text) + len(self._word_spans(translated_text))
+        if target_units * 100 < source_words * self._UNDERTRANSLATION_TARGET_UNITS_PERCENT:
+            return "undertranslation"
+        return None
+
+    def repair_en_zh_undertranslation_if_needed(self, source_text, translated_text, source_language, target_language):
+        if self.pending_translation_warning:
+            return translated_text, source_language, target_language
+        reason = self.en_zh_undertranslation_reason(source_text, translated_text, source_language, target_language)
+        if not reason:
+            return translated_text, source_language, target_language
+
+        started_at = time.monotonic()
+        candidates = [(translated_text, source_language, target_language, reason)]
+        logging.info(
+            "[TRANSLATION_UNDERTRANSLATION_DETECTED] uid=%s source_words=%d output_units=%d source_chars=%d output_chars=%d",
+            self.client_uid,
+            len(self._word_spans(source_text)),
+            self._count_cjk(translated_text) + len(self._word_spans(translated_text)),
+            len(str(source_text or "")),
+            len(str(translated_text or "")),
+        )
+
+        direct_text, direct_source, direct_target, direct_reason, _ = self.infer_translation_once_without_final_state(
+            source_text,
+            source_language,
+            allow_batch=False,
+        )
+        if not direct_reason:
+            direct_guard = self.translation_output_failure_reason(source_text, direct_text, direct_source, direct_target)
+            direct_under = self.en_zh_undertranslation_reason(source_text, direct_text, direct_source, direct_target)
+            if not direct_guard and not direct_under:
+                logging.info(
+                    "[TRANSLATION_UNDERTRANSLATION_REPAIRED] uid=%s method=direct elapsed_ms=%.1f",
+                    self.client_uid,
+                    (time.monotonic() - started_at) * 1000.0,
+                )
+                return direct_text, direct_source, direct_target
+            if not direct_guard:
+                candidates.append((direct_text, direct_source, direct_target, direct_under or reason))
+
+        if time.monotonic() - started_at <= self._UNDERTRANSLATION_REPAIR_SECONDS:
+            chunk_result = self.translate_en_zh_undertranslation_chunks(source_text, source_language, target_language)
+            if chunk_result is not None:
+                chunk_text, chunk_source, chunk_target = chunk_result
+                chunk_guard = self.translation_output_failure_reason(source_text, chunk_text, chunk_source, chunk_target)
+                chunk_under = self.en_zh_undertranslation_reason(source_text, chunk_text, chunk_source, chunk_target)
+                if not chunk_guard and not chunk_under:
+                    logging.info(
+                        "[TRANSLATION_UNDERTRANSLATION_REPAIRED] uid=%s method=chunked chunks=%d elapsed_ms=%.1f",
+                        self.client_uid,
+                        len(self.split_en_zh_undertranslation_chunks(source_text)),
+                        (time.monotonic() - started_at) * 1000.0,
+                    )
+                    return chunk_text, chunk_source, chunk_target
+                if not chunk_guard:
+                    candidates.append((chunk_text, chunk_source, chunk_target, chunk_under or reason))
+
+        best_text, best_source, best_target, best_reason = max(
+            candidates,
+            key=lambda candidate: self._count_cjk(candidate[0]) + len(self._word_spans(candidate[0])),
+        )
+        self.pending_translation_warning = best_reason or "undertranslation"
+        logging.warning(
+            "[TRANSLATION_UNDERTRANSLATION_UNRESOLVED] uid=%s candidates=%d warning=%s source_words=%d output_units=%d",
+            self.client_uid,
+            len(candidates),
+            self.pending_translation_warning,
+            len(self._word_spans(source_text)),
+            self._count_cjk(best_text) + len(self._word_spans(best_text)),
+        )
+        return best_text, best_source, best_target
+
+    @classmethod
+    def split_en_zh_undertranslation_chunks(cls, text):
+        text = str(text or "").strip()
+        if not text:
+            return []
+        chunks = [part.strip() for part in re.split(r"(?<=[.!?;])\s+", text) if part.strip()]
+        if len(chunks) <= 1:
+            chunks = [part.strip() for part in re.split(r",\s+", text) if part.strip()]
+        if len(chunks) <= 1:
+            words = [match.group(0) for match in cls._word_spans(text)]
+            if len(words) <= cls._UNDERTRANSLATION_MIN_CHUNK_WORDS:
+                return [text]
+            target_chunks = min(cls._UNDERTRANSLATION_MAX_CHUNKS, max(2, len(words) // 10))
+            chunk_size = max(cls._UNDERTRANSLATION_MIN_CHUNK_WORDS, (len(words) + target_chunks - 1) // target_chunks)
+            chunks = [" ".join(words[index:index + chunk_size]) for index in range(0, len(words), chunk_size)]
+
+        while len(chunks) > cls._UNDERTRANSLATION_MAX_CHUNKS:
+            shortest_index = min(range(len(chunks)), key=lambda index: len(cls._word_spans(chunks[index])))
+            if shortest_index == 0:
+                merge_index = 0
+            elif shortest_index == len(chunks) - 1:
+                merge_index = shortest_index - 1
+            else:
+                left_words = len(cls._word_spans(chunks[shortest_index - 1]))
+                right_words = len(cls._word_spans(chunks[shortest_index + 1]))
+                merge_index = shortest_index - 1 if left_words <= right_words else shortest_index
+            chunks[merge_index:merge_index + 2] = [cls._join_merge_text(chunks[merge_index:merge_index + 2], "en")]
+
+        index = 0
+        while len(chunks) > 1 and index < len(chunks):
+            if len(cls._word_spans(chunks[index])) >= cls._UNDERTRANSLATION_MIN_CHUNK_WORDS:
+                index += 1
+                continue
+            if index == 0:
+                chunks[0:2] = [cls._join_merge_text(chunks[0:2], "en")]
+            else:
+                chunks[index - 1:index + 1] = [cls._join_merge_text(chunks[index - 1:index + 1], "en")]
+                index -= 1
+        return chunks[:cls._UNDERTRANSLATION_MAX_CHUNKS]
+
+    def translate_en_zh_undertranslation_chunks(self, source_text, source_language, target_language):
+        if not self.translator or not self.translator_lock or not hasattr(self.translator, "translate_batch"):
+            return None
+        chunks = self.split_en_zh_undertranslation_chunks(source_text)
+        if len(chunks) <= 1:
+            return None
+        items = [
+            {"text": chunk, "source_language": source_language, "target_language": target_language}
+            for chunk in chunks
+        ]
+        try:
+            with self.translator_lock:
+                results = self.translator.translate_batch(items)
+        except Exception as error:
+            logging.warning(
+                "[TRANSLATION_UNDERTRANSLATION_CHUNK_FAILED] uid=%s chunks=%d reason=%s",
+                self.client_uid,
+                len(chunks),
+                self.translation_exception_reason(error),
+            )
+            return None
+        translated_parts = []
+        resolved_source = source_language
+        resolved_target = target_language
+        if len(results) != len(chunks):
+            logging.warning(
+                "[TRANSLATION_UNDERTRANSLATION_CHUNK_FAILED] uid=%s chunks=%d results=%d reason=result_count_mismatch",
+                self.client_uid,
+                len(chunks),
+                len(results),
+            )
+            return None
+        for chunk, result in zip(chunks, results):
+            translated_part, resolved_source, resolved_target = result
+            if self.translation_output_failure_reason(chunk, translated_part, resolved_source, resolved_target):
+                return None
+            translated_parts.append(str(translated_part or "").strip())
+        return "".join(part for part in translated_parts if part), resolved_source, resolved_target
 
     def zh_en_context_risk_reason(self, source_text, translated_text, source_language, target_language):
         source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
@@ -2447,7 +2619,7 @@ class ServeClientTranslation(ServeClientBase):
             protected_text,
             source_language,
         )
-        if self.pending_translation_warning:
+        if self.pending_translation_warning and self.pending_translation_warning != "undertranslation":
             return translated_text, normalized_source, target_language
         restored_text = translated_text
         for index, (_, target) in enumerate(replacements):

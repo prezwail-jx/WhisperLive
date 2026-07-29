@@ -613,7 +613,7 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
 
     @mock.patch("whisper_live.server.threading.Thread")
     @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
-    def test_initialize_client_accurate_mode_defaults_max_pending_audio_to_15(self, mock_faster_client, mock_thread):
+    def test_initialize_client_accurate_mode_defaults_max_pending_audio_to_18(self, mock_faster_client, mock_thread):
         mock_faster_client.return_value = MagicMock()
         options = {
             "uid": "test",
@@ -627,7 +627,7 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
 
         self.assertAlmostEqual(
             mock_faster_client.call_args.kwargs["max_pending_audio_seconds"],
-            15.0,
+            18.0,
         )
 
     @mock.patch("whisper_live.server.threading.Thread")

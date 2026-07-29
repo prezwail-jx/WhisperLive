@@ -36,6 +36,8 @@ class ServeClientBase(object):
     """Minimum RMS energy required before accepting an ASR segment."""
     max_incomplete_segment_seconds: float
     """Maximum audio duration to keep reprocessing a single incomplete segment."""
+    sentence_completion_min_seconds: float
+    """Minimum incomplete segment duration before sentence-ending punctuation can complete it."""
     max_pending_audio_seconds: float
     """Maximum unprocessed audio duration to keep before advancing the realtime offset."""
 
@@ -174,6 +176,7 @@ class ServeClientBase(object):
         word_timestamps=False,
         min_segment_rms=0.0015,
         max_incomplete_segment_seconds=0.0,
+        sentence_completion_min_seconds=0.0,
         min_transcription_chunk_seconds=1.0,
         stable_utterance_ids=False,
         hotword_terms=None,
@@ -191,6 +194,9 @@ class ServeClientBase(object):
         if max_incomplete_segment_seconds is None:
             max_incomplete_segment_seconds = 0.0
         self.max_incomplete_segment_seconds = max(0.0, float(max_incomplete_segment_seconds))
+        if sentence_completion_min_seconds is None:
+            sentence_completion_min_seconds = 0.0
+        self.sentence_completion_min_seconds = max(0.0, float(sentence_completion_min_seconds))
         if max_pending_audio_seconds is None:
             max_pending_audio_seconds = self.MAX_PENDING_AUDIO_SECONDS
         self.max_pending_audio_seconds = min(
@@ -236,6 +242,10 @@ class ServeClientBase(object):
 
         # threading
         self.lock = threading.Lock()
+
+    @staticmethod
+    def _text_has_sentence_boundary(text):
+        return bool(re.search(r"[。！？.!?][\s\"'“”‘’）)\]}]*$", str(text or "").strip()))
 
     @classmethod
     def _log_opencc_unavailable_once(cls, message):
@@ -1254,20 +1264,31 @@ class ServeClientBase(object):
         else:
             self.prev_out = self.current_out
 
+        sentence_boundary_complete = (
+            self.sentence_completion_min_seconds > 0
+            and duration >= self.sentence_completion_min_seconds
+            and self._text_has_sentence_boundary(self.current_out)
+        )
+        duration_limit_complete = (
+            self.max_incomplete_segment_seconds > 0
+            and duration >= self.max_incomplete_segment_seconds
+        )
         if (
             offset is None
             and last_segment is not None
-            and self.max_incomplete_segment_seconds > 0
-            and duration >= self.max_incomplete_segment_seconds
+            and (sentence_boundary_complete or duration_limit_complete)
             and self.current_out.strip()
         ):
+            completion_reason = "sentence_boundary" if sentence_boundary_complete else "duration_limit"
             repeated_end = min(duration, self.get_segment_end(segments[-1]))
             if repeated_end > 0:
                 logging.info(
-                    "[FORCE_COMPLETE_INCOMPLETE] uid=%s duration=%.2fs threshold=%.2fs text=%r",
+                    "[FORCE_COMPLETE_INCOMPLETE] uid=%s reason=%s duration=%.2fs threshold=%.2fs sentence_min=%.2fs text=%r",
                     self.client_uid,
+                    completion_reason,
                     duration,
                     self.max_incomplete_segment_seconds,
+                    self.sentence_completion_min_seconds,
                     self.current_out.strip()[:80],
                 )
                 completed_text = self._dedupe_completed_text(self.current_out)

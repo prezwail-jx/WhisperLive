@@ -41,6 +41,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         word_timestamps=False,
         min_segment_rms=0.0015,
         max_incomplete_segment_seconds=0.0,
+        sentence_completion_min_seconds=0.0,
         min_transcription_chunk_seconds=1.0,
         mixed_interpretation=False,
         asr_device_index=0,
@@ -79,6 +80,7 @@ class ServeClientFasterWhisper(ServeClientBase):
             word_timestamps,
             min_segment_rms=min_segment_rms,
             max_incomplete_segment_seconds=max_incomplete_segment_seconds,
+            sentence_completion_min_seconds=sentence_completion_min_seconds,
             max_pending_audio_seconds=max_pending_audio_seconds,
             min_transcription_chunk_seconds=min_transcription_chunk_seconds,
             stable_utterance_ids=True,
@@ -107,10 +109,11 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.current_language_probability = 0.0
         self.current_zh_en_candidates = {}
         logging.info(
-            "[ASR_BUFFER_CONFIG] uid=%s max_pending=%.2f max_incomplete=%.2f min_chunk=%.2f",
+            "[ASR_BUFFER_CONFIG] uid=%s max_pending=%.2f max_incomplete=%.2f sentence_min=%.2f min_chunk=%.2f",
             self.client_uid,
             self.max_pending_audio_seconds,
             self.max_incomplete_segment_seconds,
+            self.sentence_completion_min_seconds,
             self.min_transcription_chunk_seconds,
         )
 

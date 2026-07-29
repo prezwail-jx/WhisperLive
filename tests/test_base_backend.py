@@ -40,6 +40,7 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertEqual(client.same_output_threshold, 10)
         self.assertAlmostEqual(client.min_segment_rms, 0.0015)
         self.assertAlmostEqual(client.min_transcription_chunk_seconds, 1.0)
+        self.assertAlmostEqual(client.sentence_completion_min_seconds, 0.0)
         self.assertAlmostEqual(client.max_pending_audio_seconds, 8.0)
         self.assertEqual(client.hotword_match_terms, ())
         self.assertIsNone(client.frames_np)
@@ -58,6 +59,7 @@ class TestServeClientBaseInit(unittest.TestCase):
             clip_audio=True,
             same_output_threshold=20,
             min_segment_rms=0.002,
+            sentence_completion_min_seconds=4.0,
             min_transcription_chunk_seconds=2.5,
             max_pending_audio_seconds=15.0,
             translation_queue=q,
@@ -67,6 +69,7 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertTrue(client.clip_audio)
         self.assertEqual(client.same_output_threshold, 20)
         self.assertAlmostEqual(client.min_segment_rms, 0.002)
+        self.assertAlmostEqual(client.sentence_completion_min_seconds, 4.0)
         self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
         self.assertAlmostEqual(client.max_pending_audio_seconds, 15.0)
         self.assertIs(client.translation_queue, q)
@@ -632,6 +635,34 @@ class TestUpdateSegments(unittest.TestCase):
         self.assertTrue(self.client.transcript[0]["completed"])
         self.assertAlmostEqual(self.client.timestamp_offset, 10.0)
         self.assertIn("[FORCE_COMPLETE_INCOMPLETE]", "\n".join(logs.output))
+        self.assertIn("reason=duration_limit", "\n".join(logs.output))
+
+    def test_sentence_boundary_forces_complete_after_configured_duration(self):
+        self.client.max_incomplete_segment_seconds = 12.0
+        self.client.sentence_completion_min_seconds = 4.0
+        self.client.frames_np = np.full(16000 * 5, 0.01, dtype=np.float32)
+        seg = self._make_segment(0.0, 4.0, " complete sentence.")
+
+        with self.assertLogs(level="INFO") as logs:
+            last = self.client.update_segments([seg], duration=4.0)
+
+        self.assertIsNone(last)
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertTrue(self.client.transcript[0]["completed"])
+        self.assertAlmostEqual(self.client.timestamp_offset, 4.0)
+        self.assertIn("reason=sentence_boundary", "\n".join(logs.output))
+
+    def test_sentence_boundary_waits_before_configured_duration(self):
+        self.client.max_incomplete_segment_seconds = 12.0
+        self.client.sentence_completion_min_seconds = 4.0
+        self.client.frames_np = np.full(16000 * 3, 0.01, dtype=np.float32)
+        seg = self._make_segment(0.0, 3.0, " complete sentence.")
+
+        last = self.client.update_segments([seg], duration=3.0)
+
+        self.assertIsNotNone(last)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertAlmostEqual(self.client.timestamp_offset, 0.0)
 
     def test_hotword_dominated_completed_segment_with_weak_no_speech_is_dropped(self):
         self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["OpenAI"])

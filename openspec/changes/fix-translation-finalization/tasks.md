@@ -48,6 +48,6 @@
 - [x] 7.3 Add `tests.test_translation_backend` coverage for Chinese-to-English short-source direct verification, abnormal expansion, previous-translation leakage, normal long contextual translation, glossary preservation, HTML entity normalization, and existing hard expansion rejection.
 - [x] 7.4 Add `tests.test_server_extended` coverage for `END_OF_AUDIO` finalization ordering and `SESSION_FINALIZED` payload.
 - [x] 7.5 Run deployment-container `py_compile` for changed Python files and targeted unittest modules.
-- [ ] 7.6 Run deployment-container `node --check web/app.js`.
+- [x] 7.6 Run deployment-container `node --check web/app.js`.
 - [x] 7.7 Run `git diff --check`, inspect `git status --short`, and review relevant diffs before delivery.
 - [x] 7.8 Leave real audio/browser联调 and service restart as待部署机验证 unless explicitly authorized.

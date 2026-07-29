@@ -553,7 +553,7 @@ class TranscriptionServer:
     def resolve_max_pending_audio_seconds(options):
         value = options.get("max_pending_audio_seconds")
         if value is None:
-            value = 15.0 if options.get("service_mode") == "accurate" else ServeClientBase.MAX_PENDING_AUDIO_SECONDS
+            value = 18.0 if options.get("service_mode") == "accurate" else ServeClientBase.MAX_PENDING_AUDIO_SECONDS
         return min(
             ServeClientBase.MAX_CONFIGURABLE_PENDING_AUDIO_SECONDS,
             max(1.0, float(value)),
@@ -1483,6 +1483,7 @@ class TranscriptionServer:
                     same_output_threshold=options.get("same_output_threshold", 10),
                     min_segment_rms=options.get("min_segment_rms", 0.0015),
                     max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 0.0),
+                    sentence_completion_min_seconds=options.get("sentence_completion_min_seconds", 0.0),
                     max_pending_audio_seconds=max_pending_audio_seconds,
                     min_transcription_chunk_seconds=options.get("min_transcription_chunk_seconds", 1.0),
                     cache_path=self.cache_path,

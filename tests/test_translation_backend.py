@@ -1126,6 +1126,87 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
         self.assertEqual(target_language, "zh")
         self.assertEqual(client.translator.translate.call_count, 2)
 
+    def test_en_zh_undertranslation_uses_direct_repair(self):
+        client = self.make_client(model_name="nllb_200_600m")
+        source = (
+            "Airbus started with a narrow market and then expanded the product line "
+            "after customers confirmed the first aircraft program worked."
+        )
+        client.translator.translate.side_effect = [
+            ("后来产品线扩大了。", "en", "zh"),
+            ("空客从一个狭窄市场开始，客户确认第一个飞机项目有效后扩大了产品线。", "en", "zh"),
+        ]
+
+        translated, source_language, target_language = client.translate_text(source, "en")
+
+        self.assertEqual(translated, "空客从一个狭窄市场开始，客户确认第一个飞机项目有效后扩大了产品线。")
+        self.assertEqual(source_language, "en")
+        self.assertEqual(target_language, "zh")
+        self.assertIsNone(client.pending_translation_warning)
+        self.assertEqual(client.translator.translate.call_count, 2)
+
+    def test_en_zh_undertranslation_uses_chunked_repair_once(self):
+        client = self.make_client(model_name="nllb_200_600m")
+        source = (
+            "Airbus started with a narrow market. Customers confirmed the first aircraft program worked. "
+            "Then the company expanded the product line across Europe."
+        )
+        client.translator.translate.side_effect = [
+            ("然后公司扩大了产品线。", "en", "zh"),
+            ("公司扩大了产品线。", "en", "zh"),
+        ]
+        client.translator.translate_batch.return_value = [
+            ("空客从一个狭窄市场开始。", "en", "zh"),
+            ("客户确认第一个飞机项目有效。", "en", "zh"),
+            ("随后公司在欧洲扩大了产品线。", "en", "zh"),
+        ]
+
+        translated, source_language, target_language = client.translate_text(source, "en")
+
+        self.assertEqual(
+            translated,
+            "空客从一个狭窄市场开始。客户确认第一个飞机项目有效。随后公司在欧洲扩大了产品线。",
+        )
+        self.assertEqual((source_language, target_language), ("en", "zh"))
+        self.assertIsNone(client.pending_translation_warning)
+        client.translator.translate_batch.assert_called_once()
+        self.assertLessEqual(len(client.translator.translate_batch.call_args.args[0]), 3)
+
+    def test_en_zh_undertranslation_marks_best_remaining_candidate(self):
+        client = self.make_client(model_name="nllb_200_600m")
+        source = (
+            "Airbus started with a narrow market. Customers confirmed the first aircraft program worked. "
+            "Then the company expanded the product line across Europe."
+        )
+        client.translator.translate.side_effect = [
+            ("后来扩大。", "en", "zh"),
+            ("公司扩大产品线。", "en", "zh"),
+        ]
+        client.translator.translate_batch.return_value = [
+            ("空客开始。", "en", "zh"),
+            ("客户确认。", "en", "zh"),
+            ("公司扩大。", "en", "zh"),
+        ]
+
+        translated, source_language, target_language = client.translate_text(source, "en")
+
+        self.assertEqual(translated, "空客开始。客户确认。公司扩大。")
+        self.assertEqual((source_language, target_language), ("en", "zh"))
+        self.assertEqual(client.pending_translation_warning, "undertranslation")
+
+    def test_en_zh_undertranslation_repair_is_limited_to_accurate_nllb(self):
+        client = self.make_client(service_mode="standard")
+        source = (
+            "This long English source has enough words to look suspicious when translated too briefly "
+            "because several important details are missing from the result."
+        )
+        client.translator.translate.return_value = ("太短。", "en", "zh")
+
+        translated, source_language, target_language = client.translate_text(source, "en")
+
+        self.assertEqual((translated, source_language, target_language), ("太短。", "en", "zh"))
+        self.assertEqual(client.translator.translate.call_count, 1)
+
     def test_zh_en_final_context_uses_chinese_history_without_draft(self):
         client = self.make_client(
             source_language="zh",
