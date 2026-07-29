@@ -581,7 +581,7 @@ class ServeClientTranslation(ServeClientBase):
     _SOURCE_ECHO_PROPER_TERM_MAX_CHARS = 32
     _SOURCE_ECHO_PROPER_TERM_MAX_TOKENS = 4
     _UNDERTRANSLATION_MIN_EN_WORDS = 16
-    _UNDERTRANSLATION_TARGET_UNITS_PERCENT = 120
+    _UNDERTRANSLATION_TARGET_UNITS_PERCENT = 100
     _UNDERTRANSLATION_REPAIR_SECONDS = 3.0
     _UNDERTRANSLATION_MAX_CHUNKS = 3
     _UNDERTRANSLATION_MIN_CHUNK_WORDS = 6
@@ -595,7 +595,8 @@ class ServeClientTranslation(ServeClientBase):
     }
     _INCOMPLETE_EN_ENDING_PHRASES = {
         "i had", "i have", "it was", "there are", "there is", "we had",
-        "we have", "we were", "you can", "you know",
+        "we have", "we were", "you can", "you know", "i started",
+        "this is how", "i want really", "you have huge", "from the",
     }
 
     def __init__(
@@ -613,6 +614,7 @@ class ServeClientTranslation(ServeClientBase):
         translation_min_chars=12,
         translation_max_chars=220,
         translation_max_wait_seconds=3.0,
+        translation_incomplete_max_wait_seconds=None,
         translation_context_seconds=0.0,
         translation_sentence_endings="。！？.!?",
         translation_glossary=None,
@@ -657,6 +659,12 @@ class ServeClientTranslation(ServeClientBase):
         self.translation_min_chars = max(0, int(translation_min_chars or 0))
         self.translation_max_chars = max(1, int(translation_max_chars or 220))
         self.translation_max_wait_seconds = max(0.1, float(translation_max_wait_seconds or 3.0))
+        if translation_incomplete_max_wait_seconds is None:
+            translation_incomplete_max_wait_seconds = self.translation_max_wait_seconds
+        self.translation_incomplete_max_wait_seconds = max(
+            0.1,
+            float(translation_incomplete_max_wait_seconds or self.translation_max_wait_seconds),
+        )
         self.translation_context_seconds = max(0.0, float(translation_context_seconds or 0.0))
         self.translation_sentence_endings = translation_sentence_endings
         self.translation_glossary = self.normalize_translation_glossary(translation_glossary)
@@ -711,12 +719,13 @@ class ServeClientTranslation(ServeClientBase):
         self.model_load_failure_reason = None
         logging.info(
             "[TRANSLATION_CONFIG] uid=%s model=%s mode=%s context_seconds=%.2f "
-            "max_wait=%.2f max_chars=%d merge=%s",
+            "max_wait=%.2f incomplete_wait=%.2f max_chars=%d merge=%s",
             self.client_uid,
             self.model_name,
             self.translation_mode,
             self.translation_context_seconds,
             self.translation_max_wait_seconds,
+            self.translation_incomplete_max_wait_seconds,
             self.translation_max_chars,
             self.translation_merge_enabled,
         )
@@ -2865,8 +2874,14 @@ class ServeClientTranslation(ServeClientBase):
             return False
         if words[-1] in cls._INCOMPLETE_EN_ENDING_WORDS:
             return True
-        tail = " ".join(words[-2:])
-        return tail in cls._INCOMPLETE_EN_ENDING_PHRASES
+        max_phrase_words = max(
+            len(phrase.split())
+            for phrase in cls._INCOMPLETE_EN_ENDING_PHRASES
+        )
+        for size in range(2, min(max_phrase_words, len(words)) + 1):
+            if " ".join(words[-size:]) in cls._INCOMPLETE_EN_ENDING_PHRASES:
+                return True
+        return False
 
     def translation_buffer_flush_reason(self, force=False):
         if not self.translation_buffer:
@@ -2884,17 +2899,18 @@ class ServeClientTranslation(ServeClientBase):
         if text.endswith(tuple(self.translation_sentence_endings)):
             return "sentence_end"
         if (
+            source_language == "en"
+            and self.english_text_ends_incomplete(text)
+            and len(text) < self.realtime_max_source_chars(source_language)
+        ):
+            if elapsed < self.translation_incomplete_max_wait_seconds:
+                return None
+            return "incomplete_timeout"
+        if (
             self.translation_context_seconds > 0
             and self.translation_buffer_audio_seconds() >= self.translation_context_seconds
         ):
             return "context_seconds"
-        if (
-            source_language == "en"
-            and self.english_text_ends_incomplete(text)
-            and len(text) < self.realtime_max_source_chars(source_language)
-            and elapsed < self.translation_max_wait_seconds
-        ):
-            return None
         if len(text) >= self.realtime_max_source_chars(source_language):
             return "max_chars"
         if (
@@ -3006,6 +3022,13 @@ class ServeClientTranslation(ServeClientBase):
             self.pending_translation_warning = None
             return
         translation_warning = self.pending_translation_warning
+        if (
+            not translation_warning
+            and flush_reason == "incomplete_timeout"
+            and source_language == "en"
+            and HelsinkiZhEnTranslator.normalize_language(target_language) == "zh"
+        ):
+            translation_warning = "undertranslation"
         self.pending_translation_warning = None
         self.record_readability_context(
             original_text,

@@ -1289,6 +1289,7 @@ class TranscriptionServer:
                 translation_device=translation_device,
                 translation_max_chars=options.get("translation_max_chars", 220),
                 translation_max_wait_seconds=options.get("translation_max_wait_seconds", 3.0),
+                translation_incomplete_max_wait_seconds=options.get("translation_incomplete_max_wait_seconds"),
                 translation_context_seconds=options.get("translation_context_seconds", 0.0),
                 en_zh_model_path=options.get("en_zh_model_path", "model/opus-mt-en-zh"),
                 nllb_model_path=options.get("nllb_model_path", "model/NLLB-200-600M"),

@@ -1207,6 +1207,13 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
         self.assertEqual((translated, source_language, target_language), ("太短。", "en", "zh"))
         self.assertEqual(client.translator.translate.call_count, 1)
 
+    def test_en_zh_undertranslation_threshold_allows_one_to_one_units(self):
+        client = self.make_client(model_name="nllb_200_600m")
+        source = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
+        translated = "一二三四五六七八九十甲乙丙丁戊己"
+
+        self.assertIsNone(client.en_zh_undertranslation_reason(source, translated, "en", "zh"))
+
     def test_zh_en_final_context_uses_chinese_history_without_draft(self):
         client = self.make_client(
             source_language="zh",
@@ -1718,6 +1725,60 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
 
         client.websocket.send.assert_not_called()
         self.assertEqual(len(client.translation_buffer), 1)
+
+    def test_incomplete_english_waits_before_context_seconds_flush(self):
+        client = self.make_client(
+            translation_context_seconds=5.0,
+            translation_max_wait_seconds=2.0,
+            translation_incomplete_max_wait_seconds=4.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "6.000",
+            "text": "we really feel that we are",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        client.websocket.send.assert_not_called()
+        self.assertEqual(len(client.translation_buffer), 1)
+
+        client.add_segment_to_translation_buffer({
+            "start": "6.000",
+            "end": "8.000",
+            "text": "at the frontier.",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(
+            payload["translated_segments"][0]["text"],
+            "translated:we really feel that we are at the frontier.",
+        )
+
+    def test_incomplete_english_flushes_with_warning_after_incomplete_timeout(self):
+        client = self.make_client(
+            translation_context_seconds=5.0,
+            translation_max_wait_seconds=2.0,
+            translation_incomplete_max_wait_seconds=4.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "6.000",
+            "text": "I want really",
+            "completed": True,
+            "language": "en",
+        })
+        client.translation_buffer_started_at -= 4.5
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "translated:I want really")
+        self.assertEqual(segment["translation_warning"], "undertranslation")
 
     def test_complete_english_sentence_flushes_immediately(self):
         client = self.make_client(translation_max_wait_seconds=3.0)

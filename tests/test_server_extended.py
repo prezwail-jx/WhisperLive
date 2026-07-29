@@ -540,6 +540,7 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
             "enable_translation": True,
             "translation_max_chars": 240,
             "translation_max_wait_seconds": 2.0,
+            "translation_incomplete_max_wait_seconds": 4.0,
             "translation_context_seconds": 5.0,
             "translation_merge_enabled": False,
         }
@@ -549,6 +550,7 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
         kwargs = mock_translation_client.call_args.kwargs
         self.assertEqual(kwargs["translation_max_chars"], 240)
         self.assertEqual(kwargs["translation_max_wait_seconds"], 2.0)
+        self.assertEqual(kwargs["translation_incomplete_max_wait_seconds"], 4.0)
         self.assertEqual(kwargs["translation_context_seconds"], 5.0)
         self.assertFalse(kwargs["translation_merge_enabled"])
 

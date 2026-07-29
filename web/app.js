@@ -233,6 +233,7 @@ function translationRuntimeConfigForMode(mode = serviceMode) {
     return {
       translationContextSeconds: 5.0,
       translationMaxWaitSeconds: 2.0,
+      translationIncompleteMaxWaitSeconds: 4.0,
       translationMaxChars: 240,
       translationMergeEnabled: false,
     };
@@ -241,6 +242,7 @@ function translationRuntimeConfigForMode(mode = serviceMode) {
     return {
       translationContextSeconds: 0.0,
       translationMaxWaitSeconds: 3.0,
+      translationIncompleteMaxWaitSeconds: 3.0,
       translationMaxChars: 180,
       translationMergeEnabled: false,
     };
@@ -248,6 +250,7 @@ function translationRuntimeConfigForMode(mode = serviceMode) {
   return {
     translationContextSeconds: 0.0,
     translationMaxWaitSeconds: 3.0,
+    translationIncompleteMaxWaitSeconds: 3.0,
     translationMaxChars: 180,
     translationMergeEnabled: true,
   };
@@ -2581,6 +2584,7 @@ function sendConfig(event) {
     translation_device: translationDeviceForMode(serviceMode),
     translation_max_chars: translationRuntimeConfig.translationMaxChars,
     translation_max_wait_seconds: translationRuntimeConfig.translationMaxWaitSeconds,
+    translation_incomplete_max_wait_seconds: translationRuntimeConfig.translationIncompleteMaxWaitSeconds,
     translation_context_seconds: translationRuntimeConfig.translationContextSeconds,
     translation_merge_enabled: translationRuntimeConfig.translationMergeEnabled,
     translation_merge_max_chars: 240,
