@@ -713,8 +713,63 @@ class TestUpdateSegments(unittest.TestCase):
         self.assertTrue(q.empty())
         self.assertIsNotNone(last)
         self.assertIn("next", last["text"])
-        self.assertIn("reason=repeated_hotword", output)
+        self.assertIn("reason=consecutive_repeated_hotword", output)
         self.assertIn("repeat_count=3", output)
+
+    def test_prefixed_consecutive_hotword_repetition_is_dropped_without_dominance(self):
+        q = queue.Queue()
+        self.client.translation_queue = q
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms([
+            "长三角国家技术创新中心",
+            "国创中心",
+        ])
+        self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
+        segs = [
+            self._make_segment(
+                0.0,
+                1.0,
+                "三角国家技术创新中心 国创中心 国创中心 国创中心",
+                no_speech_prob=0.10,
+            ),
+            self._make_segment(1.0, 2.0, " next", no_speech_prob=0.0),
+        ]
+
+        with self.assertLogs(level="INFO") as logs:
+            last = self.client.update_segments(segs, duration=3.0)
+
+        output = "\n".join(logs.output)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertTrue(q.empty())
+        self.assertIsNotNone(last)
+        self.assertIn("next", last["text"])
+        self.assertIn("reason=consecutive_repeated_hotword", output)
+        self.assertIn("repeat_count=3", output)
+
+    def test_punctuated_consecutive_hotword_repetition_is_dropped(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["国创中心"])
+        self.client.frames_np = np.full(16000 * 5, 0.02, dtype=np.float32)
+        segs = [
+            self._make_segment(0.0, 1.0, "国创中心，国创中心，国创中心", no_speech_prob=0.10),
+            self._make_segment(1.0, 2.0, " next", no_speech_prob=0.0),
+        ]
+
+        with self.assertLogs(level="INFO") as logs:
+            self.client.update_segments(segs, duration=3.0)
+
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertIn("reason=consecutive_repeated_hotword", "\n".join(logs.output))
+
+    def test_non_consecutive_hotword_repetition_is_retained(self):
+        self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["国创中心"])
+        segs = [
+            self._make_segment(0.0, 1.0, "国创中心 正常内容 国创中心 更多内容 国创中心", no_speech_prob=0.10),
+            self._make_segment(1.0, 2.0, " next", no_speech_prob=0.0),
+        ]
+
+        self.client.update_segments(segs, duration=3.0)
+
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertIn("正常内容", self.client.transcript[0]["text"])
 
     def test_repeated_hotword_partial_segment_waits_for_more_audio(self):
         self.client.hotword_match_terms = self.client._prepare_hotword_match_terms(["国创中心"])

@@ -723,6 +723,37 @@ class ServeClientBase(object):
             max_count = max(max_count, count)
         return max_count
 
+    def _max_consecutive_hotword_count(self, text):
+        if not self.hotword_match_terms:
+            return 0
+        compact_text = self._compact_hotword_text(text)
+        if not compact_text:
+            return 0
+        max_consecutive = 0
+        for term in self.hotword_match_terms:
+            if not term:
+                continue
+            term_len = len(term)
+            positions = []
+            start = 0
+            while True:
+                index = compact_text.find(term, start)
+                if index < 0:
+                    break
+                positions.append(index)
+                start = index + 1
+            if not positions:
+                continue
+            consecutive = 1
+            for i in range(1, len(positions)):
+                if positions[i] == positions[i - 1] + term_len:
+                    consecutive += 1
+                else:
+                    max_consecutive = max(max_consecutive, consecutive)
+                    consecutive = 1
+            max_consecutive = max(max_consecutive, consecutive)
+        return max_consecutive
+
     def _log_hotword_hallucination_drop(self, stage, reason, text, dominance, no_speech_prob, rms, rms_threshold, repeat_count=0):
         logging.info(
             "[HOTWORD_HALLUCINATION_DROP] uid=%s stage=%s reason=%s dominance=%.3f repeat_count=%d no_speech=%.3f rms=%s rms_threshold=%.6f text=%r",
@@ -738,6 +769,22 @@ class ServeClientBase(object):
         )
 
     def _hotword_hallucination_drop_reason(self, segment, start, end, duration, text, stage):
+        consecutive_count = self._max_consecutive_hotword_count(text)
+        if consecutive_count >= self.HOTWORD_REPEAT_THRESHOLD:
+            dominance = self._hotword_dominance(text)
+            no_speech_prob = float(self.get_segment_no_speech_prob(segment) or 0.0)
+            self._log_hotword_hallucination_drop(
+                stage,
+                "consecutive_repeated_hotword",
+                text,
+                dominance,
+                no_speech_prob,
+                None,
+                self.min_segment_rms,
+                repeat_count=consecutive_count,
+            )
+            return "consecutive_repeated_hotword"
+
         dominance = self._hotword_dominance(text)
         if dominance < self.HOTWORD_DOMINANCE_THRESHOLD:
             return None
