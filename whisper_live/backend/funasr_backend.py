@@ -715,6 +715,8 @@ class ServeClientFunASR(ServeClientBase):
             text = str(segment.get("text") or "").strip()
             if not text:
                 continue
+            if self._should_hard_drop_hallucination_text(text, "funasr_completed"):
+                continue
             self.text.append(text)
             self.transcript.append(segment)
             if self.translation_queue:
@@ -734,6 +736,8 @@ class ServeClientFunASR(ServeClientBase):
         self.send_transcription_to_client(self.prepare_segments())
 
     def _commit_completed_segment(self, segment, text, reason, duration):
+        if self._should_hard_drop_hallucination_text(text, "funasr_completed"):
+            return
         self.text.append(text)
         self.transcript.append(segment)
         if self.translation_queue:

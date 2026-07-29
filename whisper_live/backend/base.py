@@ -150,6 +150,10 @@ class ServeClientBase(object):
         "mm-hmm",
         "mhm",        # 嗯哼（常见清嗓幻觉）
     }
+    HARD_DROP_HALLUCINATION_PHRASES = (
+        "优优独播剧场",
+        "YoYo Television Series Exclusive",
+    )
     MAX_BOUNDARY_DEDUPE_WORDS = 6
     MAX_SHORT_GRATITUDE_SECONDS = 0.5
     HOTWORD_DOMINANCE_THRESHOLD = 0.80
@@ -515,6 +519,11 @@ class ServeClientBase(object):
         Returns:
             segments (list): A list of transcription segments to be sent to the client.
         """
+        segments = [
+            seg for seg in segments
+            if not self._is_hard_drop_hallucination_text((seg or {}).get("text"))
+        ]
+
         if self.segment_post_processor is not None:
             processed = []
             for seg in segments:
@@ -747,6 +756,33 @@ class ServeClientBase(object):
         normalized = cls._normalized_phrase(text)
         return normalized in cls.GRATITUDE_HALLUCINATION_PHRASES
 
+    @classmethod
+    def _is_hard_drop_hallucination_text(cls, text):
+        value = str(text or "")
+        if not value.strip():
+            return False
+        normalized = cls._normalized_phrase(value)
+        compact = cls._compact_hotword_text(value)
+        for phrase in cls.HARD_DROP_HALLUCINATION_PHRASES:
+            phrase_normalized = cls._normalized_phrase(phrase)
+            phrase_compact = cls._compact_hotword_text(phrase)
+            if phrase_normalized and phrase_normalized in normalized:
+                return True
+            if phrase_compact and phrase_compact in compact:
+                return True
+        return False
+
+    def _should_hard_drop_hallucination_text(self, text, stage):
+        if not self._is_hard_drop_hallucination_text(text):
+            return False
+        logging.info(
+            "[HARD_HALLUCINATION_DROP] uid=%s stage=%s text=%r",
+            self.client_uid,
+            stage,
+            str(text or "").strip()[:80],
+        )
+        return True
+
     @staticmethod
     def _has_zh_script(text):
         return bool(re.search(r"[一-鿿]", str(text or "")))
@@ -966,6 +1002,9 @@ class ServeClientBase(object):
                     end = self.timestamp_offset + rel_end
                 if start >= end:
                     continue
+                if self._should_hard_drop_hallucination_text(text_, "completed"):
+                    offset = rel_end
+                    continue
                 if self._hotword_hallucination_drop_reason(s, rel_start, rel_end, duration, text_, "completed"):
                     offset = rel_end
                     continue
@@ -1008,7 +1047,9 @@ class ServeClientBase(object):
         if self.get_segment_no_speech_prob(segments[-1]) <= self.no_speech_thresh:
             rel_start = self.get_segment_start(segments[-1])
             rel_end = min(duration, self.get_segment_end(segments[-1]))
-            if self._is_mixed_interpretation_noise_text(segments[-1].text):
+            if self._should_hard_drop_hallucination_text(segments[-1].text, "partial"):
+                offset = rel_end
+            elif self._is_mixed_interpretation_noise_text(segments[-1].text):
                 offset = rel_end
             elif self._is_probable_gratitude_hallucination(segments[-1].text, rel_start, rel_end, False):
                 offset = rel_end
@@ -1056,6 +1097,8 @@ class ServeClientBase(object):
             if not low_energy_repeated and (not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower()):
                 completed_text = self._dedupe_completed_text(self.current_out)
                 if not completed_text.strip():
+                    completed_text = ""
+                if self._should_hard_drop_hallucination_text(completed_text, "repeated_complete"):
                     completed_text = ""
                 if self._is_mixed_interpretation_noise_text(completed_text):
                     completed_text = ""
@@ -1107,6 +1150,8 @@ class ServeClientBase(object):
                     self.current_out.strip()[:80],
                 )
                 completed_text = self._dedupe_completed_text(self.current_out)
+                if self._should_hard_drop_hallucination_text(completed_text, "force_complete"):
+                    completed_text = ""
                 if self._is_mixed_interpretation_noise_text(completed_text):
                     completed_text = ""
                 if completed_text.strip():

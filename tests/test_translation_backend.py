@@ -348,6 +348,18 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
         self.assertEqual(reason, "empty_output")
 
+    def test_classifier_rejects_hard_hallucination_phrase(self):
+        client = self.make_client()
+
+        reason = client.translation_output_failure_reason(
+            "优优独播剧场——YoYo Television Series Exclusive",
+            "优优独播剧场YoYo电视剧独家",
+            "en",
+            "zh",
+        )
+
+        self.assertEqual(reason, "hard_hallucination_phrase")
+
     def test_classifier_rejects_normalized_source_echo(self):
         client = self.make_client()
 
@@ -512,7 +524,7 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
         )
 
         self.assertEqual(guarded, "翻译暂不可用")
-        self.assertEqual(client.pending_translation_warning, "repeated_cjk_phrase")
+        self.assertEqual(client.pending_translation_warning, "hard_hallucination_phrase")
 
     def test_guard_allows_normal_output(self):
         client = self.make_client()

@@ -337,6 +337,26 @@ class TestSendTranscriptionToClient(unittest.TestCase):
         self.assertEqual(sent["uid"], "test-uid")
         self.assertEqual(len(sent["segments"]), 1)
 
+    def test_hard_drop_hallucination_segment_is_removed_before_send(self):
+        segments = [
+            {"start": "0.000", "end": "1.000", "text": "normal text", "completed": True},
+            {"start": "1.000", "end": "2.000", "text": "优优独播剧场——YoYo Television Series Exclusive", "completed": True},
+        ]
+
+        self.client.send_transcription_to_client(segments)
+
+        sent = json.loads(self.ws.send.call_args[0][0])
+        self.assertEqual([segment["text"] for segment in sent["segments"]], ["normal text"])
+
+    def test_hard_drop_hallucination_matches_partial_phrase(self):
+        self.assertTrue(
+            self.client._is_hard_drop_hallucination_text("前缀 优优独播剧场 后缀")
+        )
+        self.assertTrue(
+            self.client._is_hard_drop_hallucination_text("YoYo Television Series Exclusive")
+        )
+        self.assertFalse(self.client._is_hard_drop_hallucination_text("normal text"))
+
     def test_send_failure_logged_not_raised(self):
         self.ws.send.side_effect = ConnectionError("broken pipe")
         # should not raise

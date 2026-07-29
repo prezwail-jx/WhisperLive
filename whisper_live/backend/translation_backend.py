@@ -1992,6 +1992,8 @@ class ServeClientTranslation(ServeClientBase):
         target_language,
     ):
         translated_text = str(translated_text or "")
+        if self._is_hard_drop_hallucination_text(source_text) or self._is_hard_drop_hallucination_text(translated_text):
+            return "hard_hallucination_phrase"
         if not translated_text.strip():
             return "empty_output"
 
