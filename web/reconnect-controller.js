@@ -47,5 +47,5 @@
     }
   }
 
-  window.WhisperLiveReconnectController = ReconnectController;
+  window.RTReconnectController = ReconnectController;
 })();

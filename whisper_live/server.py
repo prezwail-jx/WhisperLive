@@ -590,20 +590,45 @@ class TranscriptionServer:
     def normalize_translation_draft_options(cls, options, backend=None):
         source_language = cls._normalized_language(options.get("language"))
         target_language = cls._normalized_language(options.get("target_language")) or "auto"
-        resolved_target_language = "zh" if target_language == "auto" and source_language == "en" else target_language
+        if target_language == "auto" and source_language == "en":
+            resolved_target_language = "zh"
+        elif target_language == "auto" and source_language == "zh":
+            resolved_target_language = "en"
+        else:
+            resolved_target_language = target_language
+        translation_mode = options.get("translation_mode", "standard")
         backend_name = getattr(backend, "value", backend)
         backend_supported = backend is None or backend_name == BackendType.FASTER_WHISPER.value
-        eligible = (
+        draft_eligible = (
             backend_supported
             and cls._config_bool(options.get("enable_translation"))
             and options.get("service_mode") == "accurate"
-            and options.get("translation_mode", "standard") == "standard"
-            and source_language == "en"
-            and resolved_target_language == "zh"
+            and (
+                (translation_mode == "standard" and source_language == "en" and resolved_target_language == "zh")
+                or (translation_mode == "mixed_interpretation" and target_language in ("auto", "zh"))
+            )
             and cls._config_bool(options.get("translation_draft_enabled"))
         )
+        context_requested = (
+            cls._config_bool(options.get("translation_readability_context_enabled"))
+            or draft_eligible
+        )
+        context_eligible = (
+            backend_supported
+            and cls._config_bool(options.get("enable_translation"))
+            and options.get("service_mode") == "accurate"
+            and context_requested
+            and (
+                (
+                    translation_mode == "standard"
+                    and (source_language, resolved_target_language) in (("en", "zh"), ("zh", "en"))
+                )
+                or (translation_mode == "mixed_interpretation" and target_language in ("auto", "zh", "en"))
+            )
+        )
 
-        options["translation_draft_enabled"] = eligible
+        options["translation_draft_enabled"] = draft_eligible
+        options["translation_readability_context_enabled"] = context_eligible
         options["translation_draft_interval_seconds"] = cls._bounded_config_number(
             options.get("translation_draft_interval_seconds"),
             cls.TRANSLATION_DRAFT_INTERVAL_DEFAULT,
@@ -625,7 +650,7 @@ class TranscriptionServer:
             integer=True,
         )
 
-        if eligible:
+        if context_eligible:
             context_sentences = cls._bounded_config_number(
                 options.get("translation_readability_context_sentences"),
                 cls.TRANSLATION_READABILITY_SENTENCES_DEFAULT,
@@ -649,10 +674,11 @@ class TranscriptionServer:
         options["translation_readability_context_max_chars"] = context_chars
 
         logging.info(
-            "[TRANSLATION_DRAFT_CONFIG] uid=%s eligible=%s interval=%.2f min_delta=%d "
+            "[TRANSLATION_DRAFT_CONFIG] uid=%s eligible=%s context_eligible=%s interval=%.2f min_delta=%d "
             "max_source_chars=%d context_sentences=%d context_max_chars=%d",
             options.get("uid"),
-            str(eligible).lower(),
+            str(draft_eligible).lower(),
+            str(context_eligible).lower(),
             options["translation_draft_interval_seconds"],
             options["translation_draft_min_delta_chars"],
             options["translation_draft_max_source_chars"],
@@ -1275,6 +1301,7 @@ class TranscriptionServer:
                 service_mode=options.get("service_mode", "standard"),
                 source_language=options.get("language"),
                 translation_draft_enabled=options.get("translation_draft_enabled", False),
+                translation_readability_context_enabled=options.get("translation_readability_context_enabled", False),
                 translation_draft_interval_seconds=options.get("translation_draft_interval_seconds", 1.2),
                 translation_draft_min_delta_chars=options.get("translation_draft_min_delta_chars", 8),
                 translation_draft_max_source_chars=options.get("translation_draft_max_source_chars", 220),

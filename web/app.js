@@ -2398,12 +2398,24 @@ function sendConfig(event) {
   const translationRuntimeConfig = translationRuntimeConfigForMode(serviceMode);
   const meetingName = elements.meetingName.value.trim();
   const hotwordsEnabled = serviceMode === "accurate";
+  const normalizedSelectedLanguage = normalizeLanguage(selectedLanguage);
+  const normalizedTranslationTarget = normalizeLanguage(selectedTranslationTarget);
+  const standardEnZh = translationMode === "standard"
+    && normalizedSelectedLanguage === "en"
+    && normalizedTranslationTarget === "zh";
+  const standardZhEn = translationMode === "standard"
+    && normalizedSelectedLanguage === "zh"
+    && normalizedTranslationTarget === "en";
+  const mixedInterpretation = translationMode === "mixed_interpretation";
   const draftTranslationEnabled = (
     serviceMode === "accurate"
     && translationEnabled
-    && translationMode === "standard"
-    && normalizeLanguage(selectedLanguage) === "en"
-    && normalizeLanguage(selectedTranslationTarget) === "zh"
+    && (standardEnZh || mixedInterpretation)
+  );
+  const readabilityContextEnabled = (
+    serviceMode === "accurate"
+    && translationEnabled
+    && (standardEnZh || standardZhEn || mixedInterpretation)
   );
   const payload = {
     uid,
@@ -2435,7 +2447,7 @@ function sendConfig(event) {
     no_speech_thresh: 0.45,
     clip_audio: false,
     same_output_threshold: 7,
-    min_segment_rms: 0.022,
+    min_segment_rms: 0.028,
     min_transcription_chunk_seconds: 2.5,
     max_incomplete_segment_seconds: 10.0,
     max_pending_audio_seconds: serviceMode === "accurate" ? 15.0 : 8.0,
@@ -2457,10 +2469,13 @@ function sendConfig(event) {
     en_zh_model_path: translationProvider.enZhModelPath || "model/opus-mt-en-zh",
     nllb_model_path: translationProvider.nllbModelPath,
     translation_draft_enabled: draftTranslationEnabled,
+    translation_readability_context_enabled: readabilityContextEnabled,
     ...(draftTranslationEnabled ? {
       translation_draft_interval_seconds: 1.2,
       translation_draft_min_delta_chars: 8,
       translation_draft_max_source_chars: 220,
+    } : {}),
+    ...(readabilityContextEnabled ? {
       translation_readability_context_sentences: 2,
       translation_readability_context_max_chars: 220,
     } : {}),
@@ -2470,7 +2485,7 @@ function sendConfig(event) {
 }
 
 async function requestMicrophoneStream() {
-  return window.WhisperLiveAudioCapture.requestMicrophoneStream();
+  return window.RTAudioCapture.requestMicrophoneStream();
 }
 
 function setConnectionInputsDisabled(disabled) {
@@ -2503,7 +2518,7 @@ function openMeetingSocket(resume = false) {
   isServerReady = false;
   const wsUrl = webSocketUrlForMode(elements.server.value, serviceMode);
   elements.server.value = wsUrl;
-  socket = window.WhisperLiveWsClient.open(wsUrl, {
+  socket = window.RTWsClient.open(wsUrl, {
     open: sendConfig,
     message: handleMessage,
     error: () => setStatus("连接错误", "error"),
@@ -2520,7 +2535,7 @@ function handleSocketClose() {
   selectedSummarySessionStatus = "interrupted";
   setStatus("连接中断，准备重连", "busy");
   if (!reconnectController) {
-    reconnectController = new window.WhisperLiveReconnectController({
+    reconnectController = new window.RTReconnectController({
       onStatus: (attempt, total) => setStatus(`正在重连 ${attempt}/${total}，断线期间音频未记录`, "busy"),
       onReconnect: () => openMeetingSocket(true),
       onFailed: () => markSessionInterrupted(),
@@ -2532,7 +2547,7 @@ function handleSocketClose() {
 function markSessionInterrupted() {
   setStatus("会议已中断", "error");
   if (mediaStream) {
-    window.WhisperLiveAudioCapture.stopTracks(mediaStream);
+    window.RTAudioCapture.stopTracks(mediaStream);
     mediaStream = null;
   }
   if (processor) { processor.disconnect(); processor = null; }
@@ -2547,7 +2562,7 @@ function markSessionInterrupted() {
 
 async function startCapture() {
   setStatus("连接中", "busy");
-  const newSession = window.WhisperLiveSessionState.createSession();
+  const newSession = window.RTSessionState.createSession();
   currentSessionId = newSession.sessionId;
   currentSessionStartedAt = newSession.startedAt;
   hasStoppedCurrentSession = false;
@@ -2623,7 +2638,7 @@ function stopCapture(sendEnd = true) {
     audioContext = null;
   }
   if (mediaStream) {
-    window.WhisperLiveAudioCapture.stopTracks(mediaStream);
+    window.RTAudioCapture.stopTracks(mediaStream);
     mediaStream = null;
   }
   if (socket && socket.readyState === WebSocket.OPEN) {

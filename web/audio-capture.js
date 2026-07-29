@@ -1,5 +1,5 @@
 (function () {
-  window.WhisperLiveAudioCapture = {
+  window.RTAudioCapture = {
     async requestMicrophoneStream() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error("当前页面无法访问麦克风。请使用 HTTPS，或在 client 本机通过 http://localhost 打开页面。");

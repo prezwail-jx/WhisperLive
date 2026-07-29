@@ -1,5 +1,5 @@
 (function () {
-  window.WhisperLiveWsClient = {
+  window.RTWsClient = {
     open(url, handlers) {
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";

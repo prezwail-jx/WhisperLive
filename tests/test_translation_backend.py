@@ -18,7 +18,7 @@ class FakeTokenizer:
     lang_code_to_id = {"eng_Latn": 1, "zho_Hans": 2}
     unk_token_id = 0
 
-    def __call__(self, text, return_tensors=None, truncation=None):
+    def __call__(self, text, return_tensors=None, truncation=None, padding=None):
         return FakeTensorBatch(input_ids=[1, 2, 3])
 
     def convert_tokens_to_ids(self, token):
@@ -158,7 +158,7 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
         self.assertEqual(model.last_generate_kwargs["max_new_tokens"], 128)
         self.assertEqual(model.last_generate_kwargs["num_beams"], 3)
 
-    def test_nllb_generate_uses_realtime_length_limit(self):
+    def test_nllb_generate_uses_expanded_realtime_length_limit(self):
         translator = NLLBTranslator()
         translator.tokenizer = FakeTokenizer()
         translator.model = FakeModel()
@@ -172,9 +172,21 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
         self.assertEqual(translated, "translated")
         self.assertEqual(source_language, "en")
         self.assertEqual(target_language, "zh")
-        self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], 128)
+        self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], 256)
         self.assertEqual(translator.model.last_generate_kwargs["num_beams"], 3)
         self.assertEqual(translator.model.last_generate_kwargs["forced_bos_token_id"], 2)
+
+    def test_nllb_batch_generate_uses_expanded_realtime_length_limit(self):
+        translator = NLLBTranslator()
+        translator.tokenizer = FakeTokenizer()
+        translator.model = FakeModel()
+
+        results = translator.translate_batch([
+            {"text": "hello everyone", "source_language": "en", "target_language": "zh"}
+        ])
+
+        self.assertEqual(results[0], ("translated", "en", "zh"))
+        self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], 256)
 
     def test_pure_chinese_has_no_terms_to_protect(self):
         protected_text, terms = HelsinkiZhEnTranslator.protect_english_terms(
@@ -487,6 +499,20 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
             ServeClientTranslation.translation_output_guard_reason(source, translated),
             "repeated_ngram",
         )
+
+    def test_guard_rejects_repeated_cjk_phrase_output(self):
+        client = self.make_client()
+        translated = "优优独播剧场 " * 5
+
+        guarded = client.guard_translation_output(
+            "YoYo Television Series Exclusive",
+            translated,
+            "en",
+            "zh",
+        )
+
+        self.assertEqual(guarded, "翻译暂不可用")
+        self.assertEqual(client.pending_translation_warning, "repeated_cjk_phrase")
 
     def test_guard_allows_normal_output(self):
         client = self.make_client()
@@ -832,6 +858,7 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
             "source_language": "en",
             "target_language": "zh",
             "translation_draft_enabled": True,
+            "translation_readability_context_enabled": True,
             "translation_draft_interval_seconds": 1.2,
             "translation_draft_min_delta_chars": 8,
             "translation_draft_max_source_chars": 220,
@@ -937,7 +964,7 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
         self.clear_draft_wakeup(client)
         client.last_draft_inference_finished_at = 10.0
         self.assertIsNone(client.claim_ready_translation_draft(now=11.0))
-        self.assertIsNotNone(client.claim_ready_translation_draft(now=11.2))
+        self.assertIsNotNone(client.claim_ready_translation_draft(now=11.21))
 
         other = self.make_client()
         other.observe_asr_segment(self.draft_segment())
@@ -999,10 +1026,8 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
 
     def test_context_input_trims_oldest_without_cutting_current_sentence(self):
         client = self.make_client(translation_readability_context_max_chars=32)
-        client.readability_context_history = [
-            {"source_text": "veryoldword alpha beta gamma", "text": "旧内容"},
-            {"source_text": "newest context words", "text": "新内容"},
-        ]
+        client.record_readability_context("veryoldword alpha beta gamma", "旧内容", "en", "zh")
+        client.record_readability_context("newest context words", "新内容", "en", "zh")
         current = "Current sentence must remain completely intact."
         contextual, history = client.build_readability_context_input(current, "en")
         context, marker, actual_current = contextual.split("\n")
@@ -1028,7 +1053,7 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
             "boundary_missing",
         )
 
-        client.readability_context_history = history
+        client.record_readability_context("Previous topic", "先前主题", "en", "zh")
         client.translator.translate.side_effect = [
             ("没有边界的上下文结果", "en", "zh"),
             ("当前内容", "en", "zh"),
@@ -1037,11 +1062,70 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
         self.assertEqual((translated, source_language, target_language), ("当前内容", "en", "zh"))
         self.assertEqual(client.translator.translate.call_count, 2)
 
+    def test_context_undertranslation_falls_back_to_current_only(self):
+        client = self.make_client()
+        client.record_readability_context(
+            "The previous project had a similar field trial.",
+            "此前项目有类似现场试验。",
+            "en",
+            "zh",
+        )
+        marker = client._READABILITY_BOUNDARY_MARKER
+        client.translator.translate.side_effect = [
+            (f"此前项目有类似现场试验。 {marker} 真正的矿井", "en", "zh"),
+            ("真正的矿井展示了如何扩大规模，并且BHP承担了巨大风险。", "en", "zh"),
+        ]
+
+        translated, source_language, target_language = client.translate_text(
+            "The real mine showed how we built it up and it worked and they did four more after that and the risk to BHP was huge",
+            "en",
+        )
+
+        self.assertEqual(translated, "真正的矿井展示了如何扩大规模，并且BHP承担了巨大风险。")
+        self.assertEqual(source_language, "en")
+        self.assertEqual(target_language, "zh")
+        self.assertEqual(client.translator.translate.call_count, 2)
+
+    def test_zh_en_final_context_uses_chinese_history_without_draft(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_draft_enabled=False,
+            translation_readability_context_enabled=True,
+        )
+        client.record_readability_context("前一个中文主题是矿业研究。", "The previous topic was mining research.", "zh", "en")
+        marker = client._READABILITY_BOUNDARY_MARKER
+        client.translator.translate.return_value = (
+            f"The previous topic was mining research. {marker} The current Chinese topic continues the field test plan.",
+            "zh",
+            "en",
+        )
+
+        translated, source_language, target_language = client.translate_text(
+            "当前中文主题继续讨论现场测试计划。",
+            "zh",
+        )
+
+        self.assertEqual(translated, "The current Chinese topic continues the field test plan.")
+        self.assertEqual(source_language, "zh")
+        self.assertEqual(target_language, "en")
+        sent_text = client.translator.translate.call_args.args[0]
+        self.assertIn("前一个中文主题", sent_text)
+        self.assertIn(marker, sent_text)
+
+    def test_readability_context_resets_on_language_direction_switch(self):
+        client = self.make_client()
+
+        self.assertTrue(client.record_readability_context("English topic", "英文主题", "en", "zh"))
+        self.assertTrue(client.record_readability_context("中文主题", "Chinese topic", "zh", "en"))
+
+        self.assertEqual(client.readability_context_direction, ("zh", "en"))
+        self.assertEqual(client.readability_context_history, [{"source_text": "中文主题", "text": "Chinese topic"}])
+        self.assertEqual(client.readability_context_snapshot("en", "zh"), [])
+
     def test_draft_context_fallback_failure_is_silent_and_does_not_leak_context(self):
         client = self.make_client()
-        client.readability_context_history = [
-            {"source_text": "Private previous topic", "text": "私有历史"}
-        ]
+        client.record_readability_context("Private previous topic", "私有历史", "en", "zh")
         client.translator.translate.side_effect = [
             ("缺少边界的结果", "en", "zh"),
             ("Current content", "en", "zh"),
@@ -1257,7 +1341,7 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         client.flush_translation_buffer()
 
         payload = self.get_last_payload(client)
-        self.assertEqual(payload["translated_segments"][0]["text"], "translated:好的。")
+        self.assertEqual(payload["translated_segments"][0]["text"], "Okay.")
 
     def test_exit_signal_flushes_remaining_buffer(self):
         client = self.make_client()
@@ -2004,4 +2088,31 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
 
         self.assertFalse(saw_exit_signal)
         self.assertEqual([segment["text"] for segment in kept], ["seg4", "seg5", "seg6"])
+        self.assertEqual(client.translation_queue.qsize(), 0)
+
+    def test_accurate_draft_backlog_preserves_all_completed_segments(self):
+        client = self.make_client(service_mode="accurate", translation_draft_enabled=True)
+        first_segment = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "first",
+            "completed": True,
+            "language": "en",
+        }
+        for index in range(1, 7):
+            client.translation_queue.put({
+                "start": float(index),
+                "end": float(index + 1),
+                "text": f"seg{index}",
+                "completed": True,
+                "language": "en",
+            })
+
+        kept, saw_exit_signal = client.drain_translation_backlog(first_segment)
+
+        self.assertFalse(saw_exit_signal)
+        self.assertEqual(
+            [segment["text"] for segment in kept],
+            ["first", "seg1", "seg2", "seg3", "seg4", "seg5", "seg6"],
+        )
         self.assertEqual(client.translation_queue.qsize(), 0)

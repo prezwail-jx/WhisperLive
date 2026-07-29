@@ -325,6 +325,7 @@ class TestTranslationDraftConfig(unittest.TestCase):
         options = TranscriptionServer.normalize_translation_draft_options(self.eligible_options())
 
         self.assertTrue(options["translation_draft_enabled"])
+        self.assertTrue(options["translation_readability_context_enabled"])
         self.assertEqual(options["translation_draft_interval_seconds"], 1.2)
         self.assertEqual(options["translation_draft_min_delta_chars"], 8)
         self.assertEqual(options["translation_draft_max_source_chars"], 220)
@@ -337,6 +338,31 @@ class TestTranslationDraftConfig(unittest.TestCase):
         )
 
         self.assertTrue(options["translation_draft_enabled"])
+
+    def test_mixed_interpretation_enables_draft_and_context_for_runtime_direction(self):
+        options = TranscriptionServer.normalize_translation_draft_options(
+            self.eligible_options(translation_mode="mixed_interpretation", language=None, target_language="auto")
+        )
+
+        self.assertTrue(options["translation_draft_enabled"])
+        self.assertTrue(options["translation_readability_context_enabled"])
+        self.assertEqual(options["translation_readability_context_sentences"], 2)
+        self.assertEqual(options["translation_readability_context_max_chars"], 220)
+
+    def test_zh_en_can_enable_context_without_draft(self):
+        options = TranscriptionServer.normalize_translation_draft_options(
+            self.eligible_options(
+                language="zh",
+                target_language="en",
+                translation_draft_enabled=False,
+                translation_readability_context_enabled=True,
+            )
+        )
+
+        self.assertFalse(options["translation_draft_enabled"])
+        self.assertTrue(options["translation_readability_context_enabled"])
+        self.assertEqual(options["translation_readability_context_sentences"], 2)
+        self.assertEqual(options["translation_readability_context_max_chars"], 220)
 
     def test_non_faster_whisper_backend_is_disabled(self):
         options = TranscriptionServer.normalize_translation_draft_options(
@@ -352,17 +378,16 @@ class TestTranslationDraftConfig(unittest.TestCase):
         cases = [
             self.eligible_options(translation_draft_enabled=None),
             self.eligible_options(translation_draft_enabled="false"),
-            self.eligible_options(language="zh", target_language="en"),
             self.eligible_options(service_mode="standard"),
             self.eligible_options(service_mode="conversation"),
             self.eligible_options(service_mode="transcription", enable_translation=False),
-            self.eligible_options(translation_mode="mixed_interpretation", language=None, target_language="auto"),
         ]
 
         for options in cases:
             with self.subTest(options=options):
                 normalized = TranscriptionServer.normalize_translation_draft_options(options)
                 self.assertFalse(normalized["translation_draft_enabled"])
+                self.assertFalse(normalized["translation_readability_context_enabled"])
                 self.assertEqual(normalized["translation_readability_context_sentences"], 0)
                 self.assertEqual(normalized["translation_readability_context_max_chars"], 0)
 
@@ -558,6 +583,7 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
         self.assertEqual(kwargs["service_mode"], "accurate")
         self.assertEqual(kwargs["source_language"], "en")
         self.assertTrue(kwargs["translation_draft_enabled"])
+        self.assertTrue(kwargs["translation_readability_context_enabled"])
         self.assertEqual(kwargs["translation_draft_interval_seconds"], 1.2)
         self.assertEqual(kwargs["translation_draft_min_delta_chars"], 8)
         self.assertEqual(kwargs["translation_draft_max_source_chars"], 220)

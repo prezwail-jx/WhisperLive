@@ -311,6 +311,8 @@ class HelsinkiZhEnTranslator:
 class NLLBTranslator(HelsinkiZhEnTranslator):
     """Local zh<->en translator backed by NLLB-200 distilled 600M."""
 
+    MAX_NEW_TOKENS = 256
+
     LANGUAGE_CODES = {
         "zh": "zho_Hans",
         "en": "eng_Latn",
@@ -613,6 +615,7 @@ class ServeClientTranslation(ServeClientBase):
         service_mode="standard",
         source_language=None,
         translation_draft_enabled=False,
+        translation_readability_context_enabled=False,
         translation_draft_interval_seconds=1.2,
         translation_draft_min_delta_chars=8,
         translation_draft_max_source_chars=220,
@@ -657,12 +660,13 @@ class ServeClientTranslation(ServeClientBase):
         self.service_mode = str(service_mode or "standard")
         self.source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
         self.translation_draft_enabled = bool(translation_draft_enabled)
+        self.translation_readability_context_enabled = bool(translation_readability_context_enabled)
         self.translation_draft_interval_seconds = min(10.0, max(0.5, float(translation_draft_interval_seconds or 1.2)))
         self.translation_draft_min_delta_chars = min(220, max(1, int(translation_draft_min_delta_chars or 8)))
         self.translation_draft_max_source_chars = min(220, max(32, int(translation_draft_max_source_chars or 220)))
         self.translation_readability_context_sentences = min(2, max(0, int(translation_readability_context_sentences or 0)))
         self.translation_readability_context_max_chars = min(220, max(0, int(translation_readability_context_max_chars or 0)))
-        if not self.translation_draft_enabled or self.translation_readability_context_sentences == 0:
+        if not self.translation_readability_context_enabled or self.translation_readability_context_sentences == 0:
             self.translation_readability_context_sentences = 0
             self.translation_readability_context_max_chars = 0
         self.translation_buffer = []
@@ -679,6 +683,7 @@ class ServeClientTranslation(ServeClientBase):
         self.last_draft_inference_finished_at = None
         self.readability_context_lock = threading.Lock()
         self.readability_context_history = []
+        self.readability_context_direction = None
         self.translator = None
         self.translator_lock = None
         self.batch_worker = None
@@ -705,11 +710,10 @@ class ServeClientTranslation(ServeClientBase):
         )
         return bool(
             self.service_mode == "accurate"
-            and self.translation_draft_enabled
+            and self.translation_readability_context_enabled
             and self.translation_readability_context_sentences > 0
             and self.translation_readability_context_max_chars > 0
-            and source_language == "en"
-            and target_language == "zh"
+            and (source_language, target_language) in (("en", "zh"), ("zh", "en"))
         )
 
     @staticmethod
@@ -728,8 +732,19 @@ class ServeClientTranslation(ServeClientBase):
     def readability_context_snapshot(self, source_language, target_language=None):
         if not self.readability_context_eligible(source_language, target_language):
             return []
+        direction = self.readability_context_direction_key(source_language, target_language)
         with self.readability_context_lock:
+            if self.readability_context_direction != direction:
+                return []
             return [unit.copy() for unit in self.readability_context_history]
+
+    def readability_context_direction_key(self, source_language, target_language=None):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = (
+            HelsinkiZhEnTranslator.normalize_language(target_language)
+            or self._resolved_target_language(source_language)
+        )
+        return (source_language, target_language)
 
     def build_readability_context_input(self, current_text, source_language, target_language=None):
         current_text = str(current_text or "").strip()
@@ -917,6 +932,13 @@ class ServeClientTranslation(ServeClientBase):
             target_language,
             history,
         )
+        if extraction_reason is None and path == "final":
+            extraction_reason = self.contextual_undertranslation_reason(
+                current_text,
+                current_translation,
+                resolved_source,
+                target_language,
+            )
         if extraction_reason:
             logging.info(
                 "[TRANSLATION_CONTEXT_EXTRACTION_FAILED] uid=%s path=%s reason=%s "
@@ -942,6 +964,7 @@ class ServeClientTranslation(ServeClientBase):
     ):
         if not self.readability_context_eligible(source_language, target_language):
             return False
+        direction = self.readability_context_direction_key(source_language, target_language)
         source_text = str(source_text or "").strip()
         translated_text = str(translated_text or "").strip()
         if (
@@ -965,6 +988,17 @@ class ServeClientTranslation(ServeClientBase):
             "text": translated_text,
         }
         with self.readability_context_lock:
+            if self.readability_context_direction != direction:
+                if self.readability_context_history:
+                    logging.info(
+                        "[TRANSLATION_CONTEXT_DIRECTION_RESET] uid=%s previous=%s current=%s cleared=%d",
+                        self.client_uid,
+                        self.readability_context_direction,
+                        direction,
+                        len(self.readability_context_history),
+                    )
+                self.readability_context_direction = direction
+                self.readability_context_history.clear()
             self.readability_context_history.append(unit)
             self.readability_context_history = self.readability_context_history[
                 -self.translation_readability_context_sentences:
@@ -1990,6 +2024,28 @@ class ServeClientTranslation(ServeClientBase):
         )
 
     @classmethod
+    def contextual_undertranslation_reason(cls, source_text, translated_text, source_language, target_language):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language)
+        source_text = str(source_text or "")
+        translated_text = str(translated_text or "")
+        if source_language == "en" and target_language == "zh":
+            source_words = len(cls._word_spans(source_text))
+            if source_words < 16:
+                return None
+            target_units = cls._count_cjk(translated_text) + len(cls._word_spans(translated_text))
+            if target_units * 100 < source_words * 65:
+                return "context_undertranslation"
+        if source_language == "zh" and target_language == "en":
+            source_chars = cls._count_cjk(source_text)
+            if source_chars < 12:
+                return None
+            target_words = len(cls._word_spans(translated_text))
+            if target_words * 100 < source_chars * 25:
+                return "context_undertranslation"
+        return None
+
+    @classmethod
     def _output_words(cls, text):
         return [match.group(0).lower() for match in cls._word_spans(text)]
 
@@ -2030,6 +2086,8 @@ class ServeClientTranslation(ServeClientBase):
             and len(translated_text) > max(len(source_text), 1) * max_length_ratio
         ):
             return "length_ratio"
+        if cls._has_repeated_cjk_phrase(translated_text):
+            return "repeated_cjk_phrase"
 
         words = cls._output_words(translated_text)
         if len(words) >= cls._OUTPUT_GUARD_MIN_REPEAT_WORDS:
@@ -2039,6 +2097,18 @@ class ServeClientTranslation(ServeClientBase):
             if cls._has_repeated_ngram(words):
                 return "repeated_ngram"
         return None
+
+    @classmethod
+    def _has_repeated_cjk_phrase(cls, text):
+        compact = re.sub(r"[^\u3400-\u4dbf\u4e00-\u9fff]+", "", str(text or ""))
+        if len(compact) < 16:
+            return False
+        for phrase_len in range(4, min(12, len(compact) // 4) + 1):
+            for start in range(0, len(compact) - phrase_len + 1):
+                phrase = compact[start:start + phrase_len]
+                if compact.count(phrase) >= 4:
+                    return True
+        return False
 
     def guard_translation_output(
         self,
@@ -2732,6 +2802,15 @@ class ServeClientTranslation(ServeClientBase):
             self.translation_queue.task_done()
 
         candidates = [first_segment] + drained
+        if self.service_mode == "accurate" and self.translation_draft_enabled:
+            if len(candidates) > 1:
+                logging.info(
+                    "[TRANSLATION_BACKLOG_PRESERVED] uid=%s queue_size=%s segments=%d",
+                    self.client_uid,
+                    queue_size,
+                    len(candidates),
+                )
+            return candidates, saw_exit_signal
         kept = candidates[-self._BACKLOG_KEEP_LATEST:]
         dropped = max(len(candidates) - len(kept), 0)
         if dropped:
@@ -2905,6 +2984,7 @@ class ServeClientTranslation(ServeClientBase):
             self.last_draft_inference_finished_at = None
         with self.readability_context_lock:
             self.readability_context_history.clear()
+            self.readability_context_direction = None
         self.translated_segments.clear()
         self.translation_buffer.clear()
         self.translation_buffer_started_at = None

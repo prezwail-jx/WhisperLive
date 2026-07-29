@@ -4,7 +4,7 @@
     return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
-  window.WhisperLiveSessionState = {
+  window.RTSessionState = {
     createSession() {
       return {
         sessionId: createUid(),

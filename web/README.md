@@ -1,4 +1,4 @@
-# WhisperLive Web 前端
+# 实时同传 Web 前端
 
 `web/` 是纯静态浏览器前端，负责麦克风采集、实时字幕展示、连接配置，以及下载后端生成的会议日志和总结。会议日志的拼接、清洗和落盘由后端完成。
 
@@ -27,7 +27,7 @@ https://app.cmtbs.com:57890/
 python3 -m http.server 8080
 ```
 
-然后访问 `http://localhost:8080`。此方式只提供静态页面，仍需填写可访问的 WhisperLive 网关地址，并确保后端 CORS 允许该来源。
+然后访问 `http://localhost:8080`。此方式只提供静态页面，仍需填写可访问的实时同传网关地址，并确保后端 CORS 允许该来源。
 
 不要把远程后端 `9090` 当作面向用户的生产入口；远程访问应经过配置了 WebSocket 和 Admin API 转发的 Nginx 网关。
 
