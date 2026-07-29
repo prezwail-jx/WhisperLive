@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from whisper_live.backend.faster_whisper_backend import ServeClientFasterWhisper
@@ -14,6 +15,18 @@ class DummyThread:
 
     def start(self):
         return None
+
+
+def segment(text, avg_logprob=-0.6, no_speech_prob=0.0):
+    return SimpleNamespace(text=text, avg_logprob=avg_logprob, no_speech_prob=no_speech_prob)
+
+
+def info(language, probability=0.6, candidates=None):
+    return SimpleNamespace(
+        language=language,
+        language_probability=probability,
+        all_language_probs=candidates,
+    )
 
 
 class TestServeClientFasterWhisperSingleModelInit(unittest.TestCase):
@@ -257,6 +270,89 @@ class TestServeClientFasterWhisperSingleModelInit(unittest.TestCase):
             )
 
         self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
+
+    def test_mixed_language_retry_requires_mixed_interpretation(self):
+        client = ServeClientFasterWhisper(
+            websocket=mock.Mock(),
+            model=None,
+            client_uid="client",
+            mixed_interpretation=False,
+            mixed_language_retry_enabled=True,
+        )
+
+        self.assertFalse(client.mixed_language_retry_enabled)
+
+        client = ServeClientFasterWhisper(
+            websocket=mock.Mock(),
+            model=None,
+            client_uid="client",
+            mixed_interpretation=True,
+            mixed_language_retry_enabled=True,
+        )
+
+        self.assertTrue(client.mixed_language_retry_enabled)
+
+    def test_suspicious_switch_retries_previous_language_once(self):
+        client = self.make_mixed_language_client()
+        client.mixed_language_retry_enabled = True
+        client.current_language = "en"
+        calls = []
+
+        def retry_callback(input_sample, language):
+            calls.append((input_sample, language))
+            return [segment("we need to review the plan", -0.55)], info("en", 0.7)
+
+        result = client._maybe_retry_mixed_language(
+            [1, 2, 3],
+            [segment("我们需要", -0.6)],
+            info("zh", 0.55, [("zh", 0.55), ("en", 0.45)]),
+            retry_callback,
+        )
+
+        self.assertEqual(calls, [([1, 2, 3], "en")])
+        self.assertEqual(result[0].text, "we need to review the plan")
+        self.assertEqual(client.current_language, "en")
+
+    def test_strong_real_switch_is_accepted_without_retry(self):
+        client = self.make_mixed_language_client()
+        client.mixed_language_retry_enabled = True
+        client.current_language = "en"
+        retry_callback = mock.Mock()
+
+        result = client._maybe_retry_mixed_language(
+            [],
+            [segment("我们今天讨论预算", -0.3)],
+            info("zh", 0.92, [("zh", 0.92), ("en", 0.03)]),
+            retry_callback,
+        )
+
+        self.assertEqual(result[0].text, "我们今天讨论预算")
+        self.assertEqual(client.current_language, "zh")
+        retry_callback.assert_not_called()
+
+    def test_batch_retry_submits_auto_and_forced_previous_language(self):
+        submitted_languages = []
+
+        class FakeBatchWorker:
+            def submit(self, request):
+                submitted_languages.append(request.language)
+                if request.language is None:
+                    request.result = [segment("我们需要", -0.6)]
+                    request.info = info("zh", 0.55, [("zh", 0.55), ("en", 0.45)])
+                else:
+                    request.result = [segment("we need to review the plan", -0.55)]
+                    request.info = info("en", 0.7)
+                request.future.set()
+
+        ServeClientFasterWhisper.BATCH_WORKER = FakeBatchWorker()
+        client = self.make_mixed_language_client()
+        client.mixed_language_retry_enabled = True
+        client.current_language = "en"
+
+        result = client.transcribe_audio([])
+
+        self.assertEqual(submitted_languages, [None, "en"])
+        self.assertEqual(result[0].text, "we need to review the plan")
 
 
 if __name__ == "__main__":

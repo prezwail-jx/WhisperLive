@@ -100,6 +100,39 @@ class TestMeetingLogStore(unittest.TestCase):
             self.assertIn("翻译暂不可用", markdown)
             self.assertNotIn("source_echo", markdown)
 
+    def test_session_log_preserves_translation_confidence_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            store.start_session({"uid": "uid-1", "session_id": "session-low", "meeting_name": "会议"})
+            store.append_segments("session-low", "source", [
+                {
+                    "start": "0.000",
+                    "end": "1.000",
+                    "text": "BHP shipped 12 tons of ore.",
+                    "completed": True,
+                    "utterance_id": "uid-1:1:0.000",
+                },
+            ])
+            store.append_segments("session-low", "translation", [
+                {
+                    "start": "0.000",
+                    "end": "1.000",
+                    "text": "必和必拓运送了矿石。",
+                    "completed": True,
+                    "source_text": "BHP shipped 12 tons of ore.",
+                    "translation_confidence": "low",
+                    "utterance_id": "uid-1:1:0.000",
+                },
+            ])
+
+            info = store.finish_session("session-low")
+
+            with open(info["json_path"], "r", encoding="utf-8") as file:
+                data = json.load(file)
+            translation = data["translation_segments"][0]
+            self.assertEqual(translation["translation_confidence"], "low")
+            self.assertNotIn("translation_warning", translation)
+
     def test_finished_transcript_can_be_corrected_with_revision_tracking(self):
         with tempfile.TemporaryDirectory() as directory:
             store = MeetingLogStore(directory)

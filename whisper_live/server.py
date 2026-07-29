@@ -1167,7 +1167,11 @@ class TranscriptionServer:
         if base_processor is not None:
             segment = base_processor(segment) or segment
         if translation_mode == "mixed_interpretation":
-            inferred_language = self.infer_segment_text_language(segment.get("text"))
+            segment_language = str(segment.get("language") or "").strip().lower()
+            if segment_language not in ("zh", "en"):
+                inferred_language = self.infer_segment_text_language(segment.get("text"))
+            else:
+                inferred_language = None
             if inferred_language:
                 segment = segment.copy()
                 segment["language"] = inferred_language
@@ -1494,6 +1498,10 @@ class TranscriptionServer:
                     diarization=self._create_diarizer(options),
                     word_timestamps=options.get("word_timestamps", False),
                     mixed_interpretation=options.get("translation_mode") == "mixed_interpretation",
+                    mixed_language_retry_enabled=(
+                        options.get("service_mode") == "accurate"
+                        and options.get("translation_mode") == "mixed_interpretation"
+                    ),
                     asr_device_index=asr_device_index,
                 )
 

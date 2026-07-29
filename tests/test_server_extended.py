@@ -951,6 +951,10 @@ class TestTranslationDraftIsolationAndFrontendContract(unittest.TestCase):
         self.assertIn("removeDraftTranslationsForSourceIds(sourceIds);", source)
         self.assertIn("if (segment?.completed === false", source)
         self.assertIn("function resetTranslationDraftState(removeDraftSegments = false)", source)
+        self.assertIn("function frontendTimeoutTargetLanguage(source)", source)
+        self.assertIn("function frontendUnavailableTextForTarget(targetLanguage)", source)
+        self.assertIn('translation_warning: "frontend_timeout"', source)
+        self.assertNotIn("translation_confidence === 'low'", source)
 
 
 class TestClientManagerAdminStatus(unittest.TestCase):

@@ -176,6 +176,25 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
         self.assertEqual(translator.model.last_generate_kwargs["num_beams"], 3)
         self.assertEqual(translator.model.last_generate_kwargs["forced_bos_token_id"], 2)
 
+    def test_nllb_translate_uses_relaxed_generation_profile_when_requested(self):
+        translator = NLLBTranslator()
+        translator.tokenizer = FakeTokenizer()
+        translator.model = FakeModel()
+
+        translated, source_language, target_language = translator.translate(
+            "hello everyone",
+            "en",
+            "zh",
+            generation_profile="relaxed",
+        )
+
+        self.assertEqual(translated, "translated")
+        self.assertEqual(source_language, "en")
+        self.assertEqual(target_language, "zh")
+        self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], 320)
+        self.assertEqual(translator.model.last_generate_kwargs["num_beams"], 3)
+        self.assertEqual(translator.model.last_generate_kwargs["length_penalty"], 1.1)
+
     def test_nllb_normalizes_literal_amp_entity(self):
         translator = NLLBTranslator()
         translator.tokenizer = FakeTokenizer()
@@ -203,6 +222,20 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
 
         self.assertEqual(results[0], ("translated", "en", "zh"))
         self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], 256)
+
+    def test_nllb_batch_translate_uses_relaxed_generation_profile_when_requested(self):
+        translator = NLLBTranslator()
+        translator.tokenizer = FakeTokenizer()
+        translator.model = FakeModel()
+
+        results = translator.translate_batch(
+            [{"text": "hello everyone", "source_language": "en", "target_language": "zh"}],
+            generation_profile="relaxed",
+        )
+
+        self.assertEqual(results[0], ("translated", "en", "zh"))
+        self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], 320)
+        self.assertEqual(translator.model.last_generate_kwargs["length_penalty"], 1.1)
 
     def test_nllb_batch_normalizes_literal_amp_entity(self):
         translator = NLLBTranslator()
@@ -440,7 +473,7 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
         guarded = client.guard_translation_output("技术词", translated, "zh", "en")
 
-        self.assertEqual(guarded, "翻译暂不可用")
+        self.assertEqual(guarded, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "underscore_run")
         self.assertEqual(
             ServeClientTranslation.translation_output_guard_reason("技术词", translated),
@@ -453,7 +486,7 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
         guarded = client.guard_translation_output("短句", translated, "zh", "en")
 
-        self.assertEqual(guarded, "翻译暂不可用")
+        self.assertEqual(guarded, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "length_ratio")
         self.assertEqual(
             ServeClientTranslation.translation_output_guard_reason("短句", translated),
@@ -519,7 +552,7 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
         guarded = client.guard_translation_output("对对对", translated, "zh", "en")
 
-        self.assertEqual(guarded, "翻译暂不可用")
+        self.assertEqual(guarded, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "low_unique_word_ratio")
         self.assertEqual(
             ServeClientTranslation.translation_output_guard_reason("对对对", translated),
@@ -533,7 +566,7 @@ class TestServeClientTranslationOutputGuard(unittest.TestCase):
 
         guarded = client.guard_translation_output(source, translated, "zh", "en")
 
-        self.assertEqual(guarded, "翻译暂不可用")
+        self.assertEqual(guarded, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "repeated_ngram")
         self.assertEqual(
             ServeClientTranslation.translation_output_guard_reason(source, translated),
@@ -623,7 +656,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         translated, source_language, target_language = client.translate_text("创新中心特邀专家", "zh")
 
-        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(translated, "Translation unavailable")
         self.assertEqual(source_language, "zh")
         self.assertEqual(target_language, "en")
         self.assertEqual(client.pending_translation_warning, "residual_cjk")
@@ -646,7 +679,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         payload = self.get_last_payload(client)
         segment = payload["translated_segments"][0]
-        self.assertEqual(segment["text"], "翻译暂不可用")
+        self.assertEqual(segment["text"], "Translation unavailable")
         self.assertEqual(segment["source_text"], "创新中心特邀专家举办主题讲座。")
         self.assertEqual(segment["translation_warning"], "residual_cjk")
 
@@ -748,7 +781,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
             translated, _, _ = client.translate_text("创新中心特邀专家", "zh")
 
         output = "\n".join(logs.output)
-        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(translated, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "source_echo")
         self.assertEqual(client.translator.translate.call_count, 2)
         self.assertIn("TRANSLATION_OUTPUT_RETRY", output)
@@ -778,7 +811,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         translated, _, _ = client.translate_text("技术词", "zh")
 
-        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(translated, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "cuda_oom")
         self.assertEqual(client.translator.translate.call_count, 1)
 
@@ -790,7 +823,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         translated, _, _ = client.translate_text("技术词", "zh")
 
-        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(translated, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "translation_exception")
         self.assertEqual(client.translator.translate.call_count, 1)
 
@@ -801,7 +834,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         translated, _, _ = client.translate_text("技术词", "zh")
 
-        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(translated, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "model_unavailable")
         client.translator.translate.assert_not_called()
 
@@ -811,7 +844,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         translated, _, _ = client.translate_text("技术词", "zh")
 
-        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(translated, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "client_exit")
         client.translator.translate.assert_not_called()
 
@@ -853,7 +886,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         translated, _, _ = client.translate_text("技术词", "zh")
 
-        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(translated, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "source_echo")
         self.assertEqual(client.batch_worker.submit.call_count, 1)
         self.assertEqual(client.translator.translate.call_count, 1)
@@ -868,7 +901,7 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
 
         translated, _, _ = client.translate_text("创新中心特邀专家", "zh")
 
-        self.assertEqual(translated, "翻译暂不可用")
+        self.assertEqual(translated, "Translation unavailable")
         self.assertEqual(client.pending_translation_warning, "translation_timeout")
         self.assertEqual(client.batch_worker.submit.call_count, 2)
         client.translator.translate.assert_not_called()
@@ -1181,6 +1214,7 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
         client.translator.translate.side_effect = [
             ("后来扩大。", "en", "zh"),
             ("公司扩大产品线。", "en", "zh"),
+            ("客户确认后扩大产品线。", "en", "zh"),
         ]
         client.translator.translate_batch.return_value = [
             ("空客开始。", "en", "zh"),
@@ -1192,7 +1226,76 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
 
         self.assertEqual(translated, "空客开始。客户确认。公司扩大。")
         self.assertEqual((source_language, target_language), ("en", "zh"))
-        self.assertEqual(client.pending_translation_warning, "undertranslation")
+        self.assertIsNone(client.pending_translation_warning)
+        self.assertEqual(client.pending_translation_confidence, "low")
+
+    def test_fact_anchor_validation_detects_en_zh_missing_units_below_word_threshold(self):
+        client = self.make_client(model_name="nllb_200_600m")
+        source = "BHP shipped 12 tons of ore."
+        translated = "必和必拓运送了矿石。"
+
+        self.assertEqual(
+            client.translation_completeness_reason(source, translated, "en", "zh"),
+            "missing_fact_anchor",
+        )
+        self.assertIsNone(
+            client.translation_completeness_reason(source, "必和必拓运送了12吨矿石。", "en", "zh")
+        )
+
+    def test_fact_anchor_validation_detects_zh_en_missing_units(self):
+        client = self.make_client(model_name="nllb_200_600m", source_language="zh", target_language="en")
+        source = "项目需要支付300万人民币，并运输12吨矿石。"
+        translated = "The project needs payment and ships ore."
+
+        self.assertEqual(
+            client.translation_completeness_reason(source, translated, "zh", "en"),
+            "missing_fact_anchor",
+        )
+        self.assertIsNone(
+            client.translation_completeness_reason(
+                source,
+                "The project needs 300 million RMB and ships 12 tons of ore.",
+                "zh",
+                "en",
+            )
+        )
+
+    def test_completeness_repair_uses_relaxed_candidate_before_chunked(self):
+        client = self.make_client(model_name="nllb_200_600m")
+        source = "BHP shipped 12 tons of ore after customers confirmed the first pilot worked."
+        client.translator.translate.side_effect = [
+            ("必和必拓运送了矿石。", "en", "zh"),
+            ("客户确认后运送矿石。", "en", "zh"),
+            ("必和必拓在客户确认首次试点有效后运送了12吨矿石。", "en", "zh"),
+        ]
+
+        translated, source_language, target_language = client.translate_text(source, "en")
+
+        self.assertEqual(translated, "必和必拓在客户确认首次试点有效后运送了12吨矿石。")
+        self.assertEqual((source_language, target_language), ("en", "zh"))
+        self.assertEqual(client.translator.translate.call_args.kwargs["generation_profile"], "relaxed")
+        client.translator.translate_batch.assert_not_called()
+
+    def test_all_unsafe_candidates_emit_target_language_unavailable(self):
+        client = self.make_client(model_name="nllb_200_600m", source_language="zh", target_language="en")
+        source = "创新中心需要支付300万人民币，并运输12吨矿石。"
+        client.translator.translate.side_effect = [
+            ("创新中心需要支付300万人民币，并运输12吨矿石。", "zh", "en"),
+            ("创新中心仍然没有翻译。", "zh", "en"),
+            ("创新中心还是中文输出。", "zh", "en"),
+        ]
+        client.translator.translate_batch.return_value = [
+            ("创新中心", "zh", "en"),
+            ("仍然中文", "zh", "en"),
+            ("还是中文", "zh", "en"),
+        ]
+
+        translated, source_language, target_language = client.translate_text(source, "zh")
+
+        self.assertEqual(translated, "Translation unavailable")
+        self.assertEqual((source_language, target_language), ("zh", "en"))
+        self.assertEqual(client.pending_translation_warning, "residual_cjk")
+        self.assertIsNone(client.pending_translation_confidence)
 
     def test_en_zh_undertranslation_repair_is_limited_to_accurate_nllb(self):
         client = self.make_client(service_mode="standard")
@@ -1759,6 +1862,31 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
             "translated:we really feel that we are at the frontier.",
         )
 
+    def test_new_dangling_connector_phrase_waits_until_incomplete_timeout(self):
+        client = self.make_client(
+            translation_context_seconds=5.0,
+            translation_max_wait_seconds=2.0,
+            translation_incomplete_max_wait_seconds=4.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "and they",
+            "completed": True,
+            "language": "en",
+        })
+
+        client.flush_translation_buffer()
+        client.websocket.send.assert_not_called()
+
+        client.translation_buffer_started_at -= 4.5
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "translated:and they")
+        self.assertNotIn("translation_warning", segment)
+
     def test_incomplete_english_flushes_without_warning_after_incomplete_timeout(self):
         client = self.make_client(
             translation_context_seconds=5.0,
@@ -2096,6 +2224,45 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         self.assertEqual(segment["source_text"], "今天开会")
         self.assertEqual(segment["source_utterance_ids"], ["client:1:0.000", "client:2:0.500"])
         self.assertNotIn("utterance_id", segment)
+
+    def test_translation_merge_preserves_low_confidence_metadata(self):
+        client = self.make_client(
+            translation_merge_enabled=True,
+            translation_merge_max_chars=100,
+            translation_merge_max_delay=60,
+        )
+        client.enqueue_translated_segment({
+            "start": "0.000",
+            "end": "0.500",
+            "text": "hello",
+            "completed": True,
+            "source_text": "你好",
+            "source_language": "zh",
+            "target_language": "en",
+            "translation_model": "helsinki_zh_en",
+            "utterance_id": "client:1:0.000",
+        })
+        client.enqueue_translated_segment({
+            "start": "0.500",
+            "end": "1.000",
+            "text": "world",
+            "completed": True,
+            "source_text": "世界",
+            "source_language": "zh",
+            "target_language": "en",
+            "translation_model": "helsinki_zh_en",
+            "translation_confidence": "low",
+            "utterance_id": "client:2:0.500",
+        })
+
+        client.websocket.send.assert_not_called()
+        client.flush_merge_buffer(force=True)
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "hello world")
+        self.assertEqual(segment["translation_confidence"], "low")
+        self.assertNotIn("translation_warning", segment)
 
     def test_translation_merge_flushes_on_gap(self):
         client = self.make_client(

@@ -270,7 +270,7 @@ class HelsinkiZhEnTranslator:
             logging.warning("[MIXED_LANG_PROTECT][WARN] unresolved placeholder in translated text")
         return restored_text
 
-    def translate(self, text: str, source_language: Optional[str], target_language: str):
+    def translate(self, text: str, source_language: Optional[str], target_language: str, generation_profile=None):
         direction = self.resolve_direction(source_language, target_language)
         if direction is None:
             return text, self.normalize_language(source_language), self.normalize_language(target_language)
@@ -362,7 +362,19 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
             raise ValueError(f"NLLB language token not found: {language_code}")
         return token_id
 
-    def translate(self, text: str, source_language: Optional[str], target_language: str):
+    def generation_kwargs(self, profile=None):
+        if profile == "relaxed":
+            return {
+                "max_new_tokens": 320,
+                "num_beams": 3,
+                "length_penalty": 1.1,
+            }
+        return {
+            "max_new_tokens": self.MAX_NEW_TOKENS,
+            "num_beams": 3,
+        }
+
+    def translate(self, text: str, source_language: Optional[str], target_language: str, generation_profile=None):
         direction = self.resolve_direction(source_language, target_language)
         if direction is None:
             return text, self.normalize_language(source_language), self.normalize_language(target_language)
@@ -389,8 +401,7 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
             generated_tokens = self.model.generate(
                 **encoded_input,
                 forced_bos_token_id=forced_bos_token_id,
-                max_new_tokens=self.MAX_NEW_TOKENS,
-                num_beams=3,
+                **self.generation_kwargs(generation_profile),
             )
         output = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
         translated_text = output[0] if output else text
@@ -400,7 +411,7 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
         translated_text = self.normalize_model_output(translated_text)
         return translated_text, source_language, resolved_target_language
 
-    def translate_batch(self, items):
+    def translate_batch(self, items, generation_profile=None):
         results = [None] * len(items)
         grouped = {}
 
@@ -451,8 +462,7 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
                 generated_tokens = self.model.generate(
                     **encoded_input,
                     forced_bos_token_id=forced_bos_token_id,
-                    max_new_tokens=self.MAX_NEW_TOKENS,
-                    num_beams=3,
+                    **self.generation_kwargs(generation_profile),
                 )
             outputs = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
             for entry, translated_text in zip(group, outputs):
@@ -479,11 +489,12 @@ class NLLBTranslationBatchWorker:
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
-    def submit(self, text, source_language, target_language, client_uid, timeout_seconds=10.0):
+    def submit(self, text, source_language, target_language, client_uid, timeout_seconds=10.0, generation_profile=None):
         request = {
             "text": text,
             "source_language": source_language,
             "target_language": target_language,
+            "generation_profile": generation_profile,
             "client_uid": client_uid,
             "event": threading.Event(),
             "result": None,
@@ -512,7 +523,14 @@ class NLLBTranslationBatchWorker:
 
             started_at = time.monotonic()
             try:
-                results = self.translator.translate_batch(batch)
+                profiles = {request.get("generation_profile") for request in batch}
+                if len(profiles) == 1:
+                    results = self.translator.translate_batch(batch, generation_profile=profiles.pop())
+                else:
+                    results = [
+                        self.translator.translate_batch([request], generation_profile=request.get("generation_profile"))[0]
+                        for request in batch
+                    ]
                 elapsed_ms = (time.monotonic() - started_at) * 1000.0
                 logging.info(
                     "[NLLB_BATCH] model=%s device=%s batch_size=%d generate_ms=%.1f",
@@ -578,9 +596,12 @@ class ServeClientTranslation(ServeClientBase):
     _RESIDUAL_CJK_MIN_CHARS = 8
     _RESIDUAL_CJK_MAX_RATIO = 0.25
     _TRANSLATION_UNAVAILABLE_TEXT = "翻译暂不可用"
+    _TRANSLATION_UNAVAILABLE_TEXT_EN = "Translation unavailable"
     _SOURCE_ECHO_PROPER_TERM_MAX_CHARS = 32
     _SOURCE_ECHO_PROPER_TERM_MAX_TOKENS = 4
-    _UNDERTRANSLATION_MIN_EN_WORDS = 16
+    _UNDERTRANSLATION_MIN_EN_WORDS = 12
+    _ZH_EN_UNDERTRANSLATION_MIN_CJK_CHARS = 12
+    _ZH_EN_UNDERTRANSLATION_TARGET_WORD_PERCENT = 30
     _UNDERTRANSLATION_TARGET_UNITS_PERCENT = 100
     _UNDERTRANSLATION_REPAIR_SECONDS = 3.0
     _UNDERTRANSLATION_MAX_CHUNKS = 3
@@ -597,6 +618,9 @@ class ServeClientTranslation(ServeClientBase):
         "i had", "i have", "it was", "there are", "there is", "we had",
         "we have", "we were", "you can", "you know", "i started",
         "this is how", "i want really", "you have huge", "from the",
+        "and they", "but they", "and we", "but we", "assuming you",
+        "we can", "they can", "we would", "they would", "we need to",
+        "they need to",
     }
 
     def __init__(
@@ -698,6 +722,7 @@ class ServeClientTranslation(ServeClientBase):
         self.translated_segments = []
         self.last_translated_source_text = ""
         self.pending_translation_warning = None
+        self.pending_translation_confidence = None
         self.draft_state_lock = threading.Lock()
         self.draft_states = {}
         self.draft_inference_active = False
@@ -846,6 +871,7 @@ class ServeClientTranslation(ServeClientBase):
         text,
         source_language,
         allow_batch=False,
+        generation_profile=None,
     ):
         started_at = time.monotonic()
         source_language, target_language = self._resolved_failure_languages(source_language)
@@ -868,6 +894,7 @@ class ServeClientTranslation(ServeClientBase):
                     self.target_language,
                     self.client_uid,
                     timeout_seconds=self.nllb_batch_timeout_seconds,
+                    generation_profile=generation_profile,
                 )
             except Exception as error:
                 return (
@@ -891,6 +918,7 @@ class ServeClientTranslation(ServeClientBase):
                     text,
                     source_language,
                     self.target_language,
+                    generation_profile=generation_profile,
                 )
         except Exception as error:
             return (
@@ -1000,7 +1028,7 @@ class ServeClientTranslation(ServeClientBase):
             not source_text
             or not translated_text
             or translation_warning
-            or translated_text == self._TRANSLATION_UNAVAILABLE_TEXT
+            or translated_text in (self._TRANSLATION_UNAVAILABLE_TEXT, self._TRANSLATION_UNAVAILABLE_TEXT_EN)
             or self.normalize_translation_comparison_text(source_text)
             == self.normalize_translation_comparison_text(translated_text)
             or self.translation_output_failure_reason(
@@ -1586,6 +1614,12 @@ class ServeClientTranslation(ServeClientBase):
         target_language = HelsinkiZhEnTranslator.normalize_language(target_language)
         return source_language, target_language or self._resolved_target_language(source_language)
 
+    def translation_unavailable_text(self, target_language=None):
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language)
+        if target_language == "en":
+            return self._TRANSLATION_UNAVAILABLE_TEXT_EN
+        return self._TRANSLATION_UNAVAILABLE_TEXT
+
     def _log_translation_retry(
         self,
         text,
@@ -1652,7 +1686,7 @@ class ServeClientTranslation(ServeClientBase):
             str(text or "").strip()[:120],
             str(translated_text or "").strip()[:160],
         )
-        return self._TRANSLATION_UNAVAILABLE_TEXT, source_language, target_language
+        return self.translation_unavailable_text(target_language), source_language, target_language
 
     def translate_text_with_batch(self, text: str, source_language: Optional[str]):
         if not self.batch_worker:
@@ -1780,6 +1814,7 @@ class ServeClientTranslation(ServeClientBase):
         initial_reason=None,
         attempt_offset=0,
         started_at=None,
+        generation_profile=None,
     ):
         started_at = started_at or time.monotonic()
         generate_ms = 0.0
@@ -1795,6 +1830,7 @@ class ServeClientTranslation(ServeClientBase):
                     text,
                     source_language,
                     self.target_language,
+                    generation_profile=generation_profile,
                 )
             except Exception as error:
                 generate_ms += (time.monotonic() - attempt_started_at) * 1000.0
@@ -1880,6 +1916,7 @@ class ServeClientTranslation(ServeClientBase):
             str: Translated text or a user-safe unavailable placeholder on failure
         """
         self.pending_translation_warning = None
+        self.pending_translation_confidence = None
         if not text.strip():
             return text, source_language, self.target_language
 
@@ -1926,6 +1963,7 @@ class ServeClientTranslation(ServeClientBase):
 
     def translate_text(self, text: str, source_language: Optional[str]):
         self.pending_translation_warning = None
+        self.pending_translation_confidence = None
         if (
             not str(text or "").strip()
             or not self.readability_context_eligible(source_language)
@@ -2001,15 +2039,137 @@ class ServeClientTranslation(ServeClientBase):
             return "undertranslation"
         return None
 
+    @classmethod
+    def _normalized_anchor_text(cls, text):
+        return unicodedata.normalize("NFKC", str(text or "")).casefold()
+
+    @classmethod
+    def _numeric_anchors(cls, text):
+        return [match.group(0).strip().casefold() for match in re.finditer(r"\d+(?:[.,]\d+)?\s*%?", str(text or ""))]
+
+    def fact_anchors(self, source_text, source_language, target_language):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language)
+        source = str(source_text or "")
+        anchors = []
+        for number in self._numeric_anchors(source):
+            anchors.append(("number", number, [number.replace(",", ""), number.replace(".", "")]))
+
+        lower = source.casefold()
+        word_equivalents = {
+            "bhp": ["必和必拓", "bhp"],
+            "rmb": ["人民币", "rmb"],
+            "aud": ["澳元", "aud"],
+            "australian dollars": ["澳元", "australian dollars"],
+            "tons": ["吨", "tons", "tonnes"],
+            "tonnes": ["吨", "tonnes", "tons"],
+            "ton": ["吨", "ton"],
+            "percent": ["%", "百分"],
+            "million": ["百万", "million"],
+            "billion": ["十亿", "billion"],
+            "hundred": ["百", "hundred"],
+        }
+        for token, equivalents in word_equivalents.items():
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])", lower):
+                anchors.append(("term", token, equivalents))
+
+        for acronym in re.findall(r"\b[A-Z][A-Z0-9]{1,}\b", source):
+            equivalents = word_equivalents.get(acronym.casefold(), [acronym.casefold()])
+            anchors.append(("acronym", acronym, equivalents))
+
+        for term in self.translation_terms:
+            term = str(term or "").strip()
+            if term and self.normalize_translation_comparison_text(term) in self.normalize_translation_comparison_text(source):
+                anchors.append(("glossary", term, [term.casefold()]))
+
+        for source_term, target_term in self.translation_glossary.items():
+            if self.normalize_translation_comparison_text(source_term) in self.normalize_translation_comparison_text(source):
+                anchors.append(("glossary", source_term, [str(target_term or source_term).casefold()]))
+        return anchors
+
+    def missing_fact_anchors(self, source_text, translated_text, source_language, target_language):
+        anchors = self.fact_anchors(source_text, source_language, target_language)
+        output = self._normalized_anchor_text(translated_text)
+        missing = []
+        for kind, value, equivalents in anchors:
+            normalized_equivalents = [self._normalized_anchor_text(item) for item in equivalents if str(item or "").strip()]
+            if not any(item and item in output for item in normalized_equivalents):
+                missing.append((kind, value))
+        return missing
+
+    def translation_completeness_reason(self, source_text, translated_text, source_language, target_language):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language)
+        if (
+            self.service_mode != "accurate"
+            or not self.is_nllb_model(self.model_name)
+            or (source_language, target_language) not in (("en", "zh"), ("zh", "en"))
+        ):
+            return None
+        if self.missing_fact_anchors(source_text, translated_text, source_language, target_language):
+            return "missing_fact_anchor"
+        if source_language == "en" and target_language == "zh":
+            return self.en_zh_undertranslation_reason(source_text, translated_text, source_language, target_language)
+        source_chars = self._count_cjk(source_text)
+        if source_chars < self._ZH_EN_UNDERTRANSLATION_MIN_CJK_CHARS:
+            return None
+        target_words = len(self._word_spans(translated_text))
+        if target_words * 100 < source_chars * self._ZH_EN_UNDERTRANSLATION_TARGET_WORD_PERCENT:
+            return "undertranslation"
+        clauses = [part for part in re.split(r"[\s，。！？；：,!?;:]+", str(source_text or "")) if part]
+        if source_chars >= 24 and len(clauses) >= 3 and target_words < len(clauses) * 2:
+            return "undertranslation"
+        return None
+
+    def make_translation_candidate(self, text, source_language, target_language, stage, source_text):
+        safety_reason = self.translation_output_failure_reason(source_text, text, source_language, target_language)
+        completeness_reason = None if safety_reason else self.translation_completeness_reason(
+            source_text,
+            text,
+            source_language,
+            target_language,
+        )
+        missing = [] if safety_reason else self.missing_fact_anchors(source_text, text, source_language, target_language)
+        anchors = self.fact_anchors(source_text, source_language, target_language)
+        coverage = 1.0 if not anchors else (len(anchors) - len(missing)) / max(1, len(anchors))
+        return {
+            "text": text,
+            "source_language": source_language,
+            "target_language": target_language,
+            "stage": stage,
+            "safety_reason": safety_reason,
+            "completeness_reason": completeness_reason,
+            "fact_coverage": coverage,
+            "units": self._count_cjk(text) + len(self._word_spans(text)),
+        }
+
+    def select_best_translation_candidate(self, candidates):
+        safe = [candidate for candidate in candidates if candidate and not candidate.get("safety_reason")]
+        if not safe:
+            return None
+        stage_weight = {"strict": 4, "context": 3, "direct": 3, "relaxed": 2, "chunked": 1}
+        return max(
+            safe,
+            key=lambda candidate: (
+                not bool(candidate.get("completeness_reason")),
+                candidate.get("fact_coverage", 0.0),
+                candidate.get("units", 0),
+                stage_weight.get(candidate.get("stage"), 0),
+            ),
+        )
+
     def repair_en_zh_undertranslation_if_needed(self, source_text, translated_text, source_language, target_language):
+        return self.repair_translation_completeness_if_needed(source_text, translated_text, source_language, target_language)
+
+    def repair_translation_completeness_if_needed(self, source_text, translated_text, source_language, target_language):
         if self.pending_translation_warning:
             return translated_text, source_language, target_language
-        reason = self.en_zh_undertranslation_reason(source_text, translated_text, source_language, target_language)
+        reason = self.translation_completeness_reason(source_text, translated_text, source_language, target_language)
         if not reason:
             return translated_text, source_language, target_language
 
         started_at = time.monotonic()
-        candidates = [(translated_text, source_language, target_language, reason)]
+        candidates = [self.make_translation_candidate(translated_text, source_language, target_language, "strict", source_text)]
         logging.info(
             "[TRANSLATION_UNDERTRANSLATION_DETECTED] uid=%s source_words=%d output_units=%d source_chars=%d output_chars=%d",
             self.client_uid,
@@ -2025,25 +2185,41 @@ class ServeClientTranslation(ServeClientBase):
             allow_batch=False,
         )
         if not direct_reason:
-            direct_guard = self.translation_output_failure_reason(source_text, direct_text, direct_source, direct_target)
-            direct_under = self.en_zh_undertranslation_reason(source_text, direct_text, direct_source, direct_target)
-            if not direct_guard and not direct_under:
+            direct_candidate = self.make_translation_candidate(direct_text, direct_source, direct_target, "direct", source_text)
+            if not direct_candidate["safety_reason"] and not direct_candidate["completeness_reason"]:
                 logging.info(
                     "[TRANSLATION_UNDERTRANSLATION_REPAIRED] uid=%s method=direct elapsed_ms=%.1f",
                     self.client_uid,
                     (time.monotonic() - started_at) * 1000.0,
                 )
                 return direct_text, direct_source, direct_target
-            if not direct_guard:
-                candidates.append((direct_text, direct_source, direct_target, direct_under or reason))
+            candidates.append(direct_candidate)
+
+        relaxed_text, relaxed_source, relaxed_target, relaxed_reason, _ = self.infer_translation_once_without_final_state(
+            source_text,
+            source_language,
+            allow_batch=False,
+            generation_profile="relaxed",
+        )
+        if not relaxed_reason:
+            relaxed_candidate = self.make_translation_candidate(relaxed_text, relaxed_source, relaxed_target, "relaxed", source_text)
+            logging.info(
+                "[TRANSLATION_RELAXED_RETRY] uid=%s reason=%s safety=%s completeness=%s",
+                self.client_uid,
+                reason,
+                relaxed_candidate.get("safety_reason"),
+                relaxed_candidate.get("completeness_reason"),
+            )
+            if not relaxed_candidate["safety_reason"] and not relaxed_candidate["completeness_reason"]:
+                return relaxed_text, relaxed_source, relaxed_target
+            candidates.append(relaxed_candidate)
 
         if time.monotonic() - started_at <= self._UNDERTRANSLATION_REPAIR_SECONDS:
             chunk_result = self.translate_en_zh_undertranslation_chunks(source_text, source_language, target_language)
             if chunk_result is not None:
                 chunk_text, chunk_source, chunk_target = chunk_result
-                chunk_guard = self.translation_output_failure_reason(source_text, chunk_text, chunk_source, chunk_target)
-                chunk_under = self.en_zh_undertranslation_reason(source_text, chunk_text, chunk_source, chunk_target)
-                if not chunk_guard and not chunk_under:
+                chunk_candidate = self.make_translation_candidate(chunk_text, chunk_source, chunk_target, "chunked", source_text)
+                if not chunk_candidate["safety_reason"] and not chunk_candidate["completeness_reason"]:
                     logging.info(
                         "[TRANSLATION_UNDERTRANSLATION_REPAIRED] uid=%s method=chunked chunks=%d elapsed_ms=%.1f",
                         self.client_uid,
@@ -2051,23 +2227,34 @@ class ServeClientTranslation(ServeClientBase):
                         (time.monotonic() - started_at) * 1000.0,
                     )
                     return chunk_text, chunk_source, chunk_target
-                if not chunk_guard:
-                    candidates.append((chunk_text, chunk_source, chunk_target, chunk_under or reason))
+                candidates.append(chunk_candidate)
 
-        best_text, best_source, best_target, best_reason = max(
-            candidates,
-            key=lambda candidate: self._count_cjk(candidate[0]) + len(self._word_spans(candidate[0])),
-        )
-        self.pending_translation_warning = best_reason or "undertranslation"
+        best = self.select_best_translation_candidate(candidates)
+        if best:
+            self.pending_translation_confidence = "low"
+            self.pending_translation_warning = None
+            logging.warning(
+                "[TRANSLATION_LOW_CONFIDENCE] uid=%s candidates=%d reason=%s stage=%s coverage=%.3f source_words=%d output_units=%d",
+                self.client_uid,
+                len(candidates),
+                best.get("completeness_reason") or reason,
+                best.get("stage"),
+                best.get("fact_coverage", 0.0),
+                len(self._word_spans(source_text)),
+                best.get("units", 0),
+            )
+            return best["text"], best["source_language"], best["target_language"]
+
+        self.pending_translation_warning = reason or "undertranslation"
         logging.warning(
             "[TRANSLATION_UNDERTRANSLATION_UNRESOLVED] uid=%s candidates=%d warning=%s source_words=%d output_units=%d",
             self.client_uid,
             len(candidates),
             self.pending_translation_warning,
             len(self._word_spans(source_text)),
-            self._count_cjk(best_text) + len(self._word_spans(best_text)),
+            self._count_cjk(translated_text) + len(self._word_spans(translated_text)),
         )
-        return best_text, best_source, best_target
+        return self.translation_unavailable_text(target_language), source_language, target_language
 
     @classmethod
     def split_en_zh_undertranslation_chunks(cls, text):
@@ -2077,6 +2264,8 @@ class ServeClientTranslation(ServeClientBase):
         chunks = [part.strip() for part in re.split(r"(?<=[.!?;])\s+", text) if part.strip()]
         if len(chunks) <= 1:
             chunks = [part.strip() for part in re.split(r",\s+", text) if part.strip()]
+        if len(chunks) <= 1 and cls._count_cjk(text):
+            chunks = [part.strip() for part in re.split(r"[，。！？；：,!?;:\s]+", text) if part.strip()]
         if len(chunks) <= 1:
             words = [match.group(0) for match in cls._word_spans(text)]
             if len(words) <= cls._UNDERTRANSLATION_MIN_CHUNK_WORDS:
@@ -2275,7 +2464,7 @@ class ServeClientTranslation(ServeClientBase):
         failed = {
             "start": (source_segment or {}).get("start"),
             "end": (source_segment or {}).get("end"),
-            "text": self._TRANSLATION_UNAVAILABLE_TEXT,
+            "text": self.translation_unavailable_text(target_language),
             "completed": True,
             "source_text": str((source_segment or {}).get("text") or "").strip(),
             "source_language": source_language,
@@ -2708,13 +2897,13 @@ class ServeClientTranslation(ServeClientBase):
         return self.translation_mode == "mixed_interpretation"
 
     def get_segment_source_language(self, segment):
+        source_language = HelsinkiZhEnTranslator.normalize_language(segment.get("language"))
+        if source_language in ("zh", "en"):
+            return source_language
         if self.should_infer_segment_language():
             inferred_language = self.infer_text_language(segment.get("text"))
             if inferred_language:
                 return inferred_language
-        source_language = HelsinkiZhEnTranslator.normalize_language(segment.get("language"))
-        if source_language in ("zh", "en"):
-            return source_language
         return self.infer_text_language(segment.get("text"))
 
     def translate_fixed_short_phrase(self, text: str, source_language: Optional[str]):
@@ -3020,8 +3209,10 @@ class ServeClientTranslation(ServeClientBase):
             for source_segment in buffered_segments:
                 self.emit_failed_translation_for_source(source_segment, self.translation_exception_reason(error))
             self.pending_translation_warning = None
+            self.pending_translation_confidence = None
             return
         translation_warning = self.pending_translation_warning
+        translation_confidence = self.pending_translation_confidence
         if flush_reason == "incomplete_timeout":
             logging.info(
                 "[TRANSLATION_INCOMPLETE_TIMEOUT] uid=%s model=%s source_language=%s target_language=%s "
@@ -3036,13 +3227,15 @@ class ServeClientTranslation(ServeClientBase):
                 buffered_segments[-1].get("end"),
             )
         self.pending_translation_warning = None
-        self.record_readability_context(
-            original_text,
-            translated_text,
-            source_language,
-            target_language,
-            translation_warning=translation_warning,
-        )
+        self.pending_translation_confidence = None
+        if not translation_confidence:
+            self.record_readability_context(
+                original_text,
+                translated_text,
+                source_language,
+                target_language,
+                translation_warning=translation_warning,
+            )
         self.last_translated_source_text = original_text
         logging.info(
             "[TRANSLATION_FLUSH] uid=%s model=%s source_language=%s target_language=%s "
@@ -3077,6 +3270,8 @@ class ServeClientTranslation(ServeClientBase):
         ))
         if translation_warning:
             translated_segment["translation_warning"] = translation_warning
+        if translation_confidence:
+            translated_segment["translation_confidence"] = translation_confidence
         if utterance_ids:
             translated_segment["source_utterance_ids"] = utterance_ids
         if len(utterance_ids) == 1:
@@ -3196,6 +3391,8 @@ class ServeClientTranslation(ServeClientBase):
             merged_segment["source_utterance_ids"] = utterance_ids
         if len(utterance_ids) == 1:
             merged_segment["utterance_id"] = utterance_ids[0]
+        if any(segment.get("translation_confidence") == "low" for segment in self.translation_merge_buffer):
+            merged_segment["translation_confidence"] = "low"
         return merged_segment
 
     def flush_merge_buffer(self, force=False):

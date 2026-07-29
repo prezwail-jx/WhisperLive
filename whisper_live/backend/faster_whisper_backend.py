@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 import threading
 import time
 import torch
@@ -44,6 +45,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         sentence_completion_min_seconds=0.0,
         min_transcription_chunk_seconds=1.0,
         mixed_interpretation=False,
+        mixed_language_retry_enabled=False,
         asr_device_index=0,
         max_pending_audio_seconds=ServeClientBase.MAX_PENDING_AUDIO_SECONDS,
     ):
@@ -102,12 +104,14 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.use_vad = use_vad
         self.hotwords = hotwords
         self.mixed_interpretation = bool(mixed_interpretation)
+        self.mixed_language_retry_enabled = bool(mixed_language_retry_enabled and self.mixed_interpretation)
         self.asr_device_index = int(asr_device_index or 0)
         self.allow_language_auto_per_chunk = self.mixed_interpretation
         self.current_language = None
         self.current_raw_language = None
         self.current_language_probability = 0.0
         self.current_zh_en_candidates = {}
+        self.current_language_trusted = False
         logging.info(
             "[ASR_BUFFER_CONFIG] uid=%s max_pending=%.2f max_incomplete=%.2f sentence_min=%.2f min_chunk=%.2f",
             self.client_uid,
@@ -301,6 +305,203 @@ class ServeClientFasterWhisper(ServeClientBase):
             )
         return previous_language
 
+    @staticmethod
+    def _materialize_result(result):
+        if result is None:
+            return []
+        if isinstance(result, list):
+            return result
+        return list(result)
+
+    @classmethod
+    def _candidate_text(cls, result):
+        return " ".join(str(getattr(segment, "text", "") or "").strip() for segment in result).strip()
+
+    @staticmethod
+    def _candidate_avg_logprob(result):
+        values = []
+        for segment in result or []:
+            value = getattr(segment, "avg_logprob", None)
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return sum(values) / len(values) if values else None
+
+    @staticmethod
+    def _candidate_no_speech(result):
+        values = []
+        for segment in result or []:
+            value = getattr(segment, "no_speech_prob", None)
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return max(values) if values else 0.0
+
+    @staticmethod
+    def _text_language_counts(text):
+        text = str(text or "")
+        return {
+            "cjk": len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text)),
+            "latin": len(re.findall(r"[A-Za-z]", text)),
+        }
+
+    @classmethod
+    def _text_language_consistency(cls, text, language):
+        language = cls.normalize_mixed_interpretation_language(language)
+        counts = cls._text_language_counts(text)
+        if not text:
+            return 0.0
+        if language == "zh":
+            if counts["cjk"] <= 0:
+                return 0.0
+            return counts["cjk"] / max(counts["cjk"] + counts["latin"], 1)
+        if language == "en":
+            if counts["latin"] < 4 or counts["cjk"] > 0:
+                return 0.0
+            return counts["latin"] / max(counts["cjk"] + counts["latin"], 1)
+        return 0.0
+
+    def _mixed_language_candidate(self, result, info, language):
+        result = self._materialize_result(result)
+        text = self._candidate_text(result)
+        return {
+            "result": result,
+            "info": info,
+            "language": self.normalize_mixed_interpretation_language(language),
+            "text": text,
+            "consistency": self._text_language_consistency(text, language),
+            "avg_logprob": self._candidate_avg_logprob(result),
+            "no_speech_prob": self._candidate_no_speech(result),
+            "hard_noise": self._is_hard_drop_hallucination_text(text) or self._is_mixed_interpretation_noise_text(text),
+        }
+
+    def _should_accept_automatic_language_switch(self, candidate, previous_language):
+        language = candidate.get("language")
+        if not previous_language or not language or language == previous_language:
+            return True
+        if candidate.get("hard_noise"):
+            return False
+        auto_prob = self.current_zh_en_candidates.get(language, self.current_language_probability)
+        prev_prob = self.current_zh_en_candidates.get(previous_language, 0.0)
+        avg_logprob = candidate.get("avg_logprob")
+        if auto_prob >= 0.80 and auto_prob - prev_prob >= 0.30 and candidate.get("consistency", 0.0) >= 0.85:
+            return True
+        if avg_logprob is not None and avg_logprob > -0.35 and candidate.get("consistency", 0.0) >= 0.95:
+            return True
+        return False
+
+    def _choose_mixed_language_candidate(self, automatic, retry, previous_language):
+        auto_logprob = automatic.get("avg_logprob")
+        retry_logprob = retry.get("avg_logprob")
+        auto_score = automatic.get("consistency", 0.0) - (0.5 if automatic.get("hard_noise") else 0.0)
+        retry_score = retry.get("consistency", 0.0) - (0.5 if retry.get("hard_noise") else 0.0)
+        if auto_logprob is not None and retry_logprob is not None:
+            auto_score += max(-1.0, min(1.0, auto_logprob + 1.0))
+            retry_score += max(-1.0, min(1.0, retry_logprob + 1.0))
+        selected = retry if retry_score >= auto_score - 0.15 else automatic
+        logging.info(
+            "[MIXED_LANGUAGE_RETRY_SELECTED] uid=%s previous=%s automatic=%s retry=%s selected=%s "
+            "auto_score=%.3f retry_score=%.3f auto_logprob=%s retry_logprob=%s auto_text=%r retry_text=%r",
+            self.client_uid,
+            previous_language,
+            automatic.get("language"),
+            retry.get("language"),
+            selected.get("language"),
+            auto_score,
+            retry_score,
+            "none" if auto_logprob is None else f"{auto_logprob:.3f}",
+            "none" if retry_logprob is None else f"{retry_logprob:.3f}",
+            automatic.get("text", "")[:80],
+            retry.get("text", "")[:80],
+        )
+        return selected
+
+    def _submit_batch_transcription(self, input_sample, language):
+        from whisper_live.batch_inference import BatchRequest
+        request = BatchRequest(
+            audio=input_sample,
+            language=language,
+            task=self.task,
+            initial_prompt=self.initial_prompt,
+            hotwords=self.hotwords,
+            use_vad=self.use_vad,
+            vad_parameters=self.vad_parameters if self.use_vad else None,
+            word_timestamps=self.word_timestamps,
+        )
+        ServeClientFasterWhisper.BATCH_WORKER.submit(request)
+        request.future.wait(timeout=30)
+        if request.error:
+            raise request.error
+        return self._materialize_result(request.result), request.info
+
+    def _direct_transcription(self, input_sample, language):
+        if ServeClientFasterWhisper.SINGLE_MODEL:
+            ServeClientFasterWhisper.SINGLE_MODEL_LOCK.acquire()
+        try:
+            result, info = self.transcriber.transcribe(
+                input_sample,
+                initial_prompt=self.initial_prompt,
+                language=language,
+                task=self.task,
+                vad_filter=self.use_vad,
+                vad_parameters=self.vad_parameters if self.use_vad else None,
+                hotwords=self.hotwords,
+                word_timestamps=self.word_timestamps,
+            )
+        finally:
+            if ServeClientFasterWhisper.SINGLE_MODEL:
+                ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
+        return self._materialize_result(result), info
+
+    def _maybe_retry_mixed_language(self, input_sample, result, info, retry_callback):
+        previous_language = self.normalize_mixed_interpretation_language(self.current_language)
+        resolved_language = self.resolve_mixed_interpretation_language(info)
+        automatic = self._mixed_language_candidate(result, info, resolved_language)
+        if (
+            not self.mixed_language_retry_enabled
+            or not previous_language
+            or not resolved_language
+            or previous_language == resolved_language
+            or self._should_accept_automatic_language_switch(automatic, previous_language)
+        ):
+            if previous_language and resolved_language and previous_language != resolved_language:
+                logging.info(
+                    "[MIXED_LANGUAGE_SWITCH_ACCEPTED] uid=%s previous=%s selected=%s prob=%.3f text=%r",
+                    self.client_uid,
+                    previous_language,
+                    resolved_language,
+                    self.current_language_probability,
+                    automatic.get("text", "")[:80],
+                )
+            self.current_language = resolved_language
+            self.current_language_trusted = bool(resolved_language)
+            return automatic["result"]
+
+        logging.info(
+            "[MIXED_LANGUAGE_SWITCH_CANDIDATE] uid=%s previous=%s automatic=%s prob=%.3f zh=%.3f en=%.3f text=%r",
+            self.client_uid,
+            previous_language,
+            resolved_language,
+            self.current_language_probability,
+            self.current_zh_en_candidates.get("zh", 0.0),
+            self.current_zh_en_candidates.get("en", 0.0),
+            automatic.get("text", "")[:80],
+        )
+        retry_result, retry_info = retry_callback(input_sample, previous_language)
+        retry = self._mixed_language_candidate(retry_result, retry_info, previous_language)
+        logging.info(
+            "[MIXED_LANGUAGE_RETRY] uid=%s previous=%s retry_text=%r",
+            self.client_uid,
+            previous_language,
+            retry.get("text", "")[:80],
+        )
+        selected = self._choose_mixed_language_candidate(automatic, retry, previous_language)
+        self.current_language = selected.get("language")
+        self.current_language_trusted = bool(self.current_language)
+        return selected["result"]
+
     def transcribe_audio(self, input_sample):
         """
         Transcribes the provided audio sample using the configured transcriber instance.
@@ -319,44 +520,23 @@ class ServeClientFasterWhisper(ServeClientBase):
         """
         # Batch inference path: submit to central queue and wait
         if ServeClientFasterWhisper.BATCH_WORKER is not None:
-            from whisper_live.batch_inference import BatchRequest
-            request = BatchRequest(
-                audio=input_sample,
-                language=None if self.mixed_interpretation else self.language,
-                task=self.task,
-                initial_prompt=self.initial_prompt,
-                hotwords=self.hotwords,
-                use_vad=self.use_vad,
-                vad_parameters=self.vad_parameters if self.use_vad else None,
-                word_timestamps=self.word_timestamps,
+            result, info = self._submit_batch_transcription(
+                input_sample,
+                None if self.mixed_interpretation else self.language,
             )
-            ServeClientFasterWhisper.BATCH_WORKER.submit(request)
-            request.future.wait(timeout=30)
-            if request.error:
-                raise request.error
             if self.mixed_interpretation:
-                self.current_language = self.resolve_mixed_interpretation_language(request.info)
-            if not self.mixed_interpretation and self.language is None and request.info is not None:
-                self.set_language(request.info)
-            return request.result
+                return self._maybe_retry_mixed_language(input_sample, result, info, self._submit_batch_transcription)
+            if not self.mixed_interpretation and self.language is None and info is not None:
+                self.set_language(info)
+            return result
 
         # Original lock-based path (backward compatible)
-        if ServeClientFasterWhisper.SINGLE_MODEL:
-            ServeClientFasterWhisper.SINGLE_MODEL_LOCK.acquire()
-        result, info = self.transcriber.transcribe(
+        result, info = self._direct_transcription(
             input_sample,
-            initial_prompt=self.initial_prompt,
             language=None if self.mixed_interpretation else self.language,
-            task=self.task,
-            vad_filter=self.use_vad,
-            vad_parameters=self.vad_parameters if self.use_vad else None,
-            hotwords=self.hotwords,
-            word_timestamps=self.word_timestamps)
-        if ServeClientFasterWhisper.SINGLE_MODEL:
-            ServeClientFasterWhisper.SINGLE_MODEL_LOCK.release()
-
+        )
         if self.mixed_interpretation:
-            self.current_language = self.resolve_mixed_interpretation_language(info)
+            return self._maybe_retry_mixed_language(input_sample, result, info, self._direct_transcription)
         if not self.mixed_interpretation and self.language is None and info is not None:
             self.set_language(info)
         return result

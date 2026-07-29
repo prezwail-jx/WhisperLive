@@ -1792,6 +1792,17 @@ function removeFrontendTimeoutForSource(source) {
   });
 }
 
+function frontendTimeoutTargetLanguage(source) {
+  const configuredTarget = normalizeLanguage(currentConfig?.target_language || selectedFaceToFaceTarget());
+  if (configuredTarget && configuredTarget !== "auto") return configuredTarget;
+  const sourceLanguage = normalizeLanguage(source?.language);
+  return oppositeLanguage(sourceLanguage) || "zh";
+}
+
+function frontendUnavailableTextForTarget(targetLanguage) {
+  return normalizeLanguage(targetLanguage) === "en" ? "Translation unavailable" : "翻译暂不可用";
+}
+
 function showFrontendTranslationTimeout(source) {
   const key = sourceSegmentCompositeKey(source);
   pendingFinalTranslationTimers.delete(key);
@@ -1799,14 +1810,15 @@ function showFrontendTranslationTimeout(source) {
     return;
   }
   removeDraftTranslationsForSourceIds(translationSourceIds(source));
+  const targetLanguage = frontendTimeoutTargetLanguage(source);
   const timeoutSegment = {
     start: source.start,
     end: source.end,
-    text: "翻译暂不可用",
+    text: frontendUnavailableTextForTarget(targetLanguage),
     completed: true,
     source_text: source.text,
     source_language: source.language,
-    target_language: "auto",
+    target_language: targetLanguage,
     translation_warning: "frontend_timeout",
     translation_id: `frontend-timeout:${key}`,
     utterance_id: source.utterance_id,
