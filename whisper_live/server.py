@@ -7,6 +7,7 @@ import queue
 import json
 import functools
 import logging
+import math
 import re
 import shutil
 import tempfile
@@ -73,6 +74,14 @@ class ClientManager:
                 return text
         return ""
 
+    @staticmethod
+    def _formal_translation_segments(segments):
+        return [
+            segment
+            for segment in segments or []
+            if isinstance(segment, dict) and segment.get("completed") is not False
+        ]
+
     def register_client_status(self, websocket, client, options, backend):
         now = time.time()
         uid = getattr(client, "client_uid", options.get("uid"))
@@ -121,6 +130,10 @@ class ClientManager:
             self.client_status[websocket] = status
 
     def update_client_message(self, websocket, message_type, segments):
+        if message_type == "translated_segments":
+            segments = self._formal_translation_segments(segments)
+            if not segments:
+                return
         now = time.time()
         text = self._latest_segment_text(segments)
         with self.lock:
@@ -316,6 +329,18 @@ class TranscriptionServer:
         "tiny", "tiny.en", "base", "base.en", "small", "small.en",
         "medium", "medium.en", "large-v3-turbo", "large-v3",
     }
+    TRANSLATION_DRAFT_INTERVAL_DEFAULT = 1.2
+    TRANSLATION_DRAFT_INTERVAL_MIN = 0.5
+    TRANSLATION_DRAFT_INTERVAL_MAX = 10.0
+    TRANSLATION_DRAFT_MIN_DELTA_DEFAULT = 8
+    TRANSLATION_DRAFT_SOURCE_CHARS_DEFAULT = 220
+    TRANSLATION_DRAFT_SOURCE_CHARS_MIN = 32
+    TRANSLATION_DRAFT_SOURCE_CHARS_MAX = 220
+    TRANSLATION_READABILITY_SENTENCES_DEFAULT = 2
+    TRANSLATION_READABILITY_SENTENCES_MAX = 2
+    TRANSLATION_READABILITY_CHARS_DEFAULT = 220
+    TRANSLATION_READABILITY_CHARS_MIN = 32
+    TRANSLATION_READABILITY_CHARS_MAX = 220
 
     def __init__(self):
         self.client_manager = None
@@ -532,6 +557,109 @@ class TranscriptionServer:
             ServeClientBase.MAX_CONFIGURABLE_PENDING_AUDIO_SECONDS,
             max(1.0, float(value)),
         )
+
+    @staticmethod
+    def _config_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value == 1
+        return str(value or "").strip().lower() == "true"
+
+    @staticmethod
+    def _bounded_config_number(value, default, minimum, maximum, integer=False):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = float(default)
+        if not math.isfinite(number):
+            number = float(default)
+        number = min(float(maximum), max(float(minimum), number))
+        return int(number) if integer else number
+
+    @staticmethod
+    def _normalized_language(value):
+        value = str(value or "").strip().lower().replace("_", "-")
+        if value == "zh" or value.startswith("zh-"):
+            return "zh"
+        if value == "en" or value.startswith("en-"):
+            return "en"
+        return value or None
+
+    @classmethod
+    def normalize_translation_draft_options(cls, options, backend=None):
+        source_language = cls._normalized_language(options.get("language"))
+        target_language = cls._normalized_language(options.get("target_language")) or "auto"
+        resolved_target_language = "zh" if target_language == "auto" and source_language == "en" else target_language
+        backend_name = getattr(backend, "value", backend)
+        backend_supported = backend is None or backend_name == BackendType.FASTER_WHISPER.value
+        eligible = (
+            backend_supported
+            and cls._config_bool(options.get("enable_translation"))
+            and options.get("service_mode") == "accurate"
+            and options.get("translation_mode", "standard") == "standard"
+            and source_language == "en"
+            and resolved_target_language == "zh"
+            and cls._config_bool(options.get("translation_draft_enabled"))
+        )
+
+        options["translation_draft_enabled"] = eligible
+        options["translation_draft_interval_seconds"] = cls._bounded_config_number(
+            options.get("translation_draft_interval_seconds"),
+            cls.TRANSLATION_DRAFT_INTERVAL_DEFAULT,
+            cls.TRANSLATION_DRAFT_INTERVAL_MIN,
+            cls.TRANSLATION_DRAFT_INTERVAL_MAX,
+        )
+        options["translation_draft_min_delta_chars"] = cls._bounded_config_number(
+            options.get("translation_draft_min_delta_chars"),
+            cls.TRANSLATION_DRAFT_MIN_DELTA_DEFAULT,
+            1,
+            cls.TRANSLATION_DRAFT_SOURCE_CHARS_MAX,
+            integer=True,
+        )
+        options["translation_draft_max_source_chars"] = cls._bounded_config_number(
+            options.get("translation_draft_max_source_chars"),
+            cls.TRANSLATION_DRAFT_SOURCE_CHARS_DEFAULT,
+            cls.TRANSLATION_DRAFT_SOURCE_CHARS_MIN,
+            cls.TRANSLATION_DRAFT_SOURCE_CHARS_MAX,
+            integer=True,
+        )
+
+        if eligible:
+            context_sentences = cls._bounded_config_number(
+                options.get("translation_readability_context_sentences"),
+                cls.TRANSLATION_READABILITY_SENTENCES_DEFAULT,
+                0,
+                cls.TRANSLATION_READABILITY_SENTENCES_MAX,
+                integer=True,
+            )
+            context_chars = cls._bounded_config_number(
+                options.get("translation_readability_context_max_chars"),
+                cls.TRANSLATION_READABILITY_CHARS_DEFAULT,
+                cls.TRANSLATION_READABILITY_CHARS_MIN,
+                cls.TRANSLATION_READABILITY_CHARS_MAX,
+                integer=True,
+            )
+            if context_sentences == 0:
+                context_chars = 0
+        else:
+            context_sentences = 0
+            context_chars = 0
+        options["translation_readability_context_sentences"] = context_sentences
+        options["translation_readability_context_max_chars"] = context_chars
+
+        logging.info(
+            "[TRANSLATION_DRAFT_CONFIG] uid=%s eligible=%s interval=%.2f min_delta=%d "
+            "max_source_chars=%d context_sentences=%d context_max_chars=%d",
+            options.get("uid"),
+            str(eligible).lower(),
+            options["translation_draft_interval_seconds"],
+            options["translation_draft_min_delta_chars"],
+            options["translation_draft_max_source_chars"],
+            context_sentences,
+            context_chars,
+        )
+        return options
 
     @classmethod
     def disable_canonical_hotwords(cls, options, canonical, source="none", filename=None, locked=None, reason="service_mode"):
@@ -1019,6 +1147,10 @@ class TranscriptionServer:
         return self.offset_client_segment(websocket, segment)
 
     def handle_client_segments(self, websocket, message_type, segments):
+        if message_type == "translated_segments":
+            segments = ClientManager._formal_translation_segments(segments)
+            if not segments:
+                return
         if self.client_manager:
             self.client_manager.update_client_message(websocket, message_type, segments)
         client = self.client_manager.get_client(websocket) if self.client_manager else None
@@ -1140,6 +1272,14 @@ class TranscriptionServer:
                 translation_merge_max_chars=options.get("translation_merge_max_chars", 180),
                 translation_merge_max_delay=options.get("translation_merge_max_delay", 1.2),
                 translation_merge_gap_seconds=options.get("translation_merge_gap_seconds", 1.0),
+                service_mode=options.get("service_mode", "standard"),
+                source_language=options.get("language"),
+                translation_draft_enabled=options.get("translation_draft_enabled", False),
+                translation_draft_interval_seconds=options.get("translation_draft_interval_seconds", 1.2),
+                translation_draft_min_delta_chars=options.get("translation_draft_min_delta_chars", 8),
+                translation_draft_max_source_chars=options.get("translation_draft_max_source_chars", 220),
+                translation_readability_context_sentences=options.get("translation_readability_context_sentences", 0),
+                translation_readability_context_max_chars=options.get("translation_readability_context_max_chars", 0),
             )
             
             # Start translation thread
@@ -1354,6 +1494,8 @@ class TranscriptionServer:
         if translation_client:
             client.translation_client = translation_client
             client.translation_thread = translation_thread
+            if translation_client.translation_draft_enabled and self.backend.is_faster_whisper():
+                client.translation_draft_callback = translation_client.observe_asr_segment
 
         if translation_client:
             translation_client.admin_status_callback = functools.partial(
@@ -1445,6 +1587,7 @@ class TranscriptionServer:
             logging.info("New client connected")
             options = websocket.recv()
             options = json.loads(options)
+            self.normalize_translation_draft_options(options, backend=self.backend)
             self.apply_meeting_hotwords(options)
             self.apply_default_hotwords(options)
 

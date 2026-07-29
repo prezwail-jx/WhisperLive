@@ -105,6 +105,8 @@ let translatedSegments = [];
 const sourceSegmentStore = new Map();
 const translationSegmentStore = new Map();
 const translationRevealStates = new Map();
+const draftTranslationRevisions = new Map();
+const finalizedTranslationSourceIds = new Set();
 const translatedSourceIds = new Set();
 let sourceClearedBefore = null;
 let translationClearedBefore = null;
@@ -1735,6 +1737,8 @@ function sourceSegmentStoreKey(segment) {
 }
 
 function translationSegmentStoreKey(segment) {
+  const translationId = String(segment?.translation_id || "").trim();
+  if (translationId) return `translation-id:${translationId}`;
   const sourceIds = (segment?.source_utterance_ids || [segment?.utterance_id])
     .map((value) => String(value || "").trim())
     .filter(Boolean)
@@ -1796,7 +1800,7 @@ function scheduleTranslationReveal(key) {
 }
 
 function startTranslationReveal(key, segment) {
-  if (!shouldRevealTranslations() || hasTranslationWarning(segment)) return;
+  if (segment?.completed === false || !shouldRevealTranslations() || hasTranslationWarning(segment)) return;
   const fullText = translationDisplayText(segment?.text);
   const units = translationRevealUnits(fullText, segment?.target_language);
   if (units.length <= 1) return;
@@ -1871,6 +1875,53 @@ function mergeSourceSnapshot(segments) {
   syncSegmentArrays();
 }
 
+function pruneInsertionOrderedState(state, maxSize = MAX_SESSION_SEGMENTS * 2) {
+  while (state.size > maxSize) {
+    const oldestKey = state.keys().next().value;
+    if (oldestKey === undefined) break;
+    state.delete(oldestKey);
+  }
+}
+
+function rememberDraftRevision(translationId, revision) {
+  draftTranslationRevisions.delete(translationId);
+  draftTranslationRevisions.set(translationId, revision);
+  pruneInsertionOrderedState(draftTranslationRevisions);
+}
+
+function markFinalizedTranslationSourceIds(sourceIds) {
+  sourceIds.forEach((sourceId) => {
+    finalizedTranslationSourceIds.delete(sourceId);
+    finalizedTranslationSourceIds.add(sourceId);
+  });
+  pruneInsertionOrderedState(finalizedTranslationSourceIds);
+}
+
+function removeDraftTranslationsForSourceIds(sourceIds) {
+  if (!sourceIds.length) return;
+  const finalizedIds = new Set(sourceIds);
+  translationSegmentStore.forEach((storedSegment, key) => {
+    if (storedSegment.completed !== false) return;
+    if (!translationSourceIds(storedSegment).some((sourceId) => finalizedIds.has(sourceId))) return;
+    cancelTranslationReveal(key);
+    const translationId = String(storedSegment.translation_id || "").trim();
+    if (translationId) draftTranslationRevisions.delete(translationId);
+    translationSegmentStore.delete(key);
+  });
+}
+
+function resetTranslationDraftState(removeDraftSegments = false) {
+  draftTranslationRevisions.clear();
+  finalizedTranslationSourceIds.clear();
+  if (!removeDraftSegments) return;
+  translationSegmentStore.forEach((segment, key) => {
+    if (segment.completed !== false) return;
+    cancelTranslationReveal(key);
+    translationSegmentStore.delete(key);
+  });
+  syncSegmentArrays();
+}
+
 function mergeTranslationSnapshot(segments) {
   const incoming = Array.isArray(segments) ? segments : [];
   incoming.forEach((segment) => {
@@ -1881,11 +1932,29 @@ function mergeTranslationSnapshot(segments) {
         ? segment.source_utterance_ids.slice()
         : segment.source_utterance_ids,
     };
+    const sourceIds = translationSourceIds(copy);
+    const translationId = String(copy.translation_id || "").trim();
+
+    if (copy.completed === false) {
+      if (sourceIds.some((sourceId) => finalizedTranslationSourceIds.has(sourceId))) return;
+      const revision = Number(copy.revision);
+      if (translationId && Number.isFinite(revision)) {
+        const previousRevision = draftTranslationRevisions.get(translationId);
+        if (previousRevision !== undefined && revision <= previousRevision) return;
+        rememberDraftRevision(translationId, revision);
+      }
+    } else {
+      removeDraftTranslationsForSourceIds(sourceIds);
+      markFinalizedTranslationSourceIds(sourceIds);
+    }
+
     const key = translationSegmentStoreKey(copy);
     const previous = translationSegmentStore.get(key);
     copy._translation_key = key;
     translationSegmentStore.set(key, copy);
-    if (!previous) {
+    if (copy.completed === false) {
+      cancelTranslationReveal(key);
+    } else if (!previous) {
       startTranslationReveal(key, copy);
     } else if (translationDisplayText(previous.text) !== translationDisplayText(copy.text)) {
       startTranslationReveal(key, copy);
@@ -1904,6 +1973,7 @@ function clearSourceSegmentState() {
 function clearTranslationSegmentState() {
   cancelAllTranslationReveals();
   translationSegmentStore.clear();
+  resetTranslationDraftState();
   translatedSourceIds.clear();
   translatedSegments = [];
 }
@@ -2070,11 +2140,11 @@ function interleavedTranslationKey(translation, sourceIndexes) {
   const sourceIds = translationSourceIds(translation);
   const start = Number(translation.start || 0).toFixed(3);
   const end = Number(translation.end || 0).toFixed(3);
-  if (sourceIds.length) return `translation-group:${sourceIds.join(",")}:${start}:${end}`;
+  if (sourceIds.length) return `translation-group:${sourceIds.join(",")}`;
   return `translation-range:${start}:${end}:${sourceIndexes.join(",")}`;
 }
 
-function buildInterleavedCompletedRows(sources, translations) {
+function buildInterleavedRows(sources, translations) {
   const rows = [];
   const consumedSourceIndexes = new Set();
   const unmatchedTranslations = [];
@@ -2100,7 +2170,7 @@ function buildInterleavedCompletedRows(sources, translations) {
       source: repeatedSource ? "（同一原文片段）" : sourceText,
       translation: translationDisplayText(translation.text),
       translationWarning: hasTranslationWarning(translation),
-      pending: false,
+      pending: translation.completed === false,
     });
   });
 
@@ -2110,7 +2180,7 @@ function buildInterleavedCompletedRows(sources, translations) {
       key: interleavedSourceKey(source, index),
       start: Number(source.start) || 0,
       source: String(source.text || "").trim(),
-      translation: "翻译中...",
+      translation: source.completed === false ? "识别中..." : "翻译中...",
       pending: true,
     });
   });
@@ -2123,7 +2193,7 @@ function buildInterleavedCompletedRows(sources, translations) {
       source: "（原文片段处理中）",
       translation: translationDisplayText(translation.text),
       translationWarning: hasTranslationWarning(translation),
-      pending: false,
+      pending: translation.completed === false,
     });
   });
 
@@ -2181,21 +2251,9 @@ function renderInterleavedRows(rows) {
 }
 
 function renderInterleaved() {
-  const completedSources = groupSegmentsForDisplay(sourceSegments.filter((item) => item.completed !== false));
+  const displaySources = groupSegmentsForDisplay(sourceSegments);
   const displayTranslations = groupSegmentsForDisplay(translatedSegments);
-  const rows = buildInterleavedCompletedRows(completedSources, displayTranslations);
-  const latestIncomplete = groupSegmentsForDisplay(sourceSegments.filter((item) => item.completed === false)).slice(-1)[0];
-  if (latestIncomplete && latestIncomplete.text) {
-    rows.push({
-      key: String(latestIncomplete.utterance_id || "").trim()
-        ? interleavedSourceKey(latestIncomplete, completedSources.length)
-        : "source-draft",
-      start: Number(latestIncomplete.start) || Number.MAX_SAFE_INTEGER,
-      source: latestIncomplete.text.trim(),
-      translation: "识别中...",
-      pending: true,
-    });
-  }
+  const rows = buildInterleavedRows(displaySources, displayTranslations);
   rows.sort((left, right) => left.start - right.start);
   const visibleRows = rows.slice(-getDisplayLimit());
   if (!visibleRows.length) {
@@ -2340,6 +2398,13 @@ function sendConfig(event) {
   const translationRuntimeConfig = translationRuntimeConfigForMode(serviceMode);
   const meetingName = elements.meetingName.value.trim();
   const hotwordsEnabled = serviceMode === "accurate";
+  const draftTranslationEnabled = (
+    serviceMode === "accurate"
+    && translationEnabled
+    && translationMode === "standard"
+    && normalizeLanguage(selectedLanguage) === "en"
+    && normalizeLanguage(selectedTranslationTarget) === "zh"
+  );
   const payload = {
     uid,
     session_id: currentSessionId,
@@ -2391,6 +2456,14 @@ function sendConfig(event) {
     zh_en_model_path: translationProvider.zhEnModelPath || "model/opus-mt-zh-en",
     en_zh_model_path: translationProvider.enZhModelPath || "model/opus-mt-en-zh",
     nllb_model_path: translationProvider.nllbModelPath,
+    translation_draft_enabled: draftTranslationEnabled,
+    ...(draftTranslationEnabled ? {
+      translation_draft_interval_seconds: 1.2,
+      translation_draft_min_delta_chars: 8,
+      translation_draft_max_source_chars: 220,
+      translation_readability_context_sentences: 2,
+      translation_readability_context_max_chars: 220,
+    } : {}),
   };
   currentConfig = payload;
   targetSocket.send(JSON.stringify(payload));
@@ -2422,6 +2495,10 @@ function setConnectionInputsDisabled(disabled) {
 
 function openMeetingSocket(resume = false) {
   resumeNextConnection = Boolean(resume);
+  if (resumeNextConnection) {
+    resetTranslationDraftState(true);
+    renderTranscriptViews();
+  }
   intentionallyClosingSocket = false;
   isServerReady = false;
   const wsUrl = webSocketUrlForMode(elements.server.value, serviceMode);
@@ -2437,6 +2514,8 @@ function openMeetingSocket(resume = false) {
 function handleSocketClose() {
   socket = null;
   isServerReady = false;
+  resetTranslationDraftState(true);
+  renderTranscriptViews();
   if (intentionallyClosingSocket || hasStoppedCurrentSession) return;
   selectedSummarySessionStatus = "interrupted";
   setStatus("连接中断，准备重连", "busy");
@@ -2519,6 +2598,8 @@ async function startCapture() {
 
 function stopCapture(sendEnd = true) {
   if (reconnectController) reconnectController.reset();
+  resetTranslationDraftState(true);
+  renderTranscriptViews();
   intentionallyClosingSocket = Boolean(sendEnd);
   if (sendEnd && currentSessionId) {
     hasStoppedCurrentSession = true;
@@ -2906,6 +2987,7 @@ if (elements.clearHotwordFile) {
 elements.clearSource.addEventListener("click", () => {
   markSourceClearedBefore();
   clearSourceSegmentState();
+  resetTranslationDraftState(true);
   renderTranscriptViews();
 });
 

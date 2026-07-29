@@ -307,6 +307,102 @@ class TestTranscriptionServerGetAudio(unittest.TestCase):
         np.testing.assert_array_almost_equal(result, audio)
 
 
+class TestTranslationDraftConfig(unittest.TestCase):
+    def eligible_options(self, **overrides):
+        options = {
+            "uid": "draft-client",
+            "language": "en",
+            "enable_translation": True,
+            "service_mode": "accurate",
+            "translation_mode": "standard",
+            "target_language": "zh",
+            "translation_draft_enabled": True,
+        }
+        options.update(overrides)
+        return options
+
+    def test_eligible_accurate_en_zh_uses_defaults(self):
+        options = TranscriptionServer.normalize_translation_draft_options(self.eligible_options())
+
+        self.assertTrue(options["translation_draft_enabled"])
+        self.assertEqual(options["translation_draft_interval_seconds"], 1.2)
+        self.assertEqual(options["translation_draft_min_delta_chars"], 8)
+        self.assertEqual(options["translation_draft_max_source_chars"], 220)
+        self.assertEqual(options["translation_readability_context_sentences"], 2)
+        self.assertEqual(options["translation_readability_context_max_chars"], 220)
+
+    def test_auto_target_resolves_to_zh_for_english_source(self):
+        options = TranscriptionServer.normalize_translation_draft_options(
+            self.eligible_options(target_language="auto")
+        )
+
+        self.assertTrue(options["translation_draft_enabled"])
+
+    def test_non_faster_whisper_backend_is_disabled(self):
+        options = TranscriptionServer.normalize_translation_draft_options(
+            self.eligible_options(),
+            backend=BackendType.FUNASR,
+        )
+
+        self.assertFalse(options["translation_draft_enabled"])
+        self.assertEqual(options["translation_readability_context_sentences"], 0)
+        self.assertEqual(options["translation_readability_context_max_chars"], 0)
+
+    def test_old_or_ineligible_clients_are_disabled(self):
+        cases = [
+            self.eligible_options(translation_draft_enabled=None),
+            self.eligible_options(translation_draft_enabled="false"),
+            self.eligible_options(language="zh", target_language="en"),
+            self.eligible_options(service_mode="standard"),
+            self.eligible_options(service_mode="conversation"),
+            self.eligible_options(service_mode="transcription", enable_translation=False),
+            self.eligible_options(translation_mode="mixed_interpretation", language=None, target_language="auto"),
+        ]
+
+        for options in cases:
+            with self.subTest(options=options):
+                normalized = TranscriptionServer.normalize_translation_draft_options(options)
+                self.assertFalse(normalized["translation_draft_enabled"])
+                self.assertEqual(normalized["translation_readability_context_sentences"], 0)
+                self.assertEqual(normalized["translation_readability_context_max_chars"], 0)
+
+    def test_invalid_and_out_of_range_values_are_normalized(self):
+        options = TranscriptionServer.normalize_translation_draft_options(self.eligible_options(
+            translation_draft_interval_seconds="not-a-number",
+            translation_draft_min_delta_chars=-5,
+            translation_draft_max_source_chars=9999,
+            translation_readability_context_sentences=99,
+            translation_readability_context_max_chars=1,
+        ))
+
+        self.assertEqual(options["translation_draft_interval_seconds"], 1.2)
+        self.assertEqual(options["translation_draft_min_delta_chars"], 1)
+        self.assertEqual(options["translation_draft_max_source_chars"], 220)
+        self.assertEqual(options["translation_readability_context_sentences"], 2)
+        self.assertEqual(options["translation_readability_context_max_chars"], 32)
+
+    def test_non_finite_and_upper_interval_are_bounded(self):
+        non_finite = TranscriptionServer.normalize_translation_draft_options(
+            self.eligible_options(translation_draft_interval_seconds=float("inf"))
+        )
+        upper = TranscriptionServer.normalize_translation_draft_options(
+            self.eligible_options(translation_draft_interval_seconds=30)
+        )
+
+        self.assertEqual(non_finite["translation_draft_interval_seconds"], 1.2)
+        self.assertEqual(upper["translation_draft_interval_seconds"], 10.0)
+
+    def test_zero_context_sentences_disables_context_chars(self):
+        options = TranscriptionServer.normalize_translation_draft_options(self.eligible_options(
+            translation_readability_context_sentences=0,
+            translation_readability_context_max_chars=220,
+        ))
+
+        self.assertTrue(options["translation_draft_enabled"])
+        self.assertEqual(options["translation_readability_context_sentences"], 0)
+        self.assertEqual(options["translation_readability_context_max_chars"], 0)
+
+
 class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
     def setUp(self):
         self.server = TranscriptionServer()
@@ -430,6 +526,43 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
         self.assertEqual(kwargs["translation_max_wait_seconds"], 2.0)
         self.assertEqual(kwargs["translation_context_seconds"], 5.0)
         self.assertFalse(kwargs["translation_merge_enabled"])
+
+    @mock.patch("whisper_live.server.threading.Thread")
+    @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    @mock.patch("whisper_live.backend.translation_backend.ServeClientTranslation")
+    def test_initialize_client_passes_translation_draft_config(
+        self, mock_translation_client, mock_faster_client, mock_thread
+    ):
+        mock_faster_client.return_value = MagicMock()
+        mock_translation_client.return_value = MagicMock()
+        options = TranscriptionServer.normalize_translation_draft_options({
+            "uid": "test",
+            "language": "en",
+            "task": "transcribe",
+            "model": "small",
+            "enable_translation": True,
+            "service_mode": "accurate",
+            "translation_mode": "standard",
+            "target_language": "zh",
+            "translation_draft_enabled": True,
+            "translation_draft_interval_seconds": 1.2,
+            "translation_draft_min_delta_chars": 8,
+            "translation_draft_max_source_chars": 220,
+            "translation_readability_context_sentences": 2,
+            "translation_readability_context_max_chars": 220,
+        })
+
+        self.server.initialize_client(MagicMock(), options, None, None, False)
+
+        kwargs = mock_translation_client.call_args.kwargs
+        self.assertEqual(kwargs["service_mode"], "accurate")
+        self.assertEqual(kwargs["source_language"], "en")
+        self.assertTrue(kwargs["translation_draft_enabled"])
+        self.assertEqual(kwargs["translation_draft_interval_seconds"], 1.2)
+        self.assertEqual(kwargs["translation_draft_min_delta_chars"], 8)
+        self.assertEqual(kwargs["translation_draft_max_source_chars"], 220)
+        self.assertEqual(kwargs["translation_readability_context_sentences"], 2)
+        self.assertEqual(kwargs["translation_readability_context_max_chars"], 220)
 
     @mock.patch("whisper_live.server.threading.Thread")
     @mock.patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
@@ -710,6 +843,54 @@ class TestMeetingCompatibilityExports(unittest.TestCase):
         self.assertIs(MeetingLogStore, meeting.MeetingLogStore)
         self.assertIs(MeetingSummaryService, meeting.MeetingSummaryService)
         self.assertIs(SummaryTemplateStore, meeting.SummaryTemplateStore)
+
+
+class TestTranslationDraftIsolationAndFrontendContract(unittest.TestCase):
+    def test_server_filters_drafts_before_admin_and_meeting_logs(self):
+        server = TranscriptionServer()
+        server.client_manager = ClientManager(max_clients=4, max_connection_time=600)
+        server.meeting_logs = MagicMock()
+        websocket = MagicMock()
+        client = MagicMock()
+        client.client_uid = "uid-draft"
+        client.meeting_log_session_id = "session-draft"
+        options = {
+            "uid": "uid-draft",
+            "enable_translation": True,
+            "target_language": "zh",
+        }
+        server.client_manager.add_client(websocket, client)
+        server.client_manager.register_client_status(
+            websocket, client, options, BackendType.FASTER_WHISPER
+        )
+        draft = {"text": "draft only", "completed": False}
+        final = {"text": "final only", "completed": True}
+
+        server.handle_client_segments(websocket, "translated_segments", [draft])
+        server.meeting_logs.append_segments.assert_not_called()
+        status = server.client_manager.get_client_status_snapshot()["clients"][0]
+        self.assertEqual(status["translation_msgs"], 0)
+        self.assertEqual(status["last_translation_text"], "")
+
+        server.handle_client_segments(websocket, "translated_segments", [draft, final])
+        server.meeting_logs.append_segments.assert_called_once_with(
+            "session-draft", "translation", [final]
+        )
+        status = server.client_manager.get_client_status_snapshot()["clients"][0]
+        self.assertEqual(status["translation_msgs"], 1)
+        self.assertEqual(status["translation_items"], 1)
+        self.assertEqual(status["last_translation_text"], "final only")
+
+    def test_frontend_source_contains_revision_and_final_replacement_guards(self):
+        app_path = os.path.join(os.path.dirname(__file__), "..", "web", "app.js")
+        with open(app_path, encoding="utf-8") as app_file:
+            source = app_file.read()
+
+        self.assertIn("if (translationId) return `translation-id:${translationId}`;", source)
+        self.assertIn("if (previousRevision !== undefined && revision <= previousRevision) return;", source)
+        self.assertIn("removeDraftTranslationsForSourceIds(sourceIds);", source)
+        self.assertIn("if (segment?.completed === false", source)
+        self.assertIn("function resetTranslationDraftState(removeDraftSegments = false)", source)
 
 
 class TestClientManagerAdminStatus(unittest.TestCase):

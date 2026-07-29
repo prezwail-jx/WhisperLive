@@ -531,6 +531,8 @@ class ServeClientTranslation(ServeClientBase):
     _TRANSLATOR_INFERENCE_LOCKS = {}
     _TRANSLATOR_BATCH_WORKERS = {}
     _TRANSLATOR_CACHE_LOCK = threading.Lock()
+    _TRANSLATION_DRAFT_WAKEUP = object()
+    _READABILITY_BOUNDARY_MARKER = "ZZREADABILITYBOUNDARYZZ"
     _STANDALONE_ENGLISH_INTERJECTIONS = {
         "oh": "哦",
         "uh": "呃",
@@ -608,6 +610,14 @@ class ServeClientTranslation(ServeClientBase):
         nllb_batch_max_size=8,
         nllb_batch_window_ms=40,
         nllb_batch_timeout_seconds=10.0,
+        service_mode="standard",
+        source_language=None,
+        translation_draft_enabled=False,
+        translation_draft_interval_seconds=1.2,
+        translation_draft_min_delta_chars=8,
+        translation_draft_max_source_chars=220,
+        translation_readability_context_sentences=0,
+        translation_readability_context_max_chars=0,
     ):
         """
         Initialize the translation client.
@@ -644,6 +654,17 @@ class ServeClientTranslation(ServeClientBase):
         self.nllb_batch_max_size = max(1, int(nllb_batch_max_size or 8))
         self.nllb_batch_window_ms = max(0, int(nllb_batch_window_ms or 0))
         self.nllb_batch_timeout_seconds = max(0.1, float(nllb_batch_timeout_seconds or 10.0))
+        self.service_mode = str(service_mode or "standard")
+        self.source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        self.translation_draft_enabled = bool(translation_draft_enabled)
+        self.translation_draft_interval_seconds = min(10.0, max(0.5, float(translation_draft_interval_seconds or 1.2)))
+        self.translation_draft_min_delta_chars = min(220, max(1, int(translation_draft_min_delta_chars or 8)))
+        self.translation_draft_max_source_chars = min(220, max(32, int(translation_draft_max_source_chars or 220)))
+        self.translation_readability_context_sentences = min(2, max(0, int(translation_readability_context_sentences or 0)))
+        self.translation_readability_context_max_chars = min(220, max(0, int(translation_readability_context_max_chars or 0)))
+        if not self.translation_draft_enabled or self.translation_readability_context_sentences == 0:
+            self.translation_readability_context_sentences = 0
+            self.translation_readability_context_max_chars = 0
         self.translation_buffer = []
         self.translation_buffer_started_at = None
         self.translation_merge_buffer = []
@@ -651,6 +672,13 @@ class ServeClientTranslation(ServeClientBase):
         self.translated_segments = []
         self.last_translated_source_text = ""
         self.pending_translation_warning = None
+        self.draft_state_lock = threading.Lock()
+        self.draft_states = {}
+        self.draft_inference_active = False
+        self.draft_wakeup_queued = False
+        self.last_draft_inference_finished_at = None
+        self.readability_context_lock = threading.Lock()
+        self.readability_context_history = []
         self.translator = None
         self.translator_lock = None
         self.batch_worker = None
@@ -668,6 +696,749 @@ class ServeClientTranslation(ServeClientBase):
             self.translation_merge_enabled,
         )
         self.load_translation_model()
+
+    def readability_context_eligible(self, source_language, target_language=None):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = (
+            HelsinkiZhEnTranslator.normalize_language(target_language)
+            or self._resolved_target_language(source_language)
+        )
+        return bool(
+            self.service_mode == "accurate"
+            and self.translation_draft_enabled
+            and self.translation_readability_context_sentences > 0
+            and self.translation_readability_context_max_chars > 0
+            and source_language == "en"
+            and target_language == "zh"
+        )
+
+    @staticmethod
+    def _trim_readability_context_suffix(text, max_chars):
+        value = str(text or "").strip()
+        if max_chars <= 0 or len(value) <= max_chars:
+            return value
+        start = len(value) - max_chars
+        suffix = value[start:]
+        if start > 0 and value[start - 1].isalnum() and suffix[:1].isalnum():
+            boundary = re.search(r"\s+", suffix)
+            if boundary and boundary.end() < len(suffix):
+                suffix = suffix[boundary.end():]
+        return suffix.strip() or value[-max_chars:].strip()
+
+    def readability_context_snapshot(self, source_language, target_language=None):
+        if not self.readability_context_eligible(source_language, target_language):
+            return []
+        with self.readability_context_lock:
+            return [unit.copy() for unit in self.readability_context_history]
+
+    def build_readability_context_input(self, current_text, source_language, target_language=None):
+        current_text = str(current_text or "").strip()
+        history = self.readability_context_snapshot(source_language, target_language)
+        if not current_text or not history:
+            return None, []
+        marker = self._READABILITY_BOUNDARY_MARKER
+        if marker.casefold() in current_text.casefold():
+            return None, []
+        sources = [
+            str(unit.get("source_text") or "").strip()
+            for unit in history
+            if str(unit.get("source_text") or "").strip()
+        ]
+        if not sources:
+            return None, []
+        context_text = " ".join(sources)
+        context_text = self._trim_readability_context_suffix(
+            context_text,
+            self.translation_readability_context_max_chars,
+        )
+        if not context_text or marker.casefold() in context_text.casefold():
+            return None, []
+        return f"{context_text}\n{marker}\n{current_text}", history
+
+    @classmethod
+    def _readability_boundary_pattern(cls):
+        return re.compile(
+            r"\s*".join(re.escape(char) for char in cls._READABILITY_BOUNDARY_MARKER),
+            re.IGNORECASE,
+        )
+
+    def extract_readability_current_translation(
+        self,
+        translated_text,
+        current_source_text,
+        source_language,
+        target_language,
+        history,
+    ):
+        translated_text = str(translated_text or "")
+        matches = list(self._readability_boundary_pattern().finditer(translated_text))
+        if len(matches) != 1:
+            return None, "boundary_missing" if not matches else "boundary_ambiguous"
+        current_translation = translated_text[matches[0].end():].strip()
+        if not current_translation:
+            return None, "current_output_empty"
+
+        normalized_current = self.normalize_translation_comparison_text(current_translation)
+        for unit in reversed(history):
+            previous_translation = self.normalize_translation_comparison_text(unit.get("text"))
+            if (
+                len(previous_translation) >= 6
+                and normalized_current.startswith(previous_translation)
+            ):
+                return None, "history_leak"
+
+        failure_reason = self.translation_output_failure_reason(
+            current_source_text,
+            current_translation,
+            source_language,
+            target_language,
+        )
+        if failure_reason:
+            return None, failure_reason
+        return current_translation, None
+
+    def infer_translation_once_without_final_state(
+        self,
+        text,
+        source_language,
+        allow_batch=False,
+    ):
+        started_at = time.monotonic()
+        source_language, target_language = self._resolved_failure_languages(source_language)
+        if not self.model_loaded or not self.translator or not self.translator_lock:
+            return (
+                None,
+                source_language,
+                target_language,
+                self.model_load_failure_reason or "model_unavailable",
+                0.0,
+            )
+        if self.exit:
+            return None, source_language, target_language, "client_exit", 0.0
+
+        if allow_batch and self.should_use_nllb_batch_translation() and self.batch_worker:
+            try:
+                translated_text, source_language, target_language = self.batch_worker.submit(
+                    text,
+                    source_language,
+                    self.target_language,
+                    self.client_uid,
+                    timeout_seconds=self.nllb_batch_timeout_seconds,
+                )
+            except Exception as error:
+                return (
+                    None,
+                    source_language,
+                    target_language,
+                    self.translation_exception_reason(error),
+                    (time.monotonic() - started_at) * 1000.0,
+                )
+            return (
+                translated_text,
+                source_language,
+                target_language,
+                None,
+                (time.monotonic() - started_at) * 1000.0,
+            )
+
+        try:
+            with self.translator_lock:
+                translated_text, source_language, target_language = self.translator.translate(
+                    text,
+                    source_language,
+                    self.target_language,
+                )
+        except Exception as error:
+            return (
+                None,
+                source_language,
+                target_language,
+                self.translation_exception_reason(error),
+                (time.monotonic() - started_at) * 1000.0,
+            )
+        return (
+            translated_text,
+            source_language,
+            target_language,
+            None,
+            (time.monotonic() - started_at) * 1000.0,
+        )
+
+    def translate_with_readability_context_once(
+        self,
+        current_text,
+        source_language,
+        allow_batch,
+        path,
+    ):
+        contextual_input, history = self.build_readability_context_input(
+            current_text,
+            source_language,
+        )
+        if contextual_input is None:
+            return None, None, None, "context_unavailable", False
+
+        context_chars = len(contextual_input) - len(str(current_text or "")) - len(
+            self._READABILITY_BOUNDARY_MARKER
+        ) - 2
+        logging.info(
+            "[TRANSLATION_CONTEXT_USED] uid=%s path=%s history_units=%d "
+            "context_chars=%d current_chars=%d",
+            self.client_uid,
+            path,
+            len(history),
+            max(0, context_chars),
+            len(str(current_text or "")),
+        )
+        translated_text, resolved_source, target_language, inference_reason, elapsed_ms = (
+            self.infer_translation_once_without_final_state(
+                contextual_input,
+                source_language,
+                allow_batch=allow_batch,
+            )
+        )
+        if inference_reason:
+            logging.info(
+                "[TRANSLATION_CONTEXT_EXTRACTION_FAILED] uid=%s path=%s reason=%s "
+                "history_units=%d current_chars=%d elapsed_ms=%.1f",
+                self.client_uid,
+                path,
+                inference_reason,
+                len(history),
+                len(str(current_text or "")),
+                elapsed_ms,
+            )
+            return None, resolved_source, target_language, inference_reason, True
+
+        current_translation, extraction_reason = self.extract_readability_current_translation(
+            translated_text,
+            current_text,
+            resolved_source,
+            target_language,
+            history,
+        )
+        if extraction_reason:
+            logging.info(
+                "[TRANSLATION_CONTEXT_EXTRACTION_FAILED] uid=%s path=%s reason=%s "
+                "history_units=%d current_chars=%d output_chars=%d elapsed_ms=%.1f",
+                self.client_uid,
+                path,
+                extraction_reason,
+                len(history),
+                len(str(current_text or "")),
+                len(str(translated_text or "")),
+                elapsed_ms,
+            )
+            return None, resolved_source, target_language, extraction_reason, True
+        return current_translation, resolved_source, target_language, None, True
+
+    def record_readability_context(
+        self,
+        source_text,
+        translated_text,
+        source_language,
+        target_language,
+        translation_warning=None,
+    ):
+        if not self.readability_context_eligible(source_language, target_language):
+            return False
+        source_text = str(source_text or "").strip()
+        translated_text = str(translated_text or "").strip()
+        if (
+            not source_text
+            or not translated_text
+            or translation_warning
+            or translated_text == self._TRANSLATION_UNAVAILABLE_TEXT
+            or self.normalize_translation_comparison_text(source_text)
+            == self.normalize_translation_comparison_text(translated_text)
+            or self.translation_output_failure_reason(
+                source_text,
+                translated_text,
+                source_language,
+                target_language,
+            )
+        ):
+            return False
+
+        unit = {
+            "source_text": source_text,
+            "text": translated_text,
+        }
+        with self.readability_context_lock:
+            self.readability_context_history.append(unit)
+            self.readability_context_history = self.readability_context_history[
+                -self.translation_readability_context_sentences:
+            ]
+            history_units = len(self.readability_context_history)
+        logging.info(
+            "[TRANSLATION_CONTEXT_HISTORY_UPDATED] uid=%s history_units=%d "
+            "source_chars=%d translated_chars=%d",
+            self.client_uid,
+            history_units,
+            len(source_text),
+            len(translated_text),
+        )
+        return True
+
+    @staticmethod
+    def _translation_draft_change_chars(previous_text, current_text):
+        previous = str(previous_text or "")
+        current = str(current_text or "")
+        prefix_length = 0
+        for previous_char, current_char in zip(previous, current):
+            if previous_char != current_char:
+                break
+            prefix_length += 1
+        return max(len(previous) - prefix_length, len(current) - prefix_length)
+
+    @staticmethod
+    def _trim_translation_draft_suffix(text, max_chars):
+        value = str(text or "").strip()
+        if len(value) <= max_chars:
+            return value
+        start = len(value) - max_chars
+        suffix = value[start:]
+        if start > 0 and value[start - 1].isalnum() and suffix[:1].isalnum():
+            boundary = re.search(r"\s+", suffix)
+            if boundary and boundary.end() < len(suffix):
+                suffix = suffix[boundary.end():]
+        return suffix.strip() or value[-max_chars:].strip()
+
+    def _translation_draft_direction_eligible(self, segment):
+        if not self.translation_draft_enabled or self.service_mode != "accurate":
+            return False
+        source_language = HelsinkiZhEnTranslator.normalize_language(
+            segment.get("language") or self.source_language
+        )
+        if source_language != "en" or self._resolved_target_language(source_language) != "zh":
+            return False
+        return self.infer_text_language(segment.get("text")) == "en"
+
+    def _queue_translation_draft_wakeup_locked(self):
+        if self.draft_wakeup_queued or self.exit:
+            return
+        try:
+            self.translation_queue.put_nowait(self._TRANSLATION_DRAFT_WAKEUP)
+            self.draft_wakeup_queued = True
+        except queue.Full:
+            return
+
+    def _clear_translation_draft_wakeup(self):
+        with self.draft_state_lock:
+            self.draft_wakeup_queued = False
+
+    def observe_asr_segment(self, segment):
+        utterance_id = str(segment.get("utterance_id") or "").strip()
+        if not utterance_id or self.exit or not self.translation_draft_enabled:
+            return
+
+        now = time.monotonic()
+        if segment.get("completed", False):
+            with self.draft_state_lock:
+                state = self.draft_states.get(utterance_id)
+                if state is None:
+                    return
+                state["revision"] += 1
+                state["finalized"] = True
+                state["pending"] = False
+                state["updated_at"] = now
+                logging.info(
+                    "[TRANSLATION_DRAFT_FINALIZED] uid=%s utterance_id=%s revision=%d in_flight=%s",
+                    self.client_uid,
+                    utterance_id,
+                    state["revision"],
+                    str(bool(state["in_flight"])).lower(),
+                )
+                if not state["in_flight"]:
+                    self.draft_states.pop(utterance_id, None)
+            return
+
+        text = str(segment.get("text") or "").strip()
+        if not text or not re.search(r"[A-Za-z]", text):
+            return
+        if not self._translation_draft_direction_eligible(segment):
+            return
+        with self.draft_state_lock:
+            state = self.draft_states.get(utterance_id)
+            if state is None:
+                state = {
+                    "utterance_id": utterance_id,
+                    "latest_source_text": "",
+                    "start": segment.get("start"),
+                    "end": segment.get("end"),
+                    "source_language": "en",
+                    "revision": 0,
+                    "finalized": False,
+                    "last_translated_draft_text": "",
+                    "last_inference_at": None,
+                    "pending": False,
+                    "in_flight": False,
+                    "updated_at": now,
+                }
+                self.draft_states[utterance_id] = state
+            if state["finalized"] or state["latest_source_text"] == text:
+                return
+            state["revision"] += 1
+            was_pending = state["pending"]
+            state["latest_source_text"] = text
+            state["start"] = segment.get("start")
+            state["end"] = segment.get("end")
+            state["source_language"] = "en"
+            state["updated_at"] = now
+            state["pending"] = self._translation_draft_change_chars(
+                state["last_translated_draft_text"],
+                text,
+            ) >= self.translation_draft_min_delta_chars
+            if state["pending"]:
+                self._queue_translation_draft_wakeup_locked()
+                log_method = logging.debug if was_pending else logging.info
+                log_method(
+                    "[TRANSLATION_DRAFT_%s] uid=%s utterance_id=%s revision=%d source_chars=%d",
+                    "COALESCED" if was_pending else "SCHEDULED",
+                    self.client_uid,
+                    utterance_id,
+                    state["revision"],
+                    len(text),
+                )
+
+    def translation_draft_wait_timeout(self, default=1.0):
+        if not self.translation_draft_enabled:
+            return default
+        with self.draft_state_lock:
+            has_pending = any(
+                state["pending"] and not state["finalized"]
+                for state in self.draft_states.values()
+            )
+            if not has_pending or self.last_draft_inference_finished_at is None:
+                return default
+            remaining = (
+                self.last_draft_inference_finished_at
+                + self.translation_draft_interval_seconds
+                - time.monotonic()
+            )
+        return min(default, max(0.05, remaining))
+
+    def claim_ready_translation_draft(self, now=None):
+        if (
+            not self.translation_draft_enabled
+            or self.exit
+            or self.translation_buffer
+            or not self.translation_queue.empty()
+        ):
+            return None
+        now = time.monotonic() if now is None else float(now)
+        with self.draft_state_lock:
+            if (
+                self.draft_inference_active
+                or self.translation_buffer
+                or not self.translation_queue.empty()
+            ):
+                return None
+            if (
+                self.last_draft_inference_finished_at is not None
+                and now - self.last_draft_inference_finished_at < self.translation_draft_interval_seconds
+            ):
+                return None
+            candidates = [
+                state for state in self.draft_states.values()
+                if state["pending"] and not state["in_flight"] and not state["finalized"]
+            ]
+            if not candidates:
+                return None
+            state = max(candidates, key=lambda item: item["updated_at"])
+            state["pending"] = False
+            state["in_flight"] = True
+            state["last_inference_at"] = now
+            self.draft_inference_active = True
+            return {
+                "utterance_id": state["utterance_id"],
+                "revision": state["revision"],
+                "source_text": self._trim_translation_draft_suffix(
+                    state["latest_source_text"],
+                    self.translation_draft_max_source_chars,
+                ),
+                "observed_source_text": state["latest_source_text"],
+                "start": state["start"],
+                "end": state["end"],
+                "source_language": state["source_language"],
+                "started_at": now,
+            }
+
+    def finish_translation_draft_claim(self, claim, succeeded=False, finished_at=None):
+        if not claim:
+            return
+        finished_at = time.monotonic() if finished_at is None else float(finished_at)
+        utterance_id = claim.get("utterance_id")
+        revision = claim.get("revision")
+        observed_source_text = str(
+            claim.get("observed_source_text") or claim.get("source_text") or ""
+        )
+        with self.draft_state_lock:
+            self.draft_inference_active = False
+            self.last_draft_inference_finished_at = finished_at
+            state = self.draft_states.get(utterance_id)
+            if state is None:
+                return
+            state["in_flight"] = False
+            if state["finalized"]:
+                self.draft_states.pop(utterance_id, None)
+                return
+            if state["revision"] == revision:
+                if succeeded:
+                    state["last_translated_draft_text"] = observed_source_text
+                state["pending"] = False
+                return
+            state["pending"] = self._translation_draft_change_chars(
+                state["last_translated_draft_text"],
+                state["latest_source_text"],
+            ) >= self.translation_draft_min_delta_chars
+            if state["pending"]:
+                self._queue_translation_draft_wakeup_locked()
+
+    def translation_draft_claim_is_current(self, claim):
+        if not claim or self.exit or not self.translation_draft_enabled:
+            return False
+        if self.service_mode != "accurate" or self._resolved_target_language("en") != "zh":
+            return False
+        with self.draft_state_lock:
+            state = self.draft_states.get(claim.get("utterance_id"))
+            return bool(
+                state
+                and state["in_flight"]
+                and not state["finalized"]
+                and state["revision"] == claim.get("revision")
+            )
+
+    def _prepare_translation_draft_glossary(self, text, source_language):
+        if not self.translation_glossary:
+            return None, text, []
+        eligible_sources = self.glossary_sources_for_language(source_language)
+        normalized_text = self._normalize_glossary_lookup_text(text)
+        for source in eligible_sources:
+            if self._normalize_glossary_lookup_text(source) == normalized_text:
+                return self.translation_glossary[source], text, []
+        ordered_sources = sorted(eligible_sources, key=len, reverse=True)
+        if not ordered_sources:
+            return None, text, []
+        pattern = re.compile(
+            "|".join(self._glossary_term_pattern(source) for source in ordered_sources),
+            re.IGNORECASE,
+        )
+        replacements = []
+
+        def protect(match):
+            matched_source = match.group(0)
+            target = next(
+                self.translation_glossary[source]
+                for source in ordered_sources
+                if source.casefold() == matched_source.casefold()
+            )
+            marker = f"ZZGLOSSARY{len(replacements)}ZZ"
+            replacements.append((marker, target))
+            return marker
+
+        return None, pattern.sub(protect, text), replacements
+
+    def _restore_translation_draft_glossary(self, translated_text, replacements):
+        restored_text = str(translated_text or "")
+        for index, (_, target) in enumerate(replacements):
+            marker_pattern = self._glossary_marker_pattern(index)
+            if not marker_pattern.search(restored_text):
+                return None
+            restored_text = marker_pattern.sub(lambda _: target, restored_text)
+        return restored_text
+
+    def translate_draft_text(self, source_text):
+        started_at = time.monotonic()
+        source_language = "en"
+        target_language = self._resolved_target_language(source_language)
+        exact_glossary, inference_text, replacements = self._prepare_translation_draft_glossary(
+            source_text,
+            source_language,
+        )
+        if exact_glossary is not None:
+            translated_text = exact_glossary
+        else:
+            shortcut = None
+            if not replacements:
+                shortcut = self.translate_standalone_interjection(
+                    source_text,
+                    source_language,
+                    target_language,
+                )
+            if shortcut is not None:
+                translated_text, source_language, target_language = shortcut
+            else:
+                translated_text = None
+                (
+                    contextual_text,
+                    contextual_source,
+                    contextual_target,
+                    contextual_reason,
+                    used_context,
+                ) = self.translate_with_readability_context_once(
+                    inference_text,
+                    source_language,
+                    allow_batch=False,
+                    path="draft",
+                )
+                if used_context and contextual_reason is None:
+                    translated_text = contextual_text
+                    source_language = contextual_source
+                    target_language = contextual_target
+                elif used_context:
+                    logging.info(
+                        "[TRANSLATION_CONTEXT_FALLBACK] uid=%s path=draft reason=%s "
+                        "current_chars=%d",
+                        self.client_uid,
+                        contextual_reason,
+                        len(str(inference_text or "")),
+                    )
+
+                if translated_text is None:
+                    (
+                        translated_text,
+                        source_language,
+                        target_language,
+                        inference_reason,
+                        _,
+                    ) = self.infer_translation_once_without_final_state(
+                        inference_text,
+                        source_language,
+                        allow_batch=False,
+                    )
+                    if inference_reason:
+                        return (
+                            None,
+                            inference_reason,
+                            (time.monotonic() - started_at) * 1000.0,
+                        )
+
+                if replacements:
+                    translated_text = self._restore_translation_draft_glossary(
+                        translated_text,
+                        replacements,
+                    )
+                    if translated_text is None:
+                        return (
+                            None,
+                            "glossary_marker_missing",
+                            (time.monotonic() - started_at) * 1000.0,
+                        )
+                logging.debug(
+                    "[TRANSLATION_DRAFT_INFERENCE] uid=%s source_chars=%d output_chars=%d "
+                    "context_used=%s elapsed_ms=%.1f",
+                    self.client_uid,
+                    len(source_text),
+                    len(str(translated_text or "")),
+                    str(bool(used_context)).lower(),
+                    (time.monotonic() - started_at) * 1000.0,
+                )
+
+        failure_reason = self.translation_output_failure_reason(
+            source_text,
+            translated_text,
+            source_language,
+            target_language,
+        )
+        elapsed_ms = (time.monotonic() - started_at) * 1000.0
+        if failure_reason:
+            return None, failure_reason, elapsed_ms
+        return {
+            "text": str(translated_text).strip(),
+            "source_language": source_language,
+            "target_language": target_language,
+        }, None, elapsed_ms
+
+    def send_translation_draft_to_client(self, translated_segment):
+        segment = translated_segment
+        if getattr(self, "segment_post_processor", None) is not None:
+            try:
+                processed = self.segment_post_processor(translated_segment.copy())
+                segment = processed if processed is not None else translated_segment
+            except Exception as error:
+                logging.error(
+                    "[TRANSLATION_DRAFT_POST_PROCESSOR_ERROR] uid=%s utterance_id=%s error=%s",
+                    self.client_uid,
+                    translated_segment.get("utterance_id"),
+                    str(error)[:160],
+                )
+        try:
+            self.websocket.send(json.dumps({
+                "uid": self.client_uid,
+                "translated_segments": [segment],
+            }))
+            return True
+        except Exception as error:
+            logging.error(
+                "[TRANSLATION_DRAFT_SEND_ERROR] uid=%s utterance_id=%s error=%s",
+                self.client_uid,
+                translated_segment.get("utterance_id"),
+                str(error)[:160],
+            )
+            self.exit = True
+            return False
+
+    def process_ready_translation_draft(self):
+        claim = self.claim_ready_translation_draft()
+        if claim is None:
+            return False
+        emitted = False
+        try:
+            result, failure_reason, elapsed_ms = self.translate_draft_text(claim["source_text"])
+            if result is None:
+                logging.info(
+                    "[TRANSLATION_DRAFT_INVALID_DROPPED] uid=%s utterance_id=%s revision=%d "
+                    "source_chars=%d reason=%s elapsed_ms=%.1f",
+                    self.client_uid,
+                    claim["utterance_id"],
+                    claim["revision"],
+                    len(claim["source_text"]),
+                    failure_reason,
+                    elapsed_ms,
+                )
+                return False
+            if not self.translation_draft_claim_is_current(claim):
+                logging.info(
+                    "[TRANSLATION_DRAFT_STALE_DROPPED] uid=%s utterance_id=%s revision=%d "
+                    "source_chars=%d output_chars=%d elapsed_ms=%.1f",
+                    self.client_uid,
+                    claim["utterance_id"],
+                    claim["revision"],
+                    len(claim["source_text"]),
+                    len(result["text"]),
+                    elapsed_ms,
+                )
+                return False
+            translated_segment = {
+                "start": claim.get("start"),
+                "end": claim.get("end"),
+                "text": result["text"],
+                "completed": False,
+                "translation_id": f"draft:{claim['utterance_id']}",
+                "revision": claim["revision"],
+                "utterance_id": claim["utterance_id"],
+                "source_utterance_ids": [claim["utterance_id"]],
+                "source_text": claim["source_text"],
+                "source_language": result["source_language"],
+                "target_language": result["target_language"],
+                "translation_model": self.model_name,
+            }
+            emitted = self.send_translation_draft_to_client(translated_segment)
+            if emitted:
+                logging.info(
+                    "[TRANSLATION_DRAFT_EMITTED] uid=%s utterance_id=%s revision=%d "
+                    "source_chars=%d output_chars=%d elapsed_ms=%.1f",
+                    self.client_uid,
+                    claim["utterance_id"],
+                    claim["revision"],
+                    len(claim["source_text"]),
+                    len(result["text"]),
+                    elapsed_ms,
+                )
+            return emitted
+        finally:
+            self.finish_translation_draft_claim(claim, succeeded=emitted)
 
     def get_translation_cache_key(self):
         """Build the process-local cache key for the configured translation model."""
@@ -1035,7 +1806,7 @@ class ServeClientTranslation(ServeClientBase):
                 translated_text=translated_text,
             )
 
-    def translate_text(self, text: str, source_language: Optional[str]):
+    def _translate_text_current_only(self, text: str, source_language: Optional[str]):
         """
         Translate a single text segment.
 
@@ -1089,6 +1860,35 @@ class ServeClientTranslation(ServeClientBase):
                 )
 
         return self._translate_text_direct(text, source_language, started_at=started_at)
+
+    def translate_text(self, text: str, source_language: Optional[str]):
+        self.pending_translation_warning = None
+        if (
+            not str(text or "").strip()
+            or not self.readability_context_eligible(source_language)
+            or not self.readability_context_snapshot(source_language)
+        ):
+            return self._translate_text_current_only(text, source_language)
+
+        translated_text, resolved_source, target_language, failure_reason, used_context = (
+            self.translate_with_readability_context_once(
+                text,
+                source_language,
+                allow_batch=True,
+                path="final",
+            )
+        )
+        if used_context and failure_reason is None:
+            return translated_text, resolved_source, target_language
+
+        if used_context:
+            logging.info(
+                "[TRANSLATION_CONTEXT_FALLBACK] uid=%s path=final reason=%s current_chars=%d",
+                self.client_uid,
+                failure_reason,
+                len(str(text or "")),
+            )
+        return self._translate_text_current_only(text, source_language)
 
     def translation_queue_size(self):
         try:
@@ -1742,6 +2542,13 @@ class ServeClientTranslation(ServeClientBase):
         translated_text, source_language, target_language = translation_result
         translation_warning = self.pending_translation_warning
         self.pending_translation_warning = None
+        self.record_readability_context(
+            original_text,
+            translated_text,
+            source_language,
+            target_language,
+            translation_warning=translation_warning,
+        )
         self.last_translated_source_text = original_text
         logging.info(
             "[TRANSLATION_FLUSH] uid=%s model=%s source_language=%s target_language=%s "
@@ -1918,6 +2725,8 @@ class ServeClientTranslation(ServeClientBase):
                 break
             if item is None:
                 saw_exit_signal = True
+            elif item is self._TRANSLATION_DRAFT_WAKEUP:
+                self._clear_translation_draft_wakeup()
             else:
                 drained.append(item)
             self.translation_queue.task_done()
@@ -1962,7 +2771,9 @@ class ServeClientTranslation(ServeClientBase):
 
         while not self.exit:
             try:
-                segment = self.translation_queue.get(timeout=1.0)
+                segment = self.translation_queue.get(
+                    timeout=self.translation_draft_wait_timeout()
+                )
 
                 if segment is None:
                     self.translation_queue.task_done()
@@ -1970,6 +2781,14 @@ class ServeClientTranslation(ServeClientBase):
                     self.flush_translation_buffer(force=True)
                     self.flush_merge_buffer(force=True)
                     break
+
+                if segment is self._TRANSLATION_DRAFT_WAKEUP:
+                    self.translation_queue.task_done()
+                    self._clear_translation_draft_wakeup()
+                    self.flush_translation_buffer()
+                    self.flush_merge_buffer()
+                    self.process_ready_translation_draft()
+                    continue
 
                 segments_to_process, saw_exit_signal = self.drain_translation_backlog(segment)
                 if segments_to_process == [segment] and not saw_exit_signal:
@@ -1987,9 +2806,12 @@ class ServeClientTranslation(ServeClientBase):
                         self.flush_merge_buffer(force=True)
                         break
 
+                self.process_ready_translation_draft()
+
             except queue.Empty:
                 self.flush_translation_buffer()
                 self.flush_merge_buffer()
+                self.process_ready_translation_draft()
                 continue
             except Exception as e:
                 logging.error(f"Error processing translation queue: {e}")
@@ -2076,6 +2898,13 @@ class ServeClientTranslation(ServeClientBase):
         except:
             pass
 
+        with self.draft_state_lock:
+            self.draft_states.clear()
+            self.draft_inference_active = False
+            self.draft_wakeup_queued = False
+            self.last_draft_inference_finished_at = None
+        with self.readability_context_lock:
+            self.readability_context_history.clear()
         self.translated_segments.clear()
         self.translation_buffer.clear()
         self.translation_buffer_started_at = None

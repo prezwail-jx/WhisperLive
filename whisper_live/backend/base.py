@@ -211,6 +211,7 @@ class ServeClientBase(object):
         self.transcript = []
         self.end_time_for_same_output = None
         self.translation_queue = translation_queue
+        self.translation_draft_callback = None
         self.admin_status_callback = None
         self.opencc_converter = self._create_opencc_converter()
         self.stable_utterance_ids = bool(stable_utterance_ids)
@@ -362,6 +363,20 @@ class ServeClientBase(object):
     def _finish_utterance(self):
         if self.stable_utterance_ids:
             self.current_utterance_id = None
+
+    def _notify_translation_draft_segment(self, segment):
+        callback = self.translation_draft_callback
+        if callback is None or not segment:
+            return
+        try:
+            callback(segment.copy())
+        except Exception as error:
+            logging.error(
+                "[TRANSLATION_DRAFT_CALLBACK_ERROR] uid=%s utterance_id=%s error=%s",
+                self.client_uid,
+                segment.get("utterance_id"),
+                str(error)[:160],
+            )
 
     def add_frames(self, frame_np):
         """
@@ -980,6 +995,7 @@ class ServeClientBase(object):
                 )
                 self.transcript.append(completed_segment)
 
+                self._notify_translation_draft_segment(completed_segment)
                 if self.translation_queue:
                     try:
                         self.translation_queue.put(completed_segment.copy(), timeout=0.1)
@@ -1015,6 +1031,9 @@ class ServeClientBase(object):
                         last_segment,
                         self.timestamp_offset + rel_start,
                     )
+
+        if last_segment is not None:
+            self._notify_translation_draft_segment(last_segment)
 
         # Handle repeated output logic.
         if self.current_out.strip() == self.prev_out.strip() and self.current_out != '':
@@ -1055,6 +1074,7 @@ class ServeClientBase(object):
                         )
                         self.transcript.append(completed_segment)
 
+                        self._notify_translation_draft_segment(completed_segment)
                         if self.translation_queue:
                             try:
                                 self.translation_queue.put(completed_segment.copy(), timeout=0.1)
@@ -1103,6 +1123,7 @@ class ServeClientBase(object):
                         )
                         self.transcript.append(completed_segment)
 
+                        self._notify_translation_draft_segment(completed_segment)
                         if self.translation_queue:
                             try:
                                 self.translation_queue.put(completed_segment.copy(), timeout=0.1)

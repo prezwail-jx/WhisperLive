@@ -7,8 +7,10 @@
 - 不要回滚用户已有改动；如果工作区已有无关修改，保持原样。
 - 不要随意重构无关模块，改动应聚焦当前需求。
 - 不要提交或新增模型、日志、音频、压缩包、镜像包等大文件。
-- 测试时不能自己拉起服务或安装依赖，除非用户明确要求；所有 Python/Node 相关测试和语法检查优先在已运行的 `whisperlive-gpu0` 容器中通过 `docker exec` 执行，不在宿主机下载或安装任何依赖。
-- 本机指的是3060单卡，部署机指的是5090*2的机器。
+- 测试时不能自己拉起服务或安装依赖，除非用户明确要求；不在宿主机下载或安装任何依赖。
+- 本机指的是3060单卡且配置可能不足，只用于代码修改、只读检查、`git diff --check` 和 Git 状态检查；不要在本机启动 ASR、翻译、Nginx、Admin API 或加载模型，也不要为了验证自行创建、重启或替代部署容器。
+- 部署机指的是5090*2的机器；`whisperlive-gpu0` 等运行容器位于部署机，Python/Node 语法检查、单元测试、服务联调、GPU 推理、显存和延迟验证统一在部署机的既有容器中执行。
+- 本机缺少 `whisperlive-gpu0` 时不视为项目失败，也不要回退到宿主机执行相关检查；记录为“待部署机验证”，并保持对应最终验证任务未完成。
 
 ## 项目结构与职责
 
@@ -53,7 +55,7 @@
 
 ## 近期已知环境与排查捷径
 
-- 当前宿主机运行 FunASR/翻译单元测试时可能缺少 `numpy`、`torch`。不要在宿主机补依赖；需要运行 Python/Node 测试、`py_compile` 或 `node --check` 时，优先使用 `docker exec whisperlive-server ...` 在容器内执行。
+- 当前本机运行 FunASR/翻译单元测试时可能缺少 `numpy`、`torch`。不要在宿主机补依赖；需要运行 Python/Node 测试、`py_compile` 或 `node --check` 时，留待部署机并优先使用 `docker exec whisperlive-gpu0 ...` 在既有容器内执行。
 - 若工具报 `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`，这是执行沙箱故障，不是项目错误。普通命令和 `apply_patch` 各确认一次即可，随后使用已授权命令继续；写文件只能做精确局部替换，并立即检查 `git diff`。
 - 查看容器日志时不要直接输出大段 `docker logs`。优先使用时间范围、关键词和 `tail`，例如筛选 `ERROR`、`FINAL_REFINE`、`SEGMENT_COMPLETE`、`CUDA out of memory`。
 - `whisperlive-server` 容器的 PID 1 可能只是 `bash`，`docker restart` 后不会自动拉起 ASR。除非用户明确要求，不要自行重启；确需重启时先确认无活动客户端，并在重启后检查 Python 进程和 Admin API。

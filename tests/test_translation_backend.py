@@ -825,6 +825,238 @@ class TestServeClientTranslationNllbResidualRetry(unittest.TestCase):
         self.assertEqual(client.translator.translate.call_count, 2)
 
 
+class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
+    def make_client(self, **overrides):
+        options = {
+            "service_mode": "accurate",
+            "source_language": "en",
+            "target_language": "zh",
+            "translation_draft_enabled": True,
+            "translation_draft_interval_seconds": 1.2,
+            "translation_draft_min_delta_chars": 8,
+            "translation_draft_max_source_chars": 220,
+            "translation_readability_context_sentences": 2,
+            "translation_readability_context_max_chars": 220,
+            "translation_merge_enabled": False,
+        }
+        options.update(overrides)
+        with mock.patch.object(ServeClientTranslation, "load_translation_model"):
+            client = ServeClientTranslation(
+                client_uid="draft-test",
+                websocket=mock.Mock(),
+                translation_queue=queue.Queue(),
+                **options,
+            )
+        client.model_loaded = True
+        client.translator = mock.Mock()
+        client.translator_lock = threading.Lock()
+        return client
+
+    @staticmethod
+    def draft_segment(text="The project discussion is continuing", **overrides):
+        segment = {
+            "utterance_id": "utterance-1",
+            "start": "0.000",
+            "end": "1.000",
+            "text": text,
+            "completed": False,
+            "language": "en",
+        }
+        segment.update(overrides)
+        return segment
+
+    @staticmethod
+    def clear_draft_wakeup(client):
+        if not client.translation_queue.empty():
+            client.translation_queue.get_nowait()
+        client._clear_translation_draft_wakeup()
+
+    def test_eligible_incomplete_english_draft_is_emitted_with_stable_metadata(self):
+        client = self.make_client()
+        client.translate_draft_text = mock.Mock(return_value=(
+            {"text": "项目讨论仍在继续", "source_language": "en", "target_language": "zh"},
+            None,
+            5.0,
+        ))
+        client.observe_asr_segment(self.draft_segment())
+        self.clear_draft_wakeup(client)
+
+        self.assertTrue(client.process_ready_translation_draft())
+
+        payload = json.loads(client.websocket.send.call_args[0][0])
+        segment = payload["translated_segments"][0]
+        self.assertFalse(segment["completed"])
+        self.assertEqual(segment["translation_id"], "draft:utterance-1")
+        self.assertEqual(segment["revision"], 1)
+        self.assertEqual(segment["source_utterance_ids"], ["utterance-1"])
+        self.assertEqual(segment["text"], "项目讨论仍在继续")
+
+    def test_ineligible_modes_directions_and_missing_flag_do_not_schedule(self):
+        cases = [
+            {"service_mode": "standard"},
+            {"service_mode": "conversation"},
+            {"source_language": "zh", "target_language": "en"},
+            {"target_language": "en"},
+            {"translation_draft_enabled": False},
+        ]
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                client = self.make_client(**overrides)
+                client.observe_asr_segment(
+                    self.draft_segment(language=overrides.get("source_language", "en"))
+                )
+                self.assertEqual(client.draft_states, {})
+                self.assertTrue(client.translation_queue.empty())
+
+    def test_empty_punctuation_and_non_english_drafts_are_ignored(self):
+        client = self.make_client()
+        for text, language in [("", "en"), ("...?!", "en"), ("这是中文草稿", "zh")]:
+            client.observe_asr_segment(self.draft_segment(text=text, language=language))
+        self.assertEqual(client.draft_states, {})
+        self.assertTrue(client.translation_queue.empty())
+
+    def test_scheduler_coalesces_latest_text_and_suppresses_small_delta(self):
+        client = self.make_client(translation_draft_min_delta_chars=8)
+        client.observe_asr_segment(self.draft_segment("The project discussion"))
+        client.observe_asr_segment(self.draft_segment("The project discussion continues today"))
+        state = client.draft_states["utterance-1"]
+        self.assertEqual(state["revision"], 2)
+        self.assertEqual(state["latest_source_text"], "The project discussion continues today")
+        self.clear_draft_wakeup(client)
+        claim = client.claim_ready_translation_draft(now=10.0)
+        client.finish_translation_draft_claim(claim, succeeded=True, finished_at=10.0)
+
+        client.observe_asr_segment(self.draft_segment("The project discussion continues today!"))
+        state = client.draft_states["utterance-1"]
+        self.assertFalse(state["pending"])
+        self.assertIsNone(client.claim_ready_translation_draft(now=12.0))
+
+    def test_scheduler_enforces_interval_and_final_priority(self):
+        client = self.make_client()
+        client.observe_asr_segment(self.draft_segment())
+        self.clear_draft_wakeup(client)
+        client.last_draft_inference_finished_at = 10.0
+        self.assertIsNone(client.claim_ready_translation_draft(now=11.0))
+        self.assertIsNotNone(client.claim_ready_translation_draft(now=11.2))
+
+        other = self.make_client()
+        other.observe_asr_segment(self.draft_segment())
+        self.clear_draft_wakeup(other)
+        other.translation_queue.put({"completed": True, "text": "final"})
+        self.assertIsNone(other.claim_ready_translation_draft(now=20.0))
+
+    def test_stale_revision_and_finalization_invalidate_in_flight_claim(self):
+        client = self.make_client()
+        client.observe_asr_segment(self.draft_segment("The project discussion starts now"))
+        self.clear_draft_wakeup(client)
+        stale_claim = client.claim_ready_translation_draft(now=10.0)
+        client.observe_asr_segment(self.draft_segment("The project discussion starts right now"))
+        self.assertFalse(client.translation_draft_claim_is_current(stale_claim))
+        client.finish_translation_draft_claim(stale_claim, finished_at=10.5)
+        self.clear_draft_wakeup(client)
+        final_claim = client.claim_ready_translation_draft(now=12.0)
+        client.observe_asr_segment(self.draft_segment(completed=True))
+        self.assertFalse(client.translation_draft_claim_is_current(final_claim))
+        client.finish_translation_draft_claim(final_claim, finished_at=12.5)
+        self.assertNotIn("utterance-1", client.draft_states)
+
+    def test_draft_inference_reuses_translator_and_shared_lock_without_final_state(self):
+        client = self.make_client()
+        translator = client.translator
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = None
+        client.translator_lock = lock
+        client.translator.translate.return_value = ("项目讨论继续", "en", "zh")
+        client.admin_status_callback = mock.Mock()
+
+        result, reason, _ = client.translate_draft_text("The project discussion continues")
+
+        self.assertIs(client.translator, translator)
+        self.assertEqual(result["text"], "项目讨论继续")
+        self.assertIsNone(reason)
+        lock.__enter__.assert_called_once_with()
+        client.admin_status_callback.assert_not_called()
+        self.assertEqual(client.translated_segments, [])
+        self.assertEqual(client.translation_merge_buffer, [])
+        self.assertEqual(client.last_translated_source_text, "")
+
+    def test_readability_history_accepts_only_successful_finals_and_keeps_two(self):
+        client = self.make_client()
+        self.assertTrue(client.record_readability_context("First topic", "第一个主题", "en", "zh"))
+        self.assertFalse(
+            client.record_readability_context("Draft topic", "草稿主题", "en", "zh", "draft")
+        )
+        self.assertFalse(
+            client.record_readability_context("Failed topic", "翻译暂不可用", "en", "zh")
+        )
+        self.assertFalse(client.record_readability_context("Echo topic", "Echo topic", "en", "zh"))
+        self.assertTrue(client.record_readability_context("Second topic", "第二个主题", "en", "zh"))
+        self.assertTrue(client.record_readability_context("Third topic", "第三个主题", "en", "zh"))
+        self.assertEqual(
+            [unit["source_text"] for unit in client.readability_context_history],
+            ["Second topic", "Third topic"],
+        )
+
+    def test_context_input_trims_oldest_without_cutting_current_sentence(self):
+        client = self.make_client(translation_readability_context_max_chars=32)
+        client.readability_context_history = [
+            {"source_text": "veryoldword alpha beta gamma", "text": "旧内容"},
+            {"source_text": "newest context words", "text": "新内容"},
+        ]
+        current = "Current sentence must remain completely intact."
+        contextual, history = client.build_readability_context_input(current, "en")
+        context, marker, actual_current = contextual.split("\n")
+        self.assertEqual(marker, client._READABILITY_BOUNDARY_MARKER)
+        self.assertEqual(actual_current, current)
+        self.assertLessEqual(len(context), 32)
+        self.assertFalse(context.startswith("ldword"))
+        self.assertEqual(len(history), 2)
+
+    def test_boundary_extraction_and_final_current_only_fallback(self):
+        client = self.make_client()
+        history = [{"source_text": "Previous topic", "text": "先前主题"}]
+        marker = client._READABILITY_BOUNDARY_MARKER
+        extracted, reason = client.extract_readability_current_translation(
+            f"先前主题 {marker} 当前内容", "Current content", "en", "zh", history,
+        )
+        self.assertEqual(extracted, "当前内容")
+        self.assertIsNone(reason)
+        self.assertEqual(
+            client.extract_readability_current_translation(
+                "没有边界 当前内容", "Current content", "en", "zh", history,
+            )[1],
+            "boundary_missing",
+        )
+
+        client.readability_context_history = history
+        client.translator.translate.side_effect = [
+            ("没有边界的上下文结果", "en", "zh"),
+            ("当前内容", "en", "zh"),
+        ]
+        translated, source_language, target_language = client.translate_text("Current content", "en")
+        self.assertEqual((translated, source_language, target_language), ("当前内容", "en", "zh"))
+        self.assertEqual(client.translator.translate.call_count, 2)
+
+    def test_draft_context_fallback_failure_is_silent_and_does_not_leak_context(self):
+        client = self.make_client()
+        client.readability_context_history = [
+            {"source_text": "Private previous topic", "text": "私有历史"}
+        ]
+        client.translator.translate.side_effect = [
+            ("缺少边界的结果", "en", "zh"),
+            ("Current content", "en", "zh"),
+        ]
+        result, reason, _ = client.translate_draft_text("Current content")
+        self.assertIsNone(result)
+        self.assertEqual(reason, "source_echo")
+        client.websocket.send.assert_not_called()
+        self.assertEqual(
+            client.readability_context_history[0]["source_text"], "Private previous topic"
+        )
+        self.assertEqual(client.translated_segments, [])
+        self.assertEqual(client.translation_merge_buffer, [])
+
+
 class TestServeClientTranslationBuffer(unittest.TestCase):
     def make_client(self, **kwargs):
         kwargs.setdefault("translation_merge_enabled", False)
