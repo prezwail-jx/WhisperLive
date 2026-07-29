@@ -358,7 +358,7 @@ class ServeClientFasterWhisper(ServeClientBase):
             self.set_language(info)
         return result
 
-    def handle_transcription_output(self, result, duration):
+    def handle_transcription_output(self, result, duration, force_complete_last=False):
         """
         Handle the transcription output, updating the transcript and sending data to the client.
 
@@ -369,7 +369,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         segments = []
         if len(result):
             self.t_start = None
-            last_segment = self.update_segments(result, duration)
+            last_segment = self.update_segments(result, duration, force_complete_last=force_complete_last)
             segments = self.prepare_segments(last_segment)
 
         if len(segments):

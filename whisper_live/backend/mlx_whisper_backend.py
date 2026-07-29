@@ -152,7 +152,7 @@ class ServeClientMLXWhisper(ServeClientBase):
             )
         return converted
 
-    def handle_transcription_output(self, result, duration):
+    def handle_transcription_output(self, result, duration, force_complete_last=False):
         if not len(result):
             return
 

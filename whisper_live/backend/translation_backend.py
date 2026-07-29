@@ -119,6 +119,11 @@ class HelsinkiZhEnTranslator:
         logging.warning(f"Unsupported source language for Helsinki zh-en translator: {source_language}")
         return None
 
+    @staticmethod
+    def normalize_model_output(text: str) -> str:
+        """Normalize known HTML entities emitted literally by translation models."""
+        return str(text or "").replace("&amp;", "&")
+
     @classmethod
     def should_protect_english_term(cls, term: str) -> bool:
         alpha_chars = [char for char in term if char.isalpha()]
@@ -297,6 +302,7 @@ class HelsinkiZhEnTranslator:
         if protected_terms:
             translated_text = self.restore_natural_term_placeholders(translated_text, protected_terms)
             translated_text = self.restore_english_terms(translated_text, protected_terms)
+        translated_text = self.normalize_model_output(translated_text)
         return (
             translated_text,
             self.normalize_language(source_language),
@@ -391,6 +397,7 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
         if protected_terms:
             translated_text = self.restore_natural_term_placeholders(translated_text, protected_terms)
             translated_text = self.restore_english_terms(translated_text, protected_terms)
+        translated_text = self.normalize_model_output(translated_text)
         return translated_text, source_language, resolved_target_language
 
     def translate_batch(self, items):
@@ -453,6 +460,7 @@ class NLLBTranslator(HelsinkiZhEnTranslator):
                 if protected_terms:
                     translated_text = self.restore_natural_term_placeholders(translated_text, protected_terms)
                     translated_text = self.restore_english_terms(translated_text, protected_terms)
+                translated_text = self.normalize_model_output(translated_text)
                 results[entry["index"]] = (translated_text, source_language, target_language)
 
         return results
@@ -534,6 +542,7 @@ class ServeClientTranslation(ServeClientBase):
     _TRANSLATOR_BATCH_WORKERS = {}
     _TRANSLATOR_CACHE_LOCK = threading.Lock()
     _TRANSLATION_DRAFT_WAKEUP = object()
+    _TRANSLATION_DRAIN_SENTINEL = object()
     _READABILITY_BOUNDARY_MARKER = "ZZREADABILITYBOUNDARYZZ"
     _STANDALONE_ENGLISH_INTERJECTIONS = {
         "oh": "哦",
@@ -684,6 +693,12 @@ class ServeClientTranslation(ServeClientBase):
         self.readability_context_lock = threading.Lock()
         self.readability_context_history = []
         self.readability_context_direction = None
+        self.final_translation_lock = threading.Lock()
+        self.pending_final_segments = {}
+        self.timed_out_final_keys = set()
+        self.translation_drain_completed = threading.Event()
+        self.translation_drain_status = None
+        self.translation_timeout_count = 0
         self.translator = None
         self.translator_lock = None
         self.batch_worker = None
@@ -1913,6 +1928,34 @@ class ServeClientTranslation(ServeClientBase):
             )
         )
         if used_context and failure_reason is None:
+            risk_reason = self.zh_en_context_risk_reason(text, translated_text, resolved_source, target_language)
+            if risk_reason:
+                logging.info(
+                    "[TRANSLATION_CONTEXT_FALLBACK] uid=%s path=final reason=%s current_chars=%d output_chars=%d",
+                    self.client_uid,
+                    risk_reason,
+                    len(str(text or "")),
+                    len(str(translated_text or "")),
+                )
+                direct_text, direct_source, direct_target = self._translate_text_current_only(text, source_language)
+                direct_warning = self.pending_translation_warning
+                if direct_warning:
+                    logging.warning(
+                        "[TRANSLATION_CONTEXT_DIRECT_FAILED] uid=%s reason=%s current_chars=%d output_chars=%d",
+                        self.client_uid,
+                        direct_warning,
+                        len(str(text or "")),
+                        len(str(direct_text or "")),
+                    )
+                else:
+                    logging.info(
+                        "[TRANSLATION_CONTEXT_DIRECT_USED] uid=%s reason=%s current_chars=%d output_chars=%d",
+                        self.client_uid,
+                        risk_reason,
+                        len(str(text or "")),
+                        len(str(direct_text or "")),
+                    )
+                return direct_text, direct_source, direct_target
             return translated_text, resolved_source, target_language
 
         if used_context:
@@ -1924,11 +1967,175 @@ class ServeClientTranslation(ServeClientBase):
             )
         return self._translate_text_current_only(text, source_language)
 
+    def zh_en_context_risk_reason(self, source_text, translated_text, source_language, target_language):
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        target_language = HelsinkiZhEnTranslator.normalize_language(target_language)
+        if source_language != "zh" or target_language != "en":
+            return None
+        source_text = str(source_text or "")
+        translated_text = str(translated_text or "")
+        source_cjk = self._count_cjk(source_text)
+        if 0 < source_cjk <= 24:
+            return "short_zh_context_risk"
+        if len(translated_text) >= 160 and len(translated_text) > max(source_cjk or len(source_text), 1) * 4:
+            return "context_expansion_risk"
+        translated_words = self._output_words(translated_text)
+        if len(translated_words) >= 4:
+            with self.readability_context_lock:
+                previous_units = list(self.readability_context_history)
+            previous_words = []
+            for unit in previous_units:
+                previous_words.extend(self._output_words(unit.get("text")))
+            previous_ngrams = {
+                tuple(previous_words[index:index + 4])
+                for index in range(0, max(0, len(previous_words) - 3))
+            }
+            for index in range(0, len(translated_words) - 3):
+                if tuple(translated_words[index:index + 4]) in previous_ngrams:
+                    return "context_history_leak"
+        return None
+
     def translation_queue_size(self):
         try:
             return self.translation_queue.qsize()
         except Exception:
             return "unknown"
+
+    @classmethod
+    def final_source_key(cls, segment):
+        utterance_id = str((segment or {}).get("utterance_id") or "").strip()
+        start = cls._segment_time((segment or {}).get("start"))
+        end = cls._segment_time((segment or {}).get("end"))
+        return (utterance_id, round(start, 3), round(end, 3))
+
+    @classmethod
+    def final_source_ids(cls, segment):
+        ids = []
+        source_ids = (segment or {}).get("source_utterance_ids")
+        if isinstance(source_ids, str):
+            ids.append(source_ids)
+        elif isinstance(source_ids, (list, tuple)):
+            ids.extend(source_ids)
+        if (segment or {}).get("utterance_id"):
+            ids.append((segment or {}).get("utterance_id"))
+        return {str(item).strip() for item in ids if str(item or "").strip()}
+
+    @classmethod
+    def segment_covers_source(cls, translated_segment, source_segment):
+        translated_ids = cls.final_source_ids(translated_segment)
+        source_id = str((source_segment or {}).get("utterance_id") or "").strip()
+        translated_start = cls._segment_time((translated_segment or {}).get("start"))
+        translated_end = cls._segment_time((translated_segment or {}).get("end"))
+        source_start = cls._segment_time((source_segment or {}).get("start"))
+        source_end = cls._segment_time((source_segment or {}).get("end"))
+        time_covers = translated_start <= source_start + 0.001 and translated_end + 0.001 >= source_end
+        if source_id:
+            return source_id in translated_ids and time_covers
+        return time_covers
+
+    def register_pending_final_segment(self, segment):
+        if not (segment or {}).get("completed", False):
+            return
+        key = self.final_source_key(segment)
+        with self.final_translation_lock:
+            if key in self.timed_out_final_keys:
+                return
+            self.pending_final_segments[key] = segment.copy()
+        logging.info(
+            "[TRANSLATION_FINAL_PENDING] uid=%s key=%s queue_size=%s text_preview=%r",
+            self.client_uid,
+            key,
+            self.translation_queue_size(),
+            str((segment or {}).get("text") or "").strip()[:80],
+        )
+
+    def resolve_pending_final_segments(self, translated_segment):
+        resolved = []
+        with self.final_translation_lock:
+            for key, source_segment in list(self.pending_final_segments.items()):
+                if self.segment_covers_source(translated_segment, source_segment):
+                    resolved.append(key)
+                    self.pending_final_segments.pop(key, None)
+            for key in resolved:
+                self.timed_out_final_keys.discard(key)
+        if resolved:
+            logging.info(
+                "[TRANSLATION_FINAL_RESOLVED] uid=%s resolved=%d start=%s end=%s warning=%s",
+                self.client_uid,
+                len(resolved),
+                (translated_segment or {}).get("start"),
+                (translated_segment or {}).get("end"),
+                (translated_segment or {}).get("translation_warning") or "",
+            )
+
+    def translated_segment_is_timed_out_late(self, translated_segment):
+        if (translated_segment or {}).get("translation_warning") == "translation_drain_timeout":
+            return False
+        with self.final_translation_lock:
+            timed_out = set(self.timed_out_final_keys)
+        if not timed_out:
+            return False
+        translated_ids = self.final_source_ids(translated_segment)
+        translated_start = self._segment_time((translated_segment or {}).get("start"))
+        translated_end = self._segment_time((translated_segment or {}).get("end"))
+        for utterance_id, source_start, source_end in timed_out:
+            if utterance_id and utterance_id not in translated_ids:
+                continue
+            if translated_start <= source_start + 0.001 and translated_end + 0.001 >= source_end:
+                return True
+        return False
+
+    def build_failed_translation_segment(self, source_segment, reason):
+        source_ids = []
+        if (source_segment or {}).get("utterance_id"):
+            source_ids.append((source_segment or {}).get("utterance_id"))
+        source_language = self.get_segment_source_language(source_segment)
+        target_language = self._resolved_target_language(source_language)
+        failed = {
+            "start": (source_segment or {}).get("start"),
+            "end": (source_segment or {}).get("end"),
+            "text": self._TRANSLATION_UNAVAILABLE_TEXT,
+            "completed": True,
+            "source_text": str((source_segment or {}).get("text") or "").strip(),
+            "source_language": source_language,
+            "target_language": target_language,
+            "translation_model": self.model_name,
+            "translation_warning": reason or "translation_exception",
+        }
+        if source_ids:
+            failed["source_utterance_ids"] = source_ids
+            failed["utterance_id"] = source_ids[0]
+        return failed
+
+    def emit_failed_translation_for_source(self, source_segment, reason):
+        failed = self.build_failed_translation_segment(source_segment, reason)
+        self.emit_translated_segment(failed)
+        logging.warning(
+            "[TRANSLATION_FINAL_FAILED] uid=%s reason=%s key=%s text_preview=%r",
+            self.client_uid,
+            reason,
+            self.final_source_key(source_segment),
+            str((source_segment or {}).get("text") or "").strip()[:80],
+        )
+        return failed
+
+    def emit_timeout_placeholders(self, reason="translation_drain_timeout"):
+        with self.final_translation_lock:
+            pending = list(self.pending_final_segments.items())
+            for key, _segment in pending:
+                self.timed_out_final_keys.add(key)
+            self.pending_final_segments.clear()
+        for _key, source_segment in pending:
+            self.emit_failed_translation_for_source(source_segment, reason)
+        self.translation_timeout_count += len(pending)
+        if pending:
+            logging.warning(
+                "[TRANSLATION_FINAL_TIMEOUT] uid=%s count=%d reason=%s",
+                self.client_uid,
+                len(pending),
+                reason,
+            )
+        return len(pending)
 
     def should_retry_nllb_residual_cjk(self, translated_text, source_language, target_language):
         if not self.is_nllb_model(self.model_name):
@@ -2600,18 +2807,32 @@ class ServeClientTranslation(ServeClientBase):
             return
 
         self.pending_translation_warning = None
-        translation_result = self.translate_fixed_short_phrase(original_text, source_language)
-        if translation_result is None:
-            translation_result = self.translate_with_glossary(original_text, source_language)
-        if translation_result is None:
-            translation_result = self.translate_standalone_interjection(
-                original_text,
-                source_language,
-                self.target_language,
+        try:
+            translation_result = self.translate_fixed_short_phrase(original_text, source_language)
+            if translation_result is None:
+                translation_result = self.translate_with_glossary(original_text, source_language)
+            if translation_result is None:
+                translation_result = self.translate_standalone_interjection(
+                    original_text,
+                    source_language,
+                    self.target_language,
+                )
+            if translation_result is None:
+                translation_result = self.translate_text(original_text, source_language)
+            translated_text, source_language, target_language = translation_result
+        except Exception as error:
+            logging.error(
+                "[TRANSLATION_FINAL_EXCEPTION] uid=%s reason=%s start=%s end=%s error=%s",
+                self.client_uid,
+                self.translation_exception_reason(error),
+                buffered_segments[0].get("start"),
+                buffered_segments[-1].get("end"),
+                str(error)[:160],
             )
-        if translation_result is None:
-            translation_result = self.translate_text(original_text, source_language)
-        translated_text, source_language, target_language = translation_result
+            for source_segment in buffered_segments:
+                self.emit_failed_translation_for_source(source_segment, self.translation_exception_reason(error))
+            self.pending_translation_warning = None
+            return
         translation_warning = self.pending_translation_warning
         self.pending_translation_warning = None
         self.record_readability_context(
@@ -2719,6 +2940,16 @@ class ServeClientTranslation(ServeClientBase):
         return False
 
     def emit_translated_segment(self, translated_segment):
+        if self.translated_segment_is_timed_out_late(translated_segment):
+            logging.warning(
+                "[TRANSLATION_LATE_SUPPRESSED] uid=%s start=%s end=%s ids=%s",
+                self.client_uid,
+                (translated_segment or {}).get("start"),
+                (translated_segment or {}).get("end"),
+                sorted(self.final_source_ids(translated_segment)),
+            )
+            return
+        self.resolve_pending_final_segments(translated_segment)
         self.translated_segments.append(translated_segment)
         segments_to_send = self.prepare_translated_segments()
         self.send_translation_to_client(segments_to_send)
@@ -2840,8 +3071,20 @@ class ServeClientTranslation(ServeClientBase):
         for split_segment in self.split_realtime_segment(segment):
             if self.exit:
                 break
-            self.add_segment_to_translation_buffer(split_segment)
-            self.flush_translation_buffer()
+            self.register_pending_final_segment(split_segment)
+            try:
+                self.add_segment_to_translation_buffer(split_segment)
+                self.flush_translation_buffer()
+            except Exception as error:
+                logging.error(
+                    "[TRANSLATION_SEGMENT_ERROR] uid=%s reason=%s start=%s end=%s error=%s",
+                    self.client_uid,
+                    self.translation_exception_reason(error),
+                    split_segment.get("start"),
+                    split_segment.get("end"),
+                    str(error)[:160],
+                )
+                self.emit_failed_translation_for_source(split_segment, self.translation_exception_reason(error))
 
     def process_translation_queue(self):
         """
@@ -2861,6 +3104,15 @@ class ServeClientTranslation(ServeClientBase):
                     logging.info(f"Received exit signal for translation client {self.client_uid}")
                     self.flush_translation_buffer(force=True)
                     self.flush_merge_buffer(force=True)
+                    break
+
+                if segment is self._TRANSLATION_DRAIN_SENTINEL:
+                    self.translation_queue.task_done()
+                    logging.info("[TRANSLATION_DRAIN_COMPLETE] uid=%s", self.client_uid)
+                    self.flush_translation_buffer(force=True)
+                    self.flush_merge_buffer(force=True)
+                    self.translation_drain_status = "completed"
+                    self.translation_drain_completed.set()
                     break
 
                 if segment is self._TRANSLATION_DRAFT_WAKEUP:
@@ -2899,6 +3151,37 @@ class ServeClientTranslation(ServeClientBase):
                 continue
 
         logging.info(f"Translation processing ended for client {self.client_uid}")
+
+    def finalize_translation_drain(self, timeout_seconds=0):
+        self.translation_drain_status = None
+        self.translation_drain_completed.clear()
+        logging.info(
+            "[TRANSLATION_DRAIN_START] uid=%s queue_size=%s timeout=%.2f pending=%d",
+            self.client_uid,
+            self.translation_queue_size(),
+            float(timeout_seconds or 0.0),
+            len(self.pending_final_segments),
+        )
+        try:
+            self.translation_queue.put(self._TRANSLATION_DRAIN_SENTINEL, timeout=0.5)
+        except Exception as error:
+            logging.error("[TRANSLATION_DRAIN_SIGNAL_FAILED] uid=%s error=%s", self.client_uid, str(error)[:160])
+            self.emit_timeout_placeholders()
+            self.translation_drain_status = "timed_out"
+            return "timed_out"
+        if self.translation_drain_completed.wait(max(0.0, float(timeout_seconds or 0.0))):
+            return self.translation_drain_status or "completed"
+        logging.warning(
+            "[TRANSLATION_DRAIN_TIMEOUT] uid=%s timeout=%.2f pending=%d queue_size=%s",
+            self.client_uid,
+            float(timeout_seconds or 0.0),
+            len(self.pending_final_segments),
+            self.translation_queue_size(),
+        )
+        self.emit_timeout_placeholders()
+        self.translation_drain_status = "timed_out"
+        self.exit = True
+        return "timed_out"
 
     def prepare_translated_segments(self):
         """

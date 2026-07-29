@@ -216,6 +216,9 @@ class ServeClientBase(object):
         self.end_time_for_same_output = None
         self.translation_queue = translation_queue
         self.translation_draft_callback = None
+        self.asr_finalization_requested = False
+        self.asr_finalization_completed = threading.Event()
+        self.asr_finalization_status = None
         self.admin_status_callback = None
         self.opencc_converter = self._create_opencc_converter()
         self.stable_utterance_ids = bool(stable_utterance_ids)
@@ -283,14 +286,23 @@ class ServeClientBase(object):
                 break
 
             if self.frames_np is None:
+                if self.asr_finalization_requested:
+                    self._finish_asr_finalization("completed")
+                time.sleep(0.05)
                 continue
 
             if self.clip_audio:
                 self.clip_audio_if_no_valid_segment()
 
             input_bytes, duration = self.get_audio_chunk_for_processing()
-            if duration < self.min_transcription_chunk_seconds:
+            finalizing = self.asr_finalization_requested
+            if duration < self.min_transcription_chunk_seconds and not finalizing:
                 time.sleep(0.1)     # wait for audio chunks to arrive
+                continue
+            if duration <= 0:
+                if finalizing:
+                    self._finish_asr_finalization("completed")
+                time.sleep(0.05)
                 continue
             try:
                 input_sample = input_bytes.copy()
@@ -302,22 +314,50 @@ class ServeClientBase(object):
                     and not getattr(self, "allow_language_auto_per_chunk", False)
                 ):
                     self.timestamp_offset += duration
+                    if finalizing:
+                        self._finish_asr_finalization("completed")
                     time.sleep(0.25)    # wait for voice activity, result is None when no voice activity
                     continue
                 wl_metrics.track_transcription_latency(time.time() - t0)
                 wl_metrics.track_audio_processed(duration)
-                self.handle_transcription_output(result, duration)
+                self.handle_transcription_output(result, duration, force_complete_last=finalizing)
+                if finalizing:
+                    self._finish_asr_finalization("completed")
 
             except Exception as e:
                 logging.error(f"[ERROR]: Failed to transcribe audio chunk: {e}")
                 wl_metrics.track_error("transcription")
+                if finalizing:
+                    self._finish_asr_finalization("failed")
                 time.sleep(0.01)
 
     def transcribe_audio(self):
         raise NotImplementedError
 
-    def handle_transcription_output(self, result, duration):
+    def handle_transcription_output(self, result, duration, force_complete_last=False):
         raise NotImplementedError
+
+    def request_asr_finalization(self):
+        self.asr_finalization_status = None
+        self.asr_finalization_completed.clear()
+        self.asr_finalization_requested = True
+        logging.info("[ASR_FINALIZE_REQUESTED] uid=%s", self.client_uid)
+
+    def _finish_asr_finalization(self, status="completed"):
+        if not self.asr_finalization_requested and self.asr_finalization_completed.is_set():
+            return
+        self.asr_finalization_status = status
+        self.asr_finalization_requested = False
+        self.asr_finalization_completed.set()
+        logging.info("[ASR_FINALIZE_%s] uid=%s", str(status or "completed").upper(), self.client_uid)
+
+    def wait_for_asr_finalization(self, timeout=0):
+        if not self.asr_finalization_requested and self.asr_finalization_completed.is_set():
+            return self.asr_finalization_status or "completed"
+        if self.asr_finalization_completed.wait(max(0.0, float(timeout or 0.0))):
+            return self.asr_finalization_status or "completed"
+        logging.warning("[ASR_FINALIZE_TIMEOUT] uid=%s timeout=%.2f", self.client_uid, float(timeout or 0.0))
+        return "timed_out"
 
     def format_segment(self, start, end, text, completed=False, speaker=None, words=None):
         """
@@ -967,7 +1007,7 @@ class ServeClientBase(object):
             for w in words
         ]
 
-    def update_segments(self, segments, duration):
+    def update_segments(self, segments, duration, force_complete_last=False):
         """
         Processes the segments from Whisper and updates the transcript.
         Uses helper methods to account for differences between backends.
@@ -1057,6 +1097,40 @@ class ServeClientBase(object):
                 pass
             elif self._is_low_energy_range(rel_start, rel_end, duration, segments[-1].text):
                 offset = rel_end
+            elif force_complete_last:
+                completed_text = self._dedupe_completed_text(segments[-1].text)
+                if self._should_hard_drop_hallucination_text(completed_text, "finalize_complete"):
+                    completed_text = ""
+                if self._is_mixed_interpretation_noise_text(completed_text):
+                    completed_text = ""
+                if completed_text.strip() and rel_end > rel_start:
+                    with self.lock:
+                        start = self.timestamp_offset + rel_start
+                        end = self.timestamp_offset + rel_end
+                    if not self.text or self.text[-1].strip().lower() != completed_text.strip().lower():
+                        self.text.append(completed_text)
+                        speaker = self._identify_speaker(segments[-1])
+                        words = self._extract_words(segments[-1], self.timestamp_offset)
+                        completed_segment = self.format_segment(start, end, completed_text, completed=True, speaker=speaker, words=words)
+                        self._attach_utterance_id(completed_segment, start)
+                        self.transcript.append(completed_segment)
+                        self._notify_translation_draft_segment(completed_segment)
+                        if self.translation_queue:
+                            try:
+                                self.translation_queue.put(completed_segment.copy(), timeout=0.1)
+                            except queue.Full:
+                                logging.warning("Translation queue is full, skipping segment")
+                        logging.info(
+                            "[ASR_FINALIZE_COMPLETE_SEGMENT] uid=%s start=%.3f end=%.3f text=%r",
+                            self.client_uid,
+                            start,
+                            end,
+                            completed_text[:80],
+                        )
+                offset = rel_end
+                last_segment = None
+                self.current_out = ""
+                self._finish_utterance()
             else:
                 self.current_out += segments[-1].text
                 words = self._extract_words(segments[-1], self.timestamp_offset)

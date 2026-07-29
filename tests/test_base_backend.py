@@ -25,7 +25,7 @@ class ConcreteServeClient(ServeClientBase):
     def transcribe_audio(self, input_sample):
         return None
 
-    def handle_transcription_output(self, result, duration):
+    def handle_transcription_output(self, result, duration, force_complete_last=False):
         pass
 
 
@@ -97,8 +97,8 @@ class AutoLanguageClient(ConcreteServeClient):
         self.exit = True
         return ["segment"]
 
-    def handle_transcription_output(self, result, duration):
-        self.output_calls.append((result, duration))
+    def handle_transcription_output(self, result, duration, force_complete_last=False):
+        self.output_calls.append((result, duration, force_complete_last))
 
 
 class TestSpeechToTextLanguageGate(unittest.TestCase):
@@ -122,6 +122,22 @@ class TestSpeechToTextLanguageGate(unittest.TestCase):
 
         self.assertEqual(len(client.output_calls), 1)
         self.assertEqual(client.output_calls[0][0], ["segment"])
+
+    def test_asr_finalization_completes_when_no_tail_audio(self):
+        client = AutoLanguageClient(client_uid="test", websocket=MagicMock())
+        client.frames_np = None
+        client.request_asr_finalization()
+
+        with patch("whisper_live.backend.base.time.sleep", side_effect=lambda _seconds: setattr(client, "exit", True)):
+            client.speech_to_text()
+
+        self.assertEqual(client.asr_finalization_status, "completed")
+
+    def test_asr_finalization_wait_reports_timeout(self):
+        client = AutoLanguageClient(client_uid="test", websocket=MagicMock())
+        client.request_asr_finalization()
+
+        self.assertEqual(client.wait_for_asr_finalization(timeout=0), "timed_out")
 
 
 class TestAddFrames(unittest.TestCase):
@@ -486,6 +502,19 @@ class TestUpdateSegments(unittest.TestCase):
         self.assertFalse(q.empty())
         item = q.get_nowait()
         self.assertIn("first", item["text"])
+
+    def test_force_complete_last_emits_final_segment(self):
+        q = queue.Queue()
+        self.client.translation_queue = q
+        segs = [self._make_segment(0.0, 0.4, " final tail")]
+
+        last = self.client.update_segments(segs, duration=0.5, force_complete_last=True)
+
+        self.assertIsNone(last)
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertTrue(self.client.transcript[0]["completed"])
+        self.assertEqual(self.client.transcript[0]["text"].strip(), "final tail")
+        self.assertEqual(q.get_nowait()["text"].strip(), "final tail")
 
     def test_stable_utterance_id_survives_partial_completion(self):
         self.client.stable_utterance_ids = True

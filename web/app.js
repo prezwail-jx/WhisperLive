@@ -107,7 +107,10 @@ const translationSegmentStore = new Map();
 const translationRevealStates = new Map();
 const draftTranslationRevisions = new Map();
 const finalizedTranslationSourceIds = new Set();
+const pendingFinalTranslationTimers = new Map();
 const translatedSourceIds = new Set();
+const FINAL_TRANSLATION_TIMEOUT_MS = 12000;
+const SESSION_FINALIZE_TIMEOUT_MS = 20000;
 let sourceClearedBefore = null;
 let translationClearedBefore = null;
 let currentSessionId = null;
@@ -115,6 +118,8 @@ let currentSessionStartedAt = null;
 let currentConfig = null;
 let currentServerBackend = null;
 let hasStoppedCurrentSession = false;
+let waitingForSessionFinalized = false;
+let sessionFinalizeTimer = null;
 let summaryGenerated = false;
 let summaryGenerating = false;
 let selectedSummarySessionId = null;
@@ -1736,7 +1741,18 @@ function sourceSegmentStoreKey(segment) {
   return `source-final:${segmentTimeValue(segment.start).toFixed(3)}:${segmentTimeValue(segment.end).toFixed(3)}`;
 }
 
+function sourceSegmentCompositeKey(segment) {
+  const utteranceId = String(segment?.utterance_id || "").trim();
+  const start = segmentTimeValue(segment?.start).toFixed(3);
+  const end = segmentTimeValue(segment?.end).toFixed(3);
+  return `${utteranceId}:${start}:${end}`;
+}
+
 function translationSegmentStoreKey(segment) {
+  const translationWarning = String(segment?.translation_warning || "").trim();
+  if (translationWarning === "frontend_timeout") {
+    return `translation-timeout:${sourceSegmentCompositeKey(segment)}`;
+  }
   const translationId = String(segment?.translation_id || "").trim();
   if (translationId) return `translation-id:${translationId}`;
   const sourceIds = (segment?.source_utterance_ids || [segment?.utterance_id])
@@ -1744,6 +1760,80 @@ function translationSegmentStoreKey(segment) {
     .filter(Boolean)
     .join(",");
   return `translation:${sourceIds}:${segmentTimeValue(segment?.start).toFixed(3)}:${segmentTimeValue(segment?.end).toFixed(3)}`;
+}
+
+function translationCoversSource(translation, source) {
+  const sourceId = String(source?.utterance_id || "").trim();
+  const sourceIds = new Set(translationSourceIds(translation));
+  const sourceStart = segmentTimeValue(source?.start);
+  const sourceEnd = segmentTimeValue(source?.end);
+  const translationStart = segmentTimeValue(translation?.start);
+  const translationEnd = segmentTimeValue(translation?.end);
+  const timeCovers = translationStart <= sourceStart + 0.001 && translationEnd + 0.001 >= sourceEnd;
+  if (!sourceId) return timeCovers;
+  return sourceIds.has(sourceId) && timeCovers;
+}
+
+function clearPendingFinalTranslationTimer(key) {
+  const timer = pendingFinalTranslationTimers.get(key);
+  if (timer) window.clearTimeout(timer);
+  pendingFinalTranslationTimers.delete(key);
+}
+
+function removeFrontendTimeoutForSource(source) {
+  translationSegmentStore.forEach((segment, key) => {
+    if (segment.translation_warning !== "frontend_timeout") return;
+    if (!translationCoversSource(segment, source)) return;
+    cancelTranslationReveal(key);
+    translationSegmentStore.delete(key);
+  });
+}
+
+function showFrontendTranslationTimeout(source) {
+  const key = sourceSegmentCompositeKey(source);
+  pendingFinalTranslationTimers.delete(key);
+  if (Array.from(translationSegmentStore.values()).some((translation) => translation.completed !== false && translation.translation_warning !== "frontend_timeout" && translationCoversSource(translation, source))) {
+    return;
+  }
+  removeDraftTranslationsForSourceIds(translationSourceIds(source));
+  const timeoutSegment = {
+    start: source.start,
+    end: source.end,
+    text: "翻译暂不可用",
+    completed: true,
+    source_text: source.text,
+    source_language: source.language,
+    target_language: "auto",
+    translation_warning: "frontend_timeout",
+    translation_id: `frontend-timeout:${key}`,
+    utterance_id: source.utterance_id,
+    source_utterance_ids: source.utterance_id ? [source.utterance_id] : [],
+  };
+  const translationKey = translationSegmentStoreKey(timeoutSegment);
+  timeoutSegment._translation_key = translationKey;
+  translationSegmentStore.set(translationKey, timeoutSegment);
+  syncSegmentArrays();
+  renderTranscriptViews();
+}
+
+function trackFinalSourceTranslationTimeout(source) {
+  if (!source || source.completed === false) return;
+  if (Array.from(translationSegmentStore.values()).some((translation) => translation.completed !== false && translationCoversSource(translation, source))) return;
+  const key = sourceSegmentCompositeKey(source);
+  if (pendingFinalTranslationTimers.has(key)) return;
+  pendingFinalTranslationTimers.set(key, window.setTimeout(() => showFrontendTranslationTimeout(source), FINAL_TRANSLATION_TIMEOUT_MS));
+}
+
+function clearAllPendingFinalTranslationTimers() {
+  Array.from(pendingFinalTranslationTimers.keys()).forEach(clearPendingFinalTranslationTimer);
+}
+
+function resolveFinalSourceTranslationTimeouts(translation) {
+  sourceSegmentStore.forEach((source) => {
+    if (!translationCoversSource(translation, source)) return;
+    clearPendingFinalTranslationTimer(sourceSegmentCompositeKey(source));
+    removeFrontendTimeoutForSource(source);
+  });
 }
 
 function shouldRevealTranslations() {
@@ -1870,6 +1960,7 @@ function mergeSourceSnapshot(segments) {
     if (shouldIgnoreClearedSegment(segment, sourceClearedBefore)) return;
     const copy = { ...segment };
     sourceSegmentStore.set(sourceSegmentStoreKey(copy), copy);
+    trackFinalSourceTranslationTimeout(copy);
   });
   pruneSegmentStore(sourceSegmentStore);
   syncSegmentArrays();
@@ -1913,6 +2004,7 @@ function removeDraftTranslationsForSourceIds(sourceIds) {
 function resetTranslationDraftState(removeDraftSegments = false) {
   draftTranslationRevisions.clear();
   finalizedTranslationSourceIds.clear();
+  clearAllPendingFinalTranslationTimers();
   if (!removeDraftSegments) return;
   translationSegmentStore.forEach((segment, key) => {
     if (segment.completed !== false) return;
@@ -1946,6 +2038,7 @@ function mergeTranslationSnapshot(segments) {
     } else {
       removeDraftTranslationsForSourceIds(sourceIds);
       markFinalizedTranslationSourceIds(sourceIds);
+      resolveFinalSourceTranslationTimeouts(copy);
     }
 
     const key = translationSegmentStoreKey(copy);
@@ -2335,6 +2428,33 @@ function handleMessage(event) {
     return;
   }
 
+  if (message.message === "SESSION_FINALIZED") {
+    waitingForSessionFinalized = false;
+    if (sessionFinalizeTimer) window.clearTimeout(sessionFinalizeTimer);
+    sessionFinalizeTimer = null;
+    clearAllPendingFinalTranslationTimers();
+    sourceSegmentStore.forEach((source) => {
+      if (source.completed !== false) showFrontendTranslationTimeout(source);
+    });
+    hasStoppedCurrentSession = true;
+    selectedSummarySessionId = message.session_id || currentSessionId;
+    selectedSummarySessionStatus = "finished";
+    updateSummaryButtons();
+    window.setTimeout(() => {
+      loadSummarySessions(selectedSummarySessionId).catch(() => {});
+    }, 500);
+    intentionallyClosingSocket = true;
+    setStatus("会议已完成", "ready");
+    if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+    socket = null;
+    isServerReady = false;
+    elements.start.disabled = false;
+    elements.stop.disabled = true;
+    setConnectionInputsDisabled(false);
+    renderTranscriptViews();
+    return;
+  }
+
   if (message.language) {
     detectedSourceLanguage = message.language;
     elements.languageStatus.textContent = `${message.language} (${Number(message.language_prob || 0).toFixed(2)})`;
@@ -2613,18 +2733,8 @@ async function startCapture() {
 
 function stopCapture(sendEnd = true) {
   if (reconnectController) reconnectController.reset();
-  resetTranslationDraftState(true);
   renderTranscriptViews();
   intentionallyClosingSocket = Boolean(sendEnd);
-  if (sendEnd && currentSessionId) {
-    hasStoppedCurrentSession = true;
-    selectedSummarySessionId = currentSessionId;
-    selectedSummarySessionStatus = "finished";
-    updateSummaryButtons();
-    window.setTimeout(() => {
-      loadSummarySessions(currentSessionId).catch(() => {});
-    }, 500);
-  }
   if (processor) {
     processor.disconnect();
     processor = null;
@@ -2644,6 +2754,25 @@ function stopCapture(sendEnd = true) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     if (sendEnd) {
       socket.send(new TextEncoder().encode("END_OF_AUDIO"));
+      waitingForSessionFinalized = true;
+      setStatus("正在完成最后识别和翻译", "busy");
+      elements.stop.disabled = true;
+      if (sessionFinalizeTimer) window.clearTimeout(sessionFinalizeTimer);
+      sessionFinalizeTimer = window.setTimeout(() => {
+        waitingForSessionFinalized = false;
+        sourceSegmentStore.forEach((source) => {
+          if (source.completed !== false) showFrontendTranslationTimeout(source);
+        });
+        setStatus("结束超时，会议记录可能仍在后台完成", "error");
+        intentionallyClosingSocket = true;
+        if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+        socket = null;
+        isServerReady = false;
+        elements.start.disabled = false;
+        elements.stop.disabled = true;
+        setConnectionInputsDisabled(false);
+      }, SESSION_FINALIZE_TIMEOUT_MS);
+      return;
     }
     socket.close();
   }

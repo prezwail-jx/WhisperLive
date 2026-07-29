@@ -176,6 +176,22 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
         self.assertEqual(translator.model.last_generate_kwargs["num_beams"], 3)
         self.assertEqual(translator.model.last_generate_kwargs["forced_bos_token_id"], 2)
 
+    def test_nllb_normalizes_literal_amp_entity(self):
+        translator = NLLBTranslator()
+        translator.tokenizer = FakeTokenizer()
+        translator.tokenizer.batch_decode = mock.Mock(return_value=["scientific R&amp;D"])
+        translator.model = FakeModel()
+
+        translated, source_language, target_language = translator.translate(
+            "科学研发",
+            "zh",
+            "en",
+        )
+
+        self.assertEqual(translated, "scientific R&D")
+        self.assertEqual(source_language, "zh")
+        self.assertEqual(target_language, "en")
+
     def test_nllb_batch_generate_uses_expanded_realtime_length_limit(self):
         translator = NLLBTranslator()
         translator.tokenizer = FakeTokenizer()
@@ -187,6 +203,18 @@ class TestHelsinkiZhEnMixedLanguageProtection(unittest.TestCase):
 
         self.assertEqual(results[0], ("translated", "en", "zh"))
         self.assertEqual(translator.model.last_generate_kwargs["max_new_tokens"], 256)
+
+    def test_nllb_batch_normalizes_literal_amp_entity(self):
+        translator = NLLBTranslator()
+        translator.tokenizer = FakeTokenizer()
+        translator.tokenizer.batch_decode = mock.Mock(return_value=["scientific R&amp;D"])
+        translator.model = FakeModel()
+
+        results = translator.translate_batch([
+            {"text": "科学研发", "source_language": "zh", "target_language": "en"}
+        ])
+
+        self.assertEqual(results[0], ("scientific R&D", "zh", "en"))
 
     def test_pure_chinese_has_no_terms_to_protect(self):
         protected_text, terms = HelsinkiZhEnTranslator.protect_english_terms(
@@ -1108,22 +1136,68 @@ class TestServeClientTranslationDraftsAndReadability(unittest.TestCase):
         client.record_readability_context("前一个中文主题是矿业研究。", "The previous topic was mining research.", "zh", "en")
         marker = client._READABILITY_BOUNDARY_MARKER
         client.translator.translate.return_value = (
-            f"The previous topic was mining research. {marker} The current Chinese topic continues the field test plan.",
+            f"The previous topic was mining research. {marker} The current Chinese topic continues the field test plan and implementation review for deployment.",
             "zh",
             "en",
         )
 
         translated, source_language, target_language = client.translate_text(
-            "当前中文主题继续讨论现场测试计划。",
+            "当前中文主题继续讨论现场测试计划以及部署前的实施评审工作。",
             "zh",
         )
 
-        self.assertEqual(translated, "The current Chinese topic continues the field test plan.")
+        self.assertEqual(translated, "The current Chinese topic continues the field test plan and implementation review for deployment.")
         self.assertEqual(source_language, "zh")
         self.assertEqual(target_language, "en")
         sent_text = client.translator.translate.call_args.args[0]
         self.assertIn("前一个中文主题", sent_text)
         self.assertIn(marker, sent_text)
+
+    def test_short_zh_en_final_context_uses_direct_verification(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_draft_enabled=False,
+            translation_readability_context_enabled=True,
+        )
+        client.record_readability_context("前一个中文主题是矿业研究。", "The previous topic was mining research.", "zh", "en")
+        marker = client._READABILITY_BOUNDARY_MARKER
+        client.translator.translate.side_effect = [
+            (f"The previous topic was mining research. {marker} Mining research continued with previous leaked words", "zh", "en"),
+            ("National Innovation Center", "zh", "en"),
+        ]
+
+        translated, source_language, target_language = client.translate_text("国创中心", "zh")
+
+        self.assertEqual((translated, source_language, target_language), ("National Innovation Center", "zh", "en"))
+        self.assertEqual(client.translator.translate.call_count, 2)
+
+    def test_zh_en_previous_translation_leak_uses_direct_verification(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_draft_enabled=False,
+            translation_readability_context_enabled=True,
+        )
+        client.record_readability_context(
+            "前一个中文主题是矿业研究和现场试验。",
+            "The previous topic was mining research and field trials.",
+            "zh",
+            "en",
+        )
+        marker = client._READABILITY_BOUNDARY_MARKER
+        client.translator.translate.side_effect = [
+            (f"The previous topic was mining research. {marker} The previous topic was mining research and the current item is ready", "zh", "en"),
+            ("The current item is ready for deployment review", "zh", "en"),
+        ]
+
+        translated, source_language, target_language = client.translate_text(
+            "当前事项已经准备好进入部署评审流程并等待最终确认。",
+            "zh",
+        )
+
+        self.assertEqual((translated, source_language, target_language), ("The current item is ready for deployment review", "zh", "en"))
+        self.assertEqual(client.translator.translate.call_count, 2)
 
     def test_readability_context_resets_on_language_direction_switch(self):
         client = self.make_client()
@@ -1176,6 +1250,125 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
     def get_last_payload(self, client):
         payload = client.websocket.send.call_args[0][0]
         return json.loads(payload)
+
+    def test_finalize_translation_drain_timeout_emits_completed_placeholder(self):
+        client = self.make_client(source_language="zh", target_language="en")
+        source_segment = {
+            "utterance_id": "u1",
+            "start": "1.000",
+            "end": "2.000",
+            "text": "国创中心",
+            "completed": True,
+            "language": "zh",
+        }
+        client.register_pending_final_segment(source_segment)
+
+        status = client.finalize_translation_drain(timeout_seconds=0)
+
+        self.assertEqual(status, "timed_out")
+        self.assertEqual(client.translation_timeout_count, 1)
+        self.assertEqual(client.pending_final_segments, {})
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertTrue(segment["completed"])
+        self.assertEqual(segment["translation_warning"], "translation_drain_timeout")
+        self.assertEqual(segment["source_utterance_ids"], ["u1"])
+
+    def test_successful_translation_resolves_only_covered_final_source(self):
+        client = self.make_client(source_language="zh", target_language="en")
+        first = {
+            "utterance_id": "u1",
+            "start": "1.000",
+            "end": "2.000",
+            "text": "第一段",
+            "completed": True,
+            "language": "zh",
+        }
+        second = {
+            "utterance_id": "u1",
+            "start": "3.000",
+            "end": "4.000",
+            "text": "第二段",
+            "completed": True,
+            "language": "zh",
+        }
+        client.register_pending_final_segment(first)
+        client.register_pending_final_segment(second)
+
+        client.emit_translated_segment({
+            "utterance_id": "u1",
+            "source_utterance_ids": ["u1"],
+            "start": "1.000",
+            "end": "2.000",
+            "text": "First segment",
+            "completed": True,
+            "source_language": "zh",
+            "target_language": "en",
+        })
+
+        self.assertNotIn(client.final_source_key(first), client.pending_final_segments)
+        self.assertIn(client.final_source_key(second), client.pending_final_segments)
+
+    def test_failed_translation_placeholder_is_terminal(self):
+        client = self.make_client(source_language="zh", target_language="en")
+        source_segment = {
+            "utterance_id": "u1",
+            "start": "1.000",
+            "end": "2.000",
+            "text": "国创中心",
+            "completed": True,
+            "language": "zh",
+        }
+        client.register_pending_final_segment(source_segment)
+
+        client.emit_failed_translation_for_source(source_segment, "translation_exception")
+
+        self.assertEqual(client.pending_final_segments, {})
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertTrue(segment["completed"])
+        self.assertEqual(segment["translation_warning"], "translation_exception")
+
+    def test_finalize_translation_drain_completes_without_setting_exit_first(self):
+        client = self.make_client(source_language="zh", target_language="en")
+        thread = threading.Thread(target=client.process_translation_queue)
+        thread.start()
+
+        status = client.finalize_translation_drain(timeout_seconds=1.0)
+        thread.join(timeout=1.0)
+
+        self.assertEqual(status, "completed")
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(client.exit)
+
+    def test_late_translation_after_timeout_is_suppressed(self):
+        client = self.make_client(source_language="zh", target_language="en")
+        source_segment = {
+            "utterance_id": "u1",
+            "start": "1.000",
+            "end": "2.000",
+            "text": "国创中心",
+            "completed": True,
+            "language": "zh",
+        }
+        client.register_pending_final_segment(source_segment)
+        client.emit_timeout_placeholders()
+        client.websocket.send.reset_mock()
+
+        client.emit_translated_segment({
+            "utterance_id": "u1",
+            "source_utterance_ids": ["u1"],
+            "start": "1.000",
+            "end": "2.000",
+            "text": "National Innovation Center",
+            "completed": True,
+            "source_language": "zh",
+            "target_language": "en",
+        })
+
+        client.websocket.send.assert_not_called()
+        self.assertEqual(len(client.translated_segments), 1)
+        self.assertEqual(client.translated_segments[0]["translation_warning"], "translation_drain_timeout")
 
     def test_short_segment_is_buffered_without_sending(self):
         client = self.make_client()

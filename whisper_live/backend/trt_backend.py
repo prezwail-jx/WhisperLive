@@ -127,7 +127,7 @@ class ServeClientTensorRT(ServeClientBase):
         self.eos = eos
         self.lock.release()
 
-    def handle_transcription_output(self, last_segment, duration):
+    def handle_transcription_output(self, last_segment, duration, force_complete_last=False):
         """
         Handle the transcription output, updating the transcript and sending data to the client.
 

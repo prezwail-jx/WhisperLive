@@ -324,6 +324,7 @@ class BackendType(Enum):
 
 class TranscriptionServer:
     RATE = 16000
+    FINALIZATION_BUDGET_SECONDS = 15.0
     LOCAL_ASR_MODEL_ROOT = "model/asr"
     LOCAL_ASR_MODEL_NAMES = {
         "tiny", "tiny.en", "base", "base.en", "small", "small.en",
@@ -1674,7 +1675,9 @@ class TranscriptionServer:
         client = self.client_manager.get_client(websocket)
         if frame_np is False:
             setattr(websocket, "whisperlive_end_of_audio", True)
-            if self.backend.is_tensorrt():
+            if self.backend.is_faster_whisper() and hasattr(client, "request_asr_finalization"):
+                client.request_asr_finalization()
+            elif self.backend.is_tensorrt():
                 client.set_eos(True)
             return False
 
@@ -2437,15 +2440,49 @@ class TranscriptionServer:
         """
         client = self.client_manager.get_client(websocket)
         if client:
+            ended_by_client = bool(getattr(websocket, "whisperlive_end_of_audio", False))
+            asr_status = "not_applicable"
+            translation_status = "not_applicable"
+            translation_timeout_count = 0
+            if ended_by_client:
+                started_at = time.monotonic()
+                backend = getattr(self, "backend", None)
+                if backend is not None and backend.is_faster_whisper() and hasattr(client, "wait_for_asr_finalization"):
+                    asr_status = client.wait_for_asr_finalization(self.FINALIZATION_BUDGET_SECONDS)
+                elapsed = time.monotonic() - started_at
+                remaining = max(0.0, self.FINALIZATION_BUDGET_SECONDS - elapsed)
+                translation_client = getattr(client, "translation_client", None)
+                if translation_client and hasattr(translation_client, "finalize_translation_drain"):
+                    translation_status = translation_client.finalize_translation_drain(remaining)
+                    translation_timeout_count = getattr(translation_client, "translation_timeout_count", 0)
+                logging.info(
+                    "[SESSION_FINALIZATION] uid=%s asr=%s translation=%s timeouts=%s elapsed=%.2f",
+                    getattr(client, "client_uid", ""),
+                    asr_status,
+                    translation_status,
+                    translation_timeout_count,
+                    time.monotonic() - started_at,
+                )
+
             if hasattr(client, 'translation_client') and client.translation_client:
                 client.translation_client.cleanup()
-                
+
             # Wait for translation thread to finish
             if hasattr(client, 'translation_thread') and client.translation_thread:
                 client.translation_thread.join(timeout=2.0)
-            self.finalize_client_meeting_log(
-                websocket,
-                interrupted=not bool(getattr(websocket, "whisperlive_end_of_audio", False)),
-            )
+            self.finalize_client_meeting_log(websocket, interrupted=not ended_by_client)
+            if ended_by_client:
+                try:
+                    websocket.send(json.dumps({
+                        "uid": getattr(client, "client_uid", None),
+                        "message": "SESSION_FINALIZED",
+                        "session_id": getattr(client, "meeting_log_session_id", None),
+                        "session_status": "finished",
+                        "asr_finalization": asr_status,
+                        "translation_drain": translation_status,
+                        "translation_timeout_count": translation_timeout_count,
+                    }))
+                except Exception as exc:
+                    logging.debug("Failed to send SESSION_FINALIZED: %s", exc)
             self.client_manager.mark_client_disconnected(websocket)
             self.client_manager.remove_client(websocket)

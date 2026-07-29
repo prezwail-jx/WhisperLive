@@ -683,6 +683,38 @@ class TestTranscriptionServerCleanup(unittest.TestCase):
         self.assertNotIn(ws, self.server.client_manager.clients)
         client.cleanup.assert_called_once()
 
+    def test_cleanup_end_of_audio_sends_session_finalized_after_drain(self):
+        events = []
+        ws = MagicMock()
+        ws.whisperlive_end_of_audio = True
+        ws.send.side_effect = lambda _payload: events.append("session_finalized")
+        translation_client = MagicMock()
+        translation_client.translation_timeout_count = 2
+        translation_client.finalize_translation_drain.side_effect = lambda _timeout: events.append("translation_drain") or "timed_out"
+        client = MagicMock()
+        client.client_uid = "uid-1"
+        client.meeting_log_session_id = "session-1"
+        client.wait_for_asr_finalization.side_effect = lambda _timeout: events.append("asr_finalization") or "completed"
+        client.translation_client = translation_client
+        client.translation_thread = None
+        self.server.backend = MagicMock()
+        self.server.backend.is_faster_whisper.return_value = True
+        self.server.finalize_client_meeting_log = MagicMock(
+            side_effect=lambda _websocket, interrupted: events.append(f"meeting_log:{interrupted}")
+        )
+        self.server.client_manager.add_client(ws, client)
+
+        self.server.cleanup(ws)
+
+        self.assertEqual(events, ["asr_finalization", "translation_drain", "meeting_log:False", "session_finalized"])
+        payload = json.loads(ws.send.call_args.args[0])
+        self.assertEqual(payload["message"], "SESSION_FINALIZED")
+        self.assertEqual(payload["session_id"], "session-1")
+        self.assertEqual(payload["session_status"], "finished")
+        self.assertEqual(payload["asr_finalization"], "completed")
+        self.assertEqual(payload["translation_drain"], "timed_out")
+        self.assertEqual(payload["translation_timeout_count"], 2)
+
 
 class TestMeetingHotwordIntegration(unittest.TestCase):
     def test_apply_meeting_hotwords_before_default_hotwords(self):
