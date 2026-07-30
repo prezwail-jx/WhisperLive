@@ -28,6 +28,17 @@ class TestAsrCorrections(unittest.TestCase):
         self.assertEqual(corrected, "Python 和 C plus plus")
         self.assertEqual(replacements, 2)
 
+    def test_corrector_applies_longest_national_innovation_center_rule_first(self):
+        corrector = AsrTextCorrector([
+            ("二角国创中心地", "长三角国创中心"),
+            ("二角国创中心", "长三角国创中心"),
+        ])
+
+        corrected, replacements = corrector.correct("二角国创中心地")
+
+        self.assertEqual(corrected, "长三角国创中心")
+        self.assertEqual(replacements, 1)
+
     def test_corrector_does_not_cascade_replacements(self):
         corrector = AsrTextCorrector([("威斯伯", "Whisper"), ("Whisper", "OpenAI Whisper")])
 

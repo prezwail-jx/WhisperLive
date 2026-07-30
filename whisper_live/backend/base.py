@@ -104,6 +104,7 @@ class ServeClientBase(object):
         "嗯",
         "哦",
         "啊",
+        "好",
         "Obrigado",
         "按订阅 继续合発舞",
     }
@@ -148,13 +149,15 @@ class ServeClientBase(object):
         "good afternoon",
         "nice",
         "great",
-        "mhm",
-        "mm-hmm",
         "mhm",        # 嗯哼（常见清嗓幻觉）
+        "mm-hmm",
+        "hi ho zang",
     }
     HARD_DROP_HALLUCINATION_PHRASES = (
         "优优独播剧场",
         "YoYo Television Series Exclusive",
+        "今天年纪归宽市原围会提供",
+        "市场—— wears-mêmes request typlaş用比较 Nordic掉",
     )
     MAX_BOUNDARY_DEDUPE_WORDS = 6
     MAX_SHORT_GRATITUDE_SECONDS = 0.5
@@ -162,6 +165,9 @@ class ServeClientBase(object):
     HOTWORD_NO_SPEECH_THRESHOLD = 0.35
     HOTWORD_REPEAT_THRESHOLD = 3
     MIN_HOTWORD_MATCH_CHARS = 2
+    MIXED_NOISE_MIN_EXTENDED_LATIN_WORDS = 2
+    MIXED_NOISE_MIN_SCRIPT_SWITCHES = 3
+    MIXED_NOISE_MIN_LATIN_WORDS = 4
 
     def __init__(
         self,
@@ -906,6 +912,50 @@ class ServeClientBase(object):
         return bool(re.search(r"[A-Za-z0-9]", str(text or "")))
 
     @staticmethod
+    def _is_latin_letter(char):
+        return bool(char and char.isalpha() and "LATIN" in unicodedata.name(char, ""))
+
+    @classmethod
+    def _is_latin_extended_mixed_noise_text(cls, text):
+        value = unicodedata.normalize("NFKC", str(text or ""))
+        if not cls._has_zh_script(value) or not cls._has_ascii_word(value):
+            return False
+
+        scripts = []
+        latin_words = []
+        current_latin_word = []
+
+        def flush_latin_word():
+            if current_latin_word:
+                latin_words.append("".join(current_latin_word))
+                current_latin_word.clear()
+
+        for char in value:
+            if cls._has_zh_script(char):
+                flush_latin_word()
+                script = "zh"
+            elif cls._is_latin_letter(char):
+                current_latin_word.append(char)
+                script = "latin"
+            else:
+                flush_latin_word()
+                continue
+            if not scripts or scripts[-1] != script:
+                scripts.append(script)
+        flush_latin_word()
+
+        extended_latin_words = [
+            word for word in latin_words
+            if any(ord(char) > 127 and cls._is_latin_letter(char) for char in word)
+            and any(char.islower() for char in word)
+        ]
+        return (
+            len(extended_latin_words) >= cls.MIXED_NOISE_MIN_EXTENDED_LATIN_WORDS
+            and max(0, len(scripts) - 1) >= cls.MIXED_NOISE_MIN_SCRIPT_SWITCHES
+            and len(latin_words) >= cls.MIXED_NOISE_MIN_LATIN_WORDS
+        )
+
+    @staticmethod
     def _has_korean_script(text):
         return bool(re.search(r"[가-힯]", str(text or "")))
 
@@ -953,6 +1003,10 @@ class ServeClientBase(object):
 
         if has_foreign_script:
             self._log_mixed_interpretation_noise_drop("foreign_script", value)
+            return True
+
+        if self._is_latin_extended_mixed_noise_text(value):
+            self._log_mixed_interpretation_noise_drop("latin_extended_mixed_structure", value)
             return True
 
         has_zh_or_ascii = has_zh or has_ascii

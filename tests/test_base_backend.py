@@ -374,7 +374,38 @@ class TestSendTranscriptionToClient(unittest.TestCase):
         self.assertTrue(
             self.client._is_hard_drop_hallucination_text("YoYo Television Series Exclusive")
         )
+        self.assertTrue(
+            self.client._is_hard_drop_hallucination_text("今天年纪归宽市原围会提供")
+        )
+        self.assertTrue(
+            self.client._is_hard_drop_hallucination_text("市场—— wears-mêmes request typlaş用比较 Nordic掉")
+        )
         self.assertFalse(self.client._is_hard_drop_hallucination_text("normal text"))
+
+    def test_mixed_interpretation_noise_matches_confirmed_phrase_only_in_mixed_mode(self):
+        self.assertFalse(self.client._is_mixed_interpretation_noise_text("Hi Ho Zang!"))
+
+        self.client.mixed_interpretation = True
+        self.assertTrue(self.client._is_mixed_interpretation_noise_text("Hi Ho Zang!"))
+        self.assertFalse(self.client._is_mixed_interpretation_noise_text("使用 X-ray 分析材料"))
+
+    def test_mixed_interpretation_noise_matches_latin_extended_mixed_structure(self):
+        text = "市场—— wears-mêmes request typlaş用比较 Nordic掉"
+        self.assertFalse(self.client._is_mixed_interpretation_noise_text(text))
+
+        self.client.mixed_interpretation = True
+        with self.assertLogs(level="INFO") as logs:
+            self.assertTrue(self.client._is_mixed_interpretation_noise_text(text))
+
+        self.assertIn("reason=latin_extended_mixed_structure", "\n".join(logs.output))
+
+    def test_mixed_interpretation_noise_keeps_common_mixed_terms_and_names(self):
+        self.client.mixed_interpretation = True
+
+        self.assertFalse(self.client._is_mixed_interpretation_noise_text("Müller教授"))
+        self.assertFalse(self.client._is_mixed_interpretation_noise_text("Müller教授与François合作"))
+        self.assertFalse(self.client._is_mixed_interpretation_noise_text("使用 X-ray 分析材料"))
+        self.assertFalse(self.client._is_mixed_interpretation_noise_text("使用 café 模型"))
 
     def test_send_failure_logged_not_raised(self):
         self.ws.send.side_effect = ConnectionError("broken pipe")
@@ -867,6 +898,25 @@ class TestUpdateSegments(unittest.TestCase):
         self.client.update_segments(segs, duration=3.0)
         self.assertEqual(len(self.client.transcript), 0)
         self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_low_energy_short_hao_is_dropped_with_stricter_threshold(self):
+        self.client.frames_np = np.full(16000 * 5, 0.003, dtype=np.float32)
+        segs = [
+            self._make_segment(0.0, 1.0, "好"),
+            self._make_segment(1.0, 2.0, " next"),
+        ]
+        self.client.update_segments(segs, duration=3.0)
+        self.assertEqual(len(self.client.transcript), 0)
+        self.assertGreater(self.client.timestamp_offset, 0.0)
+
+    def test_normal_energy_short_hao_is_kept(self):
+        segs = [
+            self._make_segment(0.0, 1.0, "好"),
+            self._make_segment(1.0, 2.0, " next"),
+        ]
+        self.client.update_segments(segs, duration=3.0)
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertEqual(self.client.transcript[0]["text"], "好")
 
     def test_short_thank_you_is_dropped_even_with_normal_energy(self):
         q = queue.Queue()
