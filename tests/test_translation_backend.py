@@ -1595,6 +1595,228 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
         self.assertEqual(segment["target_language"], "en")
         self.assertEqual(client.translation_buffer, [])
 
+    def test_chinese_incomplete_ending_detection_strips_sentence_punctuation(self):
+        self.assertTrue(ServeClientTranslation.chinese_text_ends_incomplete("主要包括。"))
+        self.assertTrue(ServeClientTranslation.chinese_text_ends_incomplete("我认为应用为导向。"))
+        self.assertTrue(ServeClientTranslation.chinese_text_ends_incomplete("一方面，"))
+        self.assertFalse(ServeClientTranslation.chinese_text_ends_incomplete("今天开会。"))
+
+    def test_incomplete_chinese_zh_en_sentence_buffer_waits_and_merges_sources(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_max_wait_seconds=60.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "utterance_id": "u1",
+            "start": "0.000",
+            "end": "1.000",
+            "text": "第一点的话我认为应用为导向。",
+            "completed": True,
+            "language": "zh",
+        })
+        client.flush_translation_buffer()
+        client.websocket.send.assert_not_called()
+
+        client.add_segment_to_translation_buffer({
+            "utterance_id": "u2",
+            "start": "1.000",
+            "end": "2.000",
+            "text": "来构建产学研用体系。",
+            "completed": True,
+            "language": "zh",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        segment = payload["translated_segments"][0]
+        self.assertEqual(segment["text"], "translated:第一点的话我认为应用为导向。来构建产学研用体系。")
+        self.assertEqual(segment["source_utterance_ids"], ["u1", "u2"])
+        self.assertEqual(segment["start"], "0.000")
+        self.assertEqual(segment["end"], "2.000")
+
+    def test_complete_chinese_zh_en_sentence_flushes_immediately(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_max_wait_seconds=60.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "今天我们讨论成果转化。",
+            "completed": True,
+            "language": "zh",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "translated:今天我们讨论成果转化。")
+
+    def test_chinese_zh_en_idle_timeout_flushes_incomplete_buffer(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_max_wait_seconds=60.0,
+            translation_zh_en_idle_seconds=1.2,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "主要包括。",
+            "completed": True,
+            "language": "zh",
+        })
+        client.translation_buffer_last_added_at -= 2.0
+        client.translation_buffer_last_source_activity_at -= 2.0
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "translated:主要包括。")
+
+    def test_chinese_zh_en_partial_activity_delays_idle_timeout(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_max_wait_seconds=60.0,
+            translation_zh_en_idle_seconds=1.2,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "主要包括。",
+            "completed": True,
+            "language": "zh",
+        })
+        client.translation_buffer_last_added_at -= 2.0
+        client.observe_asr_segment({
+            "utterance_id": "draft-zh",
+            "start": "1.000",
+            "end": "1.500",
+            "text": "后续内容",
+            "completed": False,
+            "language": "zh",
+        })
+        client.flush_translation_buffer()
+
+        client.websocket.send.assert_not_called()
+        self.assertEqual(len(client.translation_buffer), 1)
+
+    def test_chinese_zh_en_max_audio_flushes_incomplete_buffer(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_max_wait_seconds=60.0,
+            translation_zh_en_max_audio_seconds=2.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "2.500",
+            "text": "主要包括。",
+            "completed": True,
+            "language": "zh",
+        })
+        client.flush_translation_buffer()
+
+        payload = self.get_last_payload(client)
+        self.assertEqual(payload["translated_segments"][0]["text"], "translated:主要包括。")
+
+    def test_chinese_zh_en_segment_gap_flushes_before_new_segment(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_max_wait_seconds=60.0,
+            translation_zh_en_max_gap_seconds=1.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "主要包括。",
+            "completed": True,
+            "language": "zh",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "2.500",
+            "end": "3.000",
+            "text": "第二个话题。",
+            "completed": True,
+            "language": "zh",
+        })
+
+        self.assertEqual(client.translate_text.call_args_list[0].args, ("主要包括。", "zh"))
+        self.assertEqual(len(client.translation_buffer), 1)
+        self.assertEqual(client.translation_buffer[0]["text"], "第二个话题。")
+
+    def test_chinese_zh_en_speaker_switch_flushes_before_new_segment(self):
+        client = self.make_client(
+            source_language="zh",
+            target_language="en",
+            translation_max_wait_seconds=60.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "主要包括。",
+            "completed": True,
+            "language": "zh",
+            "speaker": "S1",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "1.000",
+            "end": "2.000",
+            "text": "我补充一点。",
+            "completed": True,
+            "language": "zh",
+            "speaker": "S2",
+        })
+
+        self.assertEqual(client.translate_text.call_args_list[0].args, ("主要包括。", "zh"))
+        self.assertEqual(len(client.translation_buffer), 1)
+        self.assertEqual(client.translation_buffer[0]["speaker"], "S2")
+
+    def test_chinese_to_english_language_switch_flushes_before_english_segment(self):
+        client = self.make_client(
+            target_language="auto",
+            translation_mode="mixed_interpretation",
+            translation_max_wait_seconds=60.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "主要包括。",
+            "completed": True,
+            "language": "zh",
+        })
+        client.add_segment_to_translation_buffer({
+            "start": "1.000",
+            "end": "2.000",
+            "text": "The next topic is revenue.",
+            "completed": True,
+            "language": "en",
+        })
+
+        self.assertEqual(client.translate_text.call_args_list[0].args, ("主要包括。", "zh"))
+        self.assertEqual(len(client.translation_buffer), 1)
+        self.assertEqual(client.translation_buffer[0]["language"], "en")
+
+    def test_english_to_chinese_incomplete_buffering_is_unchanged(self):
+        client = self.make_client(
+            source_language="en",
+            target_language="zh",
+            translation_max_wait_seconds=60.0,
+        )
+        client.add_segment_to_translation_buffer({
+            "start": "0.000",
+            "end": "1.000",
+            "text": "we need to",
+            "completed": True,
+            "language": "en",
+        })
+        client.flush_translation_buffer()
+
+        client.websocket.send.assert_not_called()
+        self.assertEqual(len(client.translation_buffer), 1)
+
     def test_max_chars_flushes_buffer(self):
         client = self.make_client(translation_max_chars=5)
         client.add_segment_to_translation_buffer({

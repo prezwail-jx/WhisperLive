@@ -1388,6 +1388,10 @@ class TranscriptionServer:
                 translation_draft_max_source_chars=options.get("translation_draft_max_source_chars", 220),
                 translation_readability_context_sentences=options.get("translation_readability_context_sentences", 0),
                 translation_readability_context_max_chars=options.get("translation_readability_context_max_chars", 0),
+                translation_zh_en_sentence_buffer_enabled=options.get("translation_zh_en_sentence_buffer_enabled", True),
+                translation_zh_en_idle_seconds=options.get("translation_zh_en_idle_seconds", 1.2),
+                translation_zh_en_max_audio_seconds=options.get("translation_zh_en_max_audio_seconds", 8.0),
+                translation_zh_en_max_gap_seconds=options.get("translation_zh_en_max_gap_seconds", 1.0),
             )
             
             # Start translation thread
@@ -1609,7 +1613,7 @@ class TranscriptionServer:
         if translation_client:
             client.translation_client = translation_client
             client.translation_thread = translation_thread
-            if translation_client.translation_draft_enabled and self.backend.is_faster_whisper():
+            if self.backend.is_faster_whisper():
                 client.translation_draft_callback = translation_client.observe_asr_segment
 
         if translation_client:

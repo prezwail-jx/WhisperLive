@@ -581,6 +581,9 @@ class ServeClientTranslation(ServeClientBase):
     }
     _SHORT_ZH_BUFFER_CJK_CHARS = 5
     _SHORT_ZH_BUFFER_WAIT_SECONDS = 3.5
+    _ZH_EN_SENTENCE_BUFFER_IDLE_SECONDS = 1.2
+    _ZH_EN_SENTENCE_BUFFER_MAX_AUDIO_SECONDS = 8.0
+    _ZH_EN_SENTENCE_BUFFER_MAX_GAP_SECONDS = 1.0
     _OUTPUT_GUARD_MAX_LENGTH_RATIO = 4.0
     _OUTPUT_GUARD_MIN_LONG_OUTPUT_CHARS = 160
     _OUTPUT_GUARD_ZH_EN_MAX_LENGTH_RATIO = 6.0
@@ -622,6 +625,15 @@ class ServeClientTranslation(ServeClientBase):
         "we can", "they can", "we would", "they would", "we need to",
         "they need to",
     }
+    _INCOMPLETE_ZH_ENDING_PHRASES = tuple(sorted({
+        "那么", "以及", "并且", "而且", "从而", "但是", "但", "而",
+        "我们认为", "我认为", "具体来说", "主要包括", "包括",
+        "如果", "因为", "由于", "虽然", "为了", "基于",
+        "一方面", "另一方面", "不仅", "不但", "无论", "对于", "关于", "至于",
+        "就是", "在于", "意味着", "的话", "为导向", "当中",
+    }, key=len, reverse=True))
+    _INCOMPLETE_ZH_TRAILING_PUNCTUATION = " \t\r\n，,、：:；;。！？.!?\"'“”‘’）)]}】》"
+    _INCOMPLETE_ZH_PAUSE_PUNCTUATION = ("，", ",", "、", "：", ":", "；", ";")
 
     def __init__(
         self,
@@ -661,6 +673,10 @@ class ServeClientTranslation(ServeClientBase):
         translation_draft_max_source_chars=220,
         translation_readability_context_sentences=0,
         translation_readability_context_max_chars=0,
+        translation_zh_en_sentence_buffer_enabled=True,
+        translation_zh_en_idle_seconds=_ZH_EN_SENTENCE_BUFFER_IDLE_SECONDS,
+        translation_zh_en_max_audio_seconds=_ZH_EN_SENTENCE_BUFFER_MAX_AUDIO_SECONDS,
+        translation_zh_en_max_gap_seconds=_ZH_EN_SENTENCE_BUFFER_MAX_GAP_SECONDS,
     ):
         """
         Initialize the translation client.
@@ -715,8 +731,14 @@ class ServeClientTranslation(ServeClientBase):
         if not self.translation_readability_context_enabled or self.translation_readability_context_sentences == 0:
             self.translation_readability_context_sentences = 0
             self.translation_readability_context_max_chars = 0
+        self.translation_zh_en_sentence_buffer_enabled = bool(translation_zh_en_sentence_buffer_enabled)
+        self.translation_zh_en_idle_seconds = max(0.1, float(translation_zh_en_idle_seconds or self._ZH_EN_SENTENCE_BUFFER_IDLE_SECONDS))
+        self.translation_zh_en_max_audio_seconds = max(0.1, float(translation_zh_en_max_audio_seconds or self._ZH_EN_SENTENCE_BUFFER_MAX_AUDIO_SECONDS))
+        self.translation_zh_en_max_gap_seconds = max(0.0, float(translation_zh_en_max_gap_seconds or self._ZH_EN_SENTENCE_BUFFER_MAX_GAP_SECONDS))
         self.translation_buffer = []
         self.translation_buffer_started_at = None
+        self.translation_buffer_last_added_at = None
+        self.translation_buffer_last_source_activity_at = None
         self.translation_merge_buffer = []
         self.translation_merge_started_at = None
         self.translated_segments = []
@@ -1120,10 +1142,19 @@ class ServeClientTranslation(ServeClientBase):
 
     def observe_asr_segment(self, segment):
         utterance_id = str(segment.get("utterance_id") or "").strip()
-        if not utterance_id or self.exit or not self.translation_draft_enabled:
+        if self.exit:
             return
 
         now = time.monotonic()
+        source_language = self.get_segment_source_language(segment)
+        if (
+            not segment.get("completed", False)
+            and self.zh_en_sentence_buffer_applies(source_language)
+        ):
+            self.translation_buffer_last_source_activity_at = now
+
+        if not utterance_id or not self.translation_draft_enabled:
+            return
         if segment.get("completed", False):
             with self.draft_state_lock:
                 state = self.draft_states.get(utterance_id)
@@ -1193,21 +1224,27 @@ class ServeClientTranslation(ServeClientBase):
                 )
 
     def translation_draft_wait_timeout(self, default=1.0):
+        timeout = default
+        if self.translation_buffer and self.zh_en_sentence_buffer_applies(self.get_buffer_source_language()):
+            last_activity = self.translation_buffer_last_source_activity_at or self.translation_buffer_last_added_at
+            if last_activity is not None:
+                remaining = last_activity + self.translation_zh_en_idle_seconds - time.monotonic()
+                timeout = min(timeout, max(0.05, remaining))
         if not self.translation_draft_enabled:
-            return default
+            return timeout
         with self.draft_state_lock:
             has_pending = any(
                 state["pending"] and not state["finalized"]
                 for state in self.draft_states.values()
             )
             if not has_pending or self.last_draft_inference_finished_at is None:
-                return default
+                return timeout
             remaining = (
                 self.last_draft_inference_finished_at
                 + self.translation_draft_interval_seconds
                 - time.monotonic()
             )
-        return min(default, max(0.05, remaining))
+        return min(timeout, max(0.05, remaining))
 
     def claim_ready_translation_draft(self, now=None):
         if (
@@ -3072,6 +3109,30 @@ class ServeClientTranslation(ServeClientBase):
                 return True
         return False
 
+    @classmethod
+    def chinese_text_ends_incomplete(cls, text):
+        text = str(text or "").strip()
+        if not text:
+            return False
+        if text.endswith(cls._INCOMPLETE_ZH_PAUSE_PUNCTUATION):
+            return True
+        normalized = text.rstrip(cls._INCOMPLETE_ZH_TRAILING_PUNCTUATION)
+        if not normalized:
+            return False
+        return any(normalized.endswith(phrase) for phrase in cls._INCOMPLETE_ZH_ENDING_PHRASES)
+
+    def zh_en_sentence_buffer_applies(self, source_language=None):
+        if not self.translation_zh_en_sentence_buffer_enabled:
+            return False
+        source_language = HelsinkiZhEnTranslator.normalize_language(source_language)
+        return source_language == "zh" and self._resolved_target_language(source_language) == "en"
+
+    def zh_en_sentence_buffer_idle_elapsed(self):
+        last_activity = self.translation_buffer_last_source_activity_at or self.translation_buffer_last_added_at
+        if last_activity is None:
+            return 0.0
+        return max(0.0, time.monotonic() - last_activity)
+
     def translation_buffer_flush_reason(self, force=False):
         if not self.translation_buffer:
             return None
@@ -3085,6 +3146,19 @@ class ServeClientTranslation(ServeClientBase):
         if self.translation_buffer_started_at is not None:
             elapsed = time.monotonic() - self.translation_buffer_started_at
         source_language = self.get_buffer_source_language()
+        if self.zh_en_sentence_buffer_applies(source_language):
+            if self.translation_buffer_audio_seconds() >= self.translation_zh_en_max_audio_seconds:
+                return "zh_en_max_audio"
+            if len(text) >= self.realtime_max_source_chars(source_language):
+                return "max_chars"
+            incomplete = self.chinese_text_ends_incomplete(text)
+            if text.endswith(tuple(self.translation_sentence_endings)) and not incomplete:
+                return "sentence_end"
+            if elapsed >= self.translation_max_wait_seconds:
+                return "timeout"
+            if self.zh_en_sentence_buffer_idle_elapsed() >= self.translation_zh_en_idle_seconds:
+                return "zh_en_idle_timeout"
+            return None
         if text.endswith(tuple(self.translation_sentence_endings)):
             return "sentence_end"
         if (
@@ -3149,11 +3223,31 @@ class ServeClientTranslation(ServeClientBase):
             return self.translation_buffer[-1].get("text", "")
         return self.last_translated_source_text
 
+    def should_flush_translation_buffer_before(self, segment, incoming_language):
+        if not self.translation_buffer:
+            return None
+        current_language = self.get_buffer_source_language()
+        if incoming_language and current_language and incoming_language != current_language:
+            return "language_switch"
+        if not self.zh_en_sentence_buffer_applies(current_language):
+            return None
+
+        previous = self.translation_buffer[-1]
+        previous_speaker = str(previous.get("speaker") or "").strip()
+        incoming_speaker = str((segment or {}).get("speaker") or "").strip()
+        if previous_speaker and incoming_speaker and previous_speaker != incoming_speaker:
+            return "speaker_switch"
+
+        gap = self._segment_time((segment or {}).get("start")) - self._segment_time(previous.get("end"))
+        if gap > self.translation_zh_en_max_gap_seconds:
+            return "zh_en_segment_gap"
+        return None
+
     def add_segment_to_translation_buffer(self, segment):
         incoming_language = self.get_segment_source_language(segment)
-        current_language = self.get_buffer_source_language()
-        if self.translation_buffer and incoming_language and current_language and incoming_language != current_language:
-            self.flush_translation_buffer(force=True, reason="language_switch")
+        split_reason = self.should_flush_translation_buffer_before(segment, incoming_language)
+        if split_reason:
+            self.flush_translation_buffer(force=True, reason=split_reason)
 
         segment = segment.copy()
         if incoming_language:
@@ -3166,6 +3260,9 @@ class ServeClientTranslation(ServeClientBase):
 
         if not self.translation_buffer:
             self.translation_buffer_started_at = time.monotonic()
+        self.translation_buffer_last_added_at = time.monotonic()
+        if self.zh_en_sentence_buffer_applies(incoming_language):
+            self.translation_buffer_last_source_activity_at = self.translation_buffer_last_added_at
         self.translation_buffer.append(segment)
 
     def flush_translation_buffer(self, force=False, reason=None):
@@ -3179,6 +3276,8 @@ class ServeClientTranslation(ServeClientBase):
         flush_started_at = time.monotonic()
         self.translation_buffer = []
         self.translation_buffer_started_at = None
+        self.translation_buffer_last_added_at = None
+        self.translation_buffer_last_source_activity_at = None
 
         if not original_text:
             return

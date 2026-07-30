@@ -236,6 +236,10 @@ function translationRuntimeConfigForMode(mode = serviceMode) {
       translationIncompleteMaxWaitSeconds: 4.0,
       translationMaxChars: 240,
       translationMergeEnabled: false,
+      translationZhEnSentenceBufferEnabled: true,
+      translationZhEnIdleSeconds: 1.2,
+      translationZhEnMaxAudioSeconds: 8.0,
+      translationZhEnMaxGapSeconds: 1.0,
     };
   }
   if (mode === "standard") {
@@ -245,6 +249,10 @@ function translationRuntimeConfigForMode(mode = serviceMode) {
       translationIncompleteMaxWaitSeconds: 3.0,
       translationMaxChars: 180,
       translationMergeEnabled: false,
+      translationZhEnSentenceBufferEnabled: true,
+      translationZhEnIdleSeconds: 1.2,
+      translationZhEnMaxAudioSeconds: 8.0,
+      translationZhEnMaxGapSeconds: 1.0,
     };
   }
   return {
@@ -253,6 +261,10 @@ function translationRuntimeConfigForMode(mode = serviceMode) {
     translationIncompleteMaxWaitSeconds: 3.0,
     translationMaxChars: 180,
     translationMergeEnabled: true,
+    translationZhEnSentenceBufferEnabled: true,
+    translationZhEnIdleSeconds: 1.2,
+    translationZhEnMaxAudioSeconds: 8.0,
+    translationZhEnMaxGapSeconds: 1.0,
   };
 }
 
@@ -2602,6 +2614,10 @@ function sendConfig(event) {
     translation_merge_max_chars: 240,
     translation_merge_max_delay: 1.8,
     translation_merge_gap_seconds: 1.0,
+    translation_zh_en_sentence_buffer_enabled: translationRuntimeConfig.translationZhEnSentenceBufferEnabled,
+    translation_zh_en_idle_seconds: translationRuntimeConfig.translationZhEnIdleSeconds,
+    translation_zh_en_max_audio_seconds: translationRuntimeConfig.translationZhEnMaxAudioSeconds,
+    translation_zh_en_max_gap_seconds: translationRuntimeConfig.translationZhEnMaxGapSeconds,
     zh_en_model_path: translationProvider.zhEnModelPath || "model/opus-mt-zh-en",
     en_zh_model_path: translationProvider.enZhModelPath || "model/opus-mt-en-zh",
     nllb_model_path: translationProvider.nllbModelPath,
