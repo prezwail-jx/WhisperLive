@@ -239,6 +239,7 @@ class ServeClientBase(object):
         # (e.g. PII redaction, formatting, diarization) without modifying
         # WhisperLive's core code.
         self.segment_post_processor = None
+        self.completed_text_post_processor = None
 
         # threading
         self.lock = threading.Lock()
@@ -431,6 +432,22 @@ class ServeClientBase(object):
                 segment.get("utterance_id"),
                 str(error)[:160],
             )
+
+    def _post_process_completed_text(self, text, reason="completed"):
+        processor = self.completed_text_post_processor
+        if processor is None or not str(text or "").strip():
+            return text
+        try:
+            result = processor(text, reason=reason)
+            return text if result is None else str(result)
+        except Exception as error:
+            logging.error(
+                "[ASR_TEXT_POST_PROCESSOR_ERROR] uid=%s reason=%s error=%s",
+                self.client_uid,
+                reason,
+                str(error)[:160],
+            )
+            return text
 
     def add_frames(self, frame_np):
         """
@@ -1117,6 +1134,7 @@ class ServeClientBase(object):
                     offset = rel_end
                     continue
                 text_ = self._dedupe_completed_text(text_)
+                text_ = self._post_process_completed_text(text_, reason="completed")
                 if not text_.strip():
                     offset = rel_end
                     continue
@@ -1156,6 +1174,7 @@ class ServeClientBase(object):
                 offset = rel_end
             elif force_complete_last:
                 completed_text = self._dedupe_completed_text(segments[-1].text)
+                completed_text = self._post_process_completed_text(completed_text, reason="finalize_complete")
                 if self._should_hard_drop_hallucination_text(completed_text, "finalize_complete"):
                     completed_text = ""
                 if self._is_mixed_interpretation_noise_text(completed_text):
@@ -1227,6 +1246,7 @@ class ServeClientBase(object):
             low_energy_repeated = self._is_low_energy_range(0.0, repeated_end, duration, self.current_out)
             if not low_energy_repeated and (not self.text or self.text[-1].strip().lower() != self.current_out.strip().lower()):
                 completed_text = self._dedupe_completed_text(self.current_out)
+                completed_text = self._post_process_completed_text(completed_text, reason="repeated_complete")
                 if not completed_text.strip():
                     completed_text = ""
                 if self._should_hard_drop_hallucination_text(completed_text, "repeated_complete"):
@@ -1292,6 +1312,7 @@ class ServeClientBase(object):
                     self.current_out.strip()[:80],
                 )
                 completed_text = self._dedupe_completed_text(self.current_out)
+                completed_text = self._post_process_completed_text(completed_text, reason="force_complete")
                 if self._should_hard_drop_hallucination_text(completed_text, "force_complete"):
                     completed_text = ""
                 if self._is_mixed_interpretation_noise_text(completed_text):

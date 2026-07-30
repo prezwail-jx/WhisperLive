@@ -29,7 +29,9 @@ from websockets.exceptions import ConnectionClosed
 from whisper_live.vad import VoiceActivityDetector
 from whisper_live.backend.base import ServeClientBase
 from whisper_live.meeting import (
+    AsrTextCorrector,
     MeetingDocConverter,
+    MeetingAsrCorrectionStore,
     MeetingHotwordStore,
     MeetingLogStore,
     apply_timeline_offset_to_segments,
@@ -769,6 +771,79 @@ class TranscriptionServer:
                     filename=stored.get("filename") or "",
                     locked=True,
                 )
+
+    def asr_corrections_enabled(self, options):
+        if not self.backend.is_faster_whisper():
+            return False
+        if not self._config_bool(options.get("enable_translation")):
+            return False
+        source_language = self._normalized_language(options.get("language"))
+        target_language = self._normalized_language(options.get("target_language")) or "auto"
+        translation_mode = options.get("translation_mode", "standard")
+        if translation_mode == "mixed_interpretation":
+            return target_language in ("auto", "en")
+        return source_language == "zh" and target_language in ("auto", "en")
+
+    def apply_meeting_asr_corrections(self, options):
+        options["asr_corrections_enabled"] = False
+        options["asr_corrections_count"] = 0
+        options["asr_corrections_file"] = ""
+        options["asr_correction_rules"] = []
+        if not self.asr_corrections_enabled(options):
+            return
+        if not self.meeting_asr_corrections:
+            return
+        rules = []
+        filenames = []
+        if self.asr_corrections_file:
+            try:
+                record = self.meeting_asr_corrections.get_file(self.asr_corrections_file)
+                rules.extend(record.get("rules") or [])
+                if record.get("filename"):
+                    filenames.append(record.get("filename"))
+            except Exception as exc:
+                logging.warning("Failed to load global ASR corrections from %r: %s", self.asr_corrections_file, exc)
+        meeting_name = options.get("meeting_name")
+        if meeting_name:
+            try:
+                record = self.meeting_asr_corrections.get(meeting_name)
+                rules.extend(record.get("rules") or [])
+                if record.get("filename"):
+                    filenames.append(record.get("filename"))
+            except Exception as exc:
+                logging.warning("Failed to load ASR corrections for meeting %r: %s", meeting_name, exc)
+                return
+        rules = sorted(dict(rules).items(), key=lambda item: len(item[0]), reverse=True)
+        if not rules:
+            return
+        options["asr_corrections_enabled"] = True
+        options["asr_corrections_count"] = len(rules)
+        options["asr_corrections_file"] = ",".join(filenames)
+        options["asr_correction_rules"] = rules
+
+    def build_asr_text_corrector(self, options):
+        rules = options.get("asr_correction_rules") or []
+        if not rules or not options.get("asr_corrections_enabled"):
+            return None
+        corrector = AsrTextCorrector(rules)
+        uid = options.get("uid")
+        filename = options.get("asr_corrections_file") or ""
+
+        def correct_text(text, reason="completed"):
+            if not re.search(r"[\u4e00-\u9fff]", str(text or "")):
+                return text
+            corrected, replacements = corrector.correct(text)
+            if replacements and corrected != text:
+                logging.info(
+                    "[ASR_TEXT_CORRECTED] uid=%s reason=%s replacements=%d file=%s",
+                    uid,
+                    reason,
+                    replacements,
+                    filename,
+                )
+            return corrected
+
+        return correct_text
 
     def apply_default_hotwords(self, options):
         if options.get("hotwords") or options.get("hotwords_locked"):
@@ -1528,6 +1603,8 @@ class TranscriptionServer:
         # Attach segment post-processor if configured
         if self.segment_post_processor is not None:
             client.segment_post_processor = self.segment_post_processor
+        if self.backend.is_faster_whisper():
+            client.completed_text_post_processor = self.build_asr_text_corrector(options)
 
         if translation_client:
             client.translation_client = translation_client
@@ -1628,6 +1705,7 @@ class TranscriptionServer:
             self.normalize_translation_draft_options(options, backend=self.backend)
             self.apply_meeting_hotwords(options)
             self.apply_default_hotwords(options)
+            self.apply_meeting_asr_corrections(options)
 
             hotword_terms = options.get("hotword_terms") or []
             hotwords_all = self.hotwords_preview(hotword_terms or options.get("hotwords"), limit=None)
@@ -1649,6 +1727,13 @@ class TranscriptionServer:
                 options.get("hotwords_file") or "",
                 hotwords_preview,
                 self.batch_config is not None,
+            )
+            logging.info(
+                "Client ASR corrections: uid=%s enabled=%s count=%d file=%s",
+                options.get("uid"),
+                bool(options.get("asr_corrections_enabled", False)),
+                int(options.get("asr_corrections_count") or 0),
+                options.get("asr_corrections_file") or "",
             )
 
             self.use_vad = options.get('use_vad')
@@ -1800,6 +1885,8 @@ class TranscriptionServer:
             asr_device_index=0,
             translation_device="cpu",
             meeting_hotwords_dir="config/hotwords.d",
+            asr_corrections_dir="config/asr_corrections.d",
+            asr_corrections_file=None,
             meeting_logs_dir="logs",
             summary_base_url="http://127.0.0.1:8001/v1",
             summary_model="qwen3-8b-awq",
@@ -1837,6 +1924,8 @@ class TranscriptionServer:
         self.translation_device = translation_device
         self.backend = BackendType(backend)
         self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
+        self.meeting_asr_corrections = MeetingAsrCorrectionStore(asr_corrections_dir)
+        self.asr_corrections_file = asr_corrections_file
         self.meeting_logs = MeetingLogStore(meeting_logs_dir)
         self.summary_templates = SummaryTemplateStore(summary_templates_dir)
         self.meeting_summary = MeetingSummaryService(

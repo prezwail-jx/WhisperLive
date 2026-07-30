@@ -129,6 +129,8 @@ python run_server.py \
   --translation_device cpu \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
+  --asr_corrections_dir config/asr_corrections.d \
+  --asr_corrections_file config/asr_corrections.d/DOMAIN_CORRECTIONS.txt \
   --meeting_logs_dir logs \
   --cors-origins http://localhost:9093,http://127.0.0.1:9093 \
   -fw model/asr/large-v3-turbo
@@ -207,6 +209,28 @@ OpenAI => 开放人工智能
 
 服务端热词目录由 `--meeting_hotwords_dir` 指定。中控负责扫描和预览服务器热词文件，不负责上传或删除。
 
+### Whisper 错词纠正
+
+Faster-Whisper 的标准中译英和双向翻译场景支持 ASR 错词表。纠错仅作用于已完成的中文片段，纠错后的文本会同步用于源字幕、会议日志和翻译输入；实时 partial 字幕、FunASR、英译中和纯转写不受影响。
+
+全局纠错文件由 `--asr_corrections_file` 指定，可用于所有标准中译英和双向翻译会议。会议级纠错文件目录由 `--asr_corrections_dir` 指定，默认 `config/asr_corrections.d`；文件名去掉 `.txt` 后必须与会议名称一致：
+
+```text
+config/asr_corrections.d/DOMAIN_CORRECTIONS.txt
+config/asr_corrections.d/产品例会.txt
+```
+
+文件内容使用字面量替换规则，不支持正则：
+
+```text
+# Whisper 错词 => 正确文本
+威斯伯 => Whisper
+派森 => Python
+开放爱爱 => OpenAI
+```
+
+多条规则按错词长度从长到短执行；同一个错词重复出现时以最后一条为准。全局规则先加载，会议规则后加载，同名错词以会议规则为准。文件不存在或规则为空时不会启用纠错。
+
 ## 7. 会议日志与校对
 
 会议开始时由前端生成 `session_id` 和开始时间，后端按 session 追加保存 ASR 原文和翻译。前端导出按钮下载后端生成的文件，不在浏览器重新拼接日志。
@@ -281,6 +305,8 @@ Admin API 始终在 `--rest_port` 启动；`--enable_rest` 仅控制额外的 Op
 | `--translation_device` | `cpu` | `cpu`、`cuda`、`cuda:N` 或 `auto` |
 | `--rest_port` | `8000` | Admin API 端口 |
 | `--meeting_hotwords_dir` | `config/hotwords.d` | 服务器热词目录 |
+| `--asr_corrections_dir` | `config/asr_corrections.d` | Whisper 中译英 ASR 错词规则目录 |
+| `--asr_corrections_file` | 无 | 全局 Whisper 中译英 ASR 错词规则文件 |
 | `--meeting_logs_dir` | `logs` | 会议日志目录 |
 | `--summary_base_url` | `http://127.0.0.1:8001/v1` | 总结 API |
 | `--summary_model` | `qwen3-4b-awq` | 通用总结模型名 |

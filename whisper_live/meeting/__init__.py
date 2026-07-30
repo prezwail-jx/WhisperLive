@@ -10,6 +10,11 @@ from .hotwords import (
     normalize_hotword_text,
     parse_hotword_config,
 )
+from .corrections import (
+    AsrTextCorrector,
+    MeetingAsrCorrectionStore,
+    parse_asr_correction_config,
+)
 from .docs import DOCX_MIME_TYPE, MeetingDocConverter
 from .logs import MeetingLogStore
 from .sessions import (
@@ -25,6 +30,8 @@ __all__ = [
     "DOCX_MIME_TYPE",
     "MeetingDocConverter",
     "MeetingHotwordStore",
+    "AsrTextCorrector",
+    "MeetingAsrCorrectionStore",
     "MeetingLogStore",
     "SESSION_ACTIVE",
     "SESSION_FINISHED",
@@ -42,4 +49,5 @@ __all__ = [
     "normalize_asr_hotwords",
     "normalize_hotword_text",
     "parse_hotword_config",
+    "parse_asr_correction_config",
 ]

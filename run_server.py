@@ -155,6 +155,18 @@ if __name__ == "__main__":
         help='Directory containing meeting hotword txt files. Filename without .txt is the meeting name.'
     )
     parser.add_argument(
+        '--asr_corrections_dir',
+        type=str,
+        default='config/asr_corrections.d',
+        help='Directory containing meeting ASR correction txt files. Filename without .txt is the meeting name.'
+    )
+    parser.add_argument(
+        '--asr_corrections_file',
+        type=str,
+        default=None,
+        help='Optional global ASR correction txt file loaded for bidirectional zh-to-en correction.'
+    )
+    parser.add_argument(
         '--meeting_logs_dir',
         type=str,
         default='logs',
@@ -211,6 +223,8 @@ if __name__ == "__main__":
         asr_device_index=args.asr_device_index,
         translation_device=args.translation_device,
         meeting_hotwords_dir=args.meeting_hotwords_dir,
+        asr_corrections_dir=args.asr_corrections_dir,
+        asr_corrections_file=args.asr_corrections_file,
         meeting_logs_dir=args.meeting_logs_dir,
         summary_base_url=args.summary_base_url,
         summary_model=args.summary_model,

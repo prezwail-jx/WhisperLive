@@ -1,3 +1,4 @@
+import queue
 import threading
 import time
 import unittest
@@ -19,6 +20,16 @@ class DummyThread:
 
 def segment(text, avg_logprob=-0.6, no_speech_prob=0.0):
     return SimpleNamespace(text=text, avg_logprob=avg_logprob, no_speech_prob=no_speech_prob)
+
+
+def timed_segment(text, start, end, avg_logprob=-0.6, no_speech_prob=0.0):
+    return SimpleNamespace(
+        text=text,
+        start=start,
+        end=end,
+        avg_logprob=avg_logprob,
+        no_speech_prob=no_speech_prob,
+    )
 
 
 def info(language, probability=0.6, candidates=None):
@@ -291,6 +302,39 @@ class TestServeClientFasterWhisperSingleModelInit(unittest.TestCase):
         )
 
         self.assertTrue(client.mixed_language_retry_enabled)
+
+    def test_completed_text_post_processor_updates_transcript_and_translation_queue(self):
+        translation_queue = queue.Queue()
+        client = ServeClientFasterWhisper(
+            websocket=mock.Mock(),
+            model=None,
+            client_uid="client",
+            language="zh",
+            translation_queue=translation_queue,
+        )
+        client.completed_text_post_processor = lambda text, reason="completed": text.replace("威斯伯", "Whisper")
+
+        client.update_segments(
+            [timed_segment("威斯伯 部署", 0.0, 1.0), timed_segment("下一句", 1.0, 2.0)],
+            duration=2.0,
+        )
+
+        self.assertEqual(client.transcript[0]["text"], "Whisper 部署")
+        self.assertEqual(translation_queue.get_nowait()["text"], "Whisper 部署")
+
+    def test_partial_text_is_not_post_processed(self):
+        client = ServeClientFasterWhisper(
+            websocket=mock.Mock(),
+            model=None,
+            client_uid="client",
+            language="zh",
+        )
+        client.completed_text_post_processor = lambda text, reason="completed": text.replace("威斯伯", "Whisper")
+
+        last_segment = client.update_segments([timed_segment("威斯伯 部署", 0.0, 1.0)], duration=1.0)
+
+        self.assertEqual(last_segment["text"], "威斯伯 部署")
+        self.assertEqual(client.transcript, [])
 
     def test_suspicious_switch_retries_previous_language_once(self):
         client = self.make_mixed_language_client()
