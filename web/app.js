@@ -106,10 +106,13 @@ const sourceSegmentStore = new Map();
 const translationSegmentStore = new Map();
 const translationRevealStates = new Map();
 const draftTranslationRevisions = new Map();
+const draftTranslationTimers = new Map();
+const expiredDraftTranslationIds = new Set();
 const finalizedTranslationSourceIds = new Set();
 const pendingFinalTranslationTimers = new Map();
 const translatedSourceIds = new Set();
 const FINAL_TRANSLATION_TIMEOUT_MS = 12000;
+const TRANSLATION_DRAFT_TTL_MS = 25000;
 const SESSION_FINALIZE_TIMEOUT_MS = 20000;
 let sourceClearedBefore = null;
 let translationClearedBefore = null;
@@ -1855,6 +1858,58 @@ function clearAllPendingFinalTranslationTimers() {
   Array.from(pendingFinalTranslationTimers.keys()).forEach(clearPendingFinalTranslationTimer);
 }
 
+function clearDraftTranslationTimer(key) {
+  const timer = draftTranslationTimers.get(key);
+  if (timer) window.clearTimeout(timer);
+  draftTranslationTimers.delete(key);
+}
+
+function clearAllDraftTranslationTimers() {
+  Array.from(draftTranslationTimers.keys()).forEach(clearDraftTranslationTimer);
+}
+
+function discardDraftTranslation(key, suppressFutureDrafts = false) {
+  const segment = translationSegmentStore.get(key);
+  if (!segment || segment.completed !== false) return false;
+  clearDraftTranslationTimer(key);
+  cancelTranslationReveal(key);
+  const translationId = String(segment.translation_id || "").trim();
+  if (translationId) {
+    draftTranslationRevisions.delete(translationId);
+    if (suppressFutureDrafts) expiredDraftTranslationIds.add(translationId);
+  }
+  translationSegmentStore.delete(key);
+  return true;
+}
+
+function pruneDraftTranslationTimers() {
+  draftTranslationTimers.forEach((_timer, key) => {
+    if (!translationSegmentStore.has(key)) clearDraftTranslationTimer(key);
+  });
+}
+
+function expireDraftTranslation(key, translationId) {
+  draftTranslationTimers.delete(key);
+  const segment = translationSegmentStore.get(key);
+  if (!segment || segment.completed !== false) return;
+  const currentTranslationId = String(segment.translation_id || "").trim();
+  if (translationId && currentTranslationId !== translationId) return;
+  if (discardDraftTranslation(key, true)) {
+    syncSegmentArrays();
+    renderTranscriptViews();
+  }
+}
+
+function trackDraftTranslationExpiry(key, segment) {
+  if (!segment || segment.completed !== false || draftTranslationTimers.has(key)) return;
+  const translationId = String(segment.translation_id || "").trim();
+  const timer = window.setTimeout(
+    () => expireDraftTranslation(key, translationId),
+    TRANSLATION_DRAFT_TTL_MS,
+  );
+  draftTranslationTimers.set(key, timer);
+}
+
 function resolveFinalSourceTranslationTimeouts(translation) {
   sourceSegmentStore.forEach((source) => {
     if (!translationCoversSource(translation, source)) return;
@@ -1976,11 +2031,15 @@ function syncSegmentArrays() {
 
 function mergeSourceSnapshot(segments) {
   const incoming = Array.isArray(segments) ? segments : [];
+  const previousDraftSourceIds = new Set();
 
   // A server snapshot contains the current draft. Remove the previous draft,
   // then add the new one while retaining all completed history.
   sourceSegmentStore.forEach((segment, key) => {
-    if (segment.completed === false) sourceSegmentStore.delete(key);
+    if (segment.completed !== false) return;
+    const utteranceId = String(segment.utterance_id || "").trim();
+    if (utteranceId) previousDraftSourceIds.add(utteranceId);
+    sourceSegmentStore.delete(key);
   });
 
   incoming.forEach((segment) => {
@@ -1989,6 +2048,16 @@ function mergeSourceSnapshot(segments) {
     sourceSegmentStore.set(sourceSegmentStoreKey(copy), copy);
     trackFinalSourceTranslationTimeout(copy);
   });
+  if (previousDraftSourceIds.size) {
+    const currentSourceIds = new Set();
+    sourceSegmentStore.forEach((segment) => {
+      const utteranceId = String(segment.utterance_id || "").trim();
+      if (utteranceId) currentSourceIds.add(utteranceId);
+    });
+    const abandonedSourceIds = Array.from(previousDraftSourceIds)
+      .filter((utteranceId) => !currentSourceIds.has(utteranceId));
+    removeDraftTranslationsForSourceIds(abandonedSourceIds, true);
+  }
   pruneSegmentStore(sourceSegmentStore);
   syncSegmentArrays();
 }
@@ -2015,28 +2084,26 @@ function markFinalizedTranslationSourceIds(sourceIds) {
   pruneInsertionOrderedState(finalizedTranslationSourceIds);
 }
 
-function removeDraftTranslationsForSourceIds(sourceIds) {
+function removeDraftTranslationsForSourceIds(sourceIds, suppressFutureDrafts = false) {
   if (!sourceIds.length) return;
   const finalizedIds = new Set(sourceIds);
   translationSegmentStore.forEach((storedSegment, key) => {
     if (storedSegment.completed !== false) return;
     if (!translationSourceIds(storedSegment).some((sourceId) => finalizedIds.has(sourceId))) return;
-    cancelTranslationReveal(key);
-    const translationId = String(storedSegment.translation_id || "").trim();
-    if (translationId) draftTranslationRevisions.delete(translationId);
-    translationSegmentStore.delete(key);
+    discardDraftTranslation(key, suppressFutureDrafts);
   });
 }
 
 function resetTranslationDraftState(removeDraftSegments = false) {
   draftTranslationRevisions.clear();
+  clearAllDraftTranslationTimers();
+  expiredDraftTranslationIds.clear();
   finalizedTranslationSourceIds.clear();
   clearAllPendingFinalTranslationTimers();
   if (!removeDraftSegments) return;
   translationSegmentStore.forEach((segment, key) => {
     if (segment.completed !== false) return;
-    cancelTranslationReveal(key);
-    translationSegmentStore.delete(key);
+    discardDraftTranslation(key);
   });
   syncSegmentArrays();
 }
@@ -2055,6 +2122,7 @@ function mergeTranslationSnapshot(segments) {
     const translationId = String(copy.translation_id || "").trim();
 
     if (copy.completed === false) {
+      if (translationId && expiredDraftTranslationIds.has(translationId)) return;
       if (sourceIds.some((sourceId) => finalizedTranslationSourceIds.has(sourceId))) return;
       const revision = Number(copy.revision);
       if (translationId && Number.isFinite(revision)) {
@@ -2064,6 +2132,7 @@ function mergeTranslationSnapshot(segments) {
       }
     } else {
       removeDraftTranslationsForSourceIds(sourceIds);
+      sourceIds.forEach((sourceId) => expiredDraftTranslationIds.delete(`draft:${sourceId}`));
       markFinalizedTranslationSourceIds(sourceIds);
       resolveFinalSourceTranslationTimeouts(copy);
     }
@@ -2074,6 +2143,7 @@ function mergeTranslationSnapshot(segments) {
     translationSegmentStore.set(key, copy);
     if (copy.completed === false) {
       cancelTranslationReveal(key);
+      trackDraftTranslationExpiry(key, copy);
     } else if (!previous) {
       startTranslationReveal(key, copy);
     } else if (translationDisplayText(previous.text) !== translationDisplayText(copy.text)) {
@@ -2081,6 +2151,7 @@ function mergeTranslationSnapshot(segments) {
     }
   });
   pruneSegmentStore(translationSegmentStore);
+  pruneDraftTranslationTimers();
   pruneTranslationReveals();
   syncSegmentArrays();
 }
@@ -2463,6 +2534,7 @@ function handleMessage(event) {
     sourceSegmentStore.forEach((source) => {
       if (source.completed !== false) showFrontendTranslationTimeout(source);
     });
+    resetTranslationDraftState(true);
     hasStoppedCurrentSession = true;
     selectedSummarySessionId = message.session_id || currentSessionId;
     selectedSummarySessionStatus = "finished";

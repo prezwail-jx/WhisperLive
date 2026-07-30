@@ -29,6 +29,6 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Run container-side `py_compile` for changed Python files in the existing deployment container.
-- [ ] 5.2 Run the directly related translation backend test module in the existing deployment container.
+- [x] 5.1 Run container-side `py_compile` for changed Python files in the existing deployment container.
+- [x] 5.2 Run the directly related translation backend test module in the existing deployment container.
 - [x] 5.3 Run `git diff --check` and inspect `git status --short` plus relevant diffs before delivery.
