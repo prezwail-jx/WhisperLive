@@ -561,11 +561,9 @@ class TranscriptionServer:
             max(1.0, float(value)),
         )
 
-    def apply_standard_segmentation_profile(self, options):
-        profile = self.standard_segmentation_profile
+    def apply_standard_segmentation_defaults(self, options):
         if (
-            profile not in ("v2", "v3")
-            or not self.backend.is_faster_whisper()
+            not self.backend.is_faster_whisper()
             or options.get("service_mode") == "accurate"
         ):
             return
@@ -573,13 +571,10 @@ class TranscriptionServer:
             "same_output_threshold": 9,
             "max_incomplete_segment_seconds": 12.0,
             "sentence_completion_min_seconds": 3.0,
-            "segmentation_profile_v2": True,
+            "conservative_segmentation": True,
+            "short_fragment_hold_seconds": 2.5,
+            "min_new_audio_seconds": 0.25,
         })
-        if profile == "v3":
-            options.update({
-                "short_fragment_hold_seconds": 2.5,
-                "min_new_audio_seconds": 0.25,
-            })
 
     @staticmethod
     def _config_bool(value):
@@ -1591,7 +1586,7 @@ class TranscriptionServer:
                     min_segment_rms=options.get("min_segment_rms", 0.0015),
                     max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 0.0),
                     sentence_completion_min_seconds=options.get("sentence_completion_min_seconds", 0.0),
-                    segmentation_profile_v2=options.get("segmentation_profile_v2", False),
+                    conservative_segmentation=options.get("conservative_segmentation", False),
                     short_fragment_hold_seconds=options.get(
                         "short_fragment_hold_seconds", ServeClientBase.SHORT_FRAGMENT_HOLD_SECONDS,
                     ),
@@ -1783,7 +1778,7 @@ class TranscriptionServer:
             logging.info("New client connected")
             options = websocket.recv()
             options = json.loads(options)
-            self.apply_standard_segmentation_profile(options)
+            self.apply_standard_segmentation_defaults(options)
             self.normalize_translation_draft_options(options, backend=self.backend)
             self.apply_meeting_hotwords(options)
             self.apply_default_hotwords(options)
@@ -1956,7 +1951,6 @@ class TranscriptionServer:
             single_model=False,
             max_clients=4,
             max_connection_time=600,
-            standard_segmentation_profile="legacy",
             cache_path="~/.cache/whisper-live/",
             rest_port=8000,
             enable_rest=False,
@@ -2008,9 +2002,6 @@ class TranscriptionServer:
         self.asr_device_index = int(asr_device_index or 0)
         self.translation_device = translation_device
         self.backend = BackendType(backend)
-        if standard_segmentation_profile not in ("legacy", "v2", "v3"):
-            raise ValueError("standard_segmentation_profile must be 'legacy', 'v2', or 'v3'")
-        self.standard_segmentation_profile = standard_segmentation_profile
         self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
         self.meeting_asr_corrections = MeetingAsrCorrectionStore(asr_corrections_dir)
         self.asr_corrections_file = asr_corrections_file

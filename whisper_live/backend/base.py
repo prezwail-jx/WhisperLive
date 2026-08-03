@@ -194,7 +194,7 @@ class ServeClientBase(object):
         stable_utterance_ids=False,
         hotword_terms=None,
         max_pending_audio_seconds=None,
-        segmentation_profile_v2=False,
+        conservative_segmentation=False,
         short_fragment_hold_seconds=SHORT_FRAGMENT_HOLD_SECONDS,
         min_new_audio_seconds=MIN_NEW_AUDIO_SECONDS,
     ):
@@ -248,7 +248,7 @@ class ServeClientBase(object):
         self.current_utterance_id = None
         self.hotword_terms = tuple(str(term or "") for term in (hotword_terms or []) if str(term or "").strip())
         self.hotword_match_terms = self._prepare_hotword_match_terms(self.hotword_terms)
-        self.segmentation_profile_v2 = bool(segmentation_profile_v2)
+        self.conservative_segmentation = bool(conservative_segmentation)
         self.pending_completed_segment = None
         self.short_fragment_hold_seconds = max(0.0, float(short_fragment_hold_seconds or 0.0))
         self.min_new_audio_seconds = max(0.0, float(min_new_audio_seconds or 0.0))
@@ -554,7 +554,7 @@ class ServeClientBase(object):
 
     def _stage_completed_segment(self, segment, reason):
         released = self.flush_pending_completed_segments()
-        if not self.segmentation_profile_v2:
+        if not self.conservative_segmentation:
             return released + [self._emit_completed_segment(segment, reason)]
         with self.lock:
             pending = self.pending_completed_segment
@@ -1464,12 +1464,12 @@ class ServeClientBase(object):
             self.sentence_completion_min_seconds > 0
             and (
                 duration >= self.sentence_completion_min_seconds
-                if not self.segmentation_profile_v2
+                if not self.conservative_segmentation
                 else last_rel_end - last_rel_start >= self.sentence_completion_min_seconds
             )
             and self._text_has_sentence_boundary(self.current_out)
             and (
-                not self.segmentation_profile_v2
+                not self.conservative_segmentation
                 or (
                     self.same_output_count >= self.SENTENCE_COMPLETION_STABLE_OBSERVATIONS
                     and self._has_sentence_completion_trailing_silence(

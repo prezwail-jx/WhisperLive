@@ -82,10 +82,6 @@ if __name__ == "__main__":
                         type=int,
                         default=300,
                         help='The maximum duration (in seconds) a client can stay connected. Defaults to 300 seconds (5 minutes)')
-    parser.add_argument('--standard_segmentation_profile',
-                        choices=['legacy', 'v2', 'v3'],
-                        default='legacy',
-                        help='Segmentation profile for non-accurate faster-whisper sessions. v3 adds 2.5s short-fragment holding and a 250ms new-audio inference interval. Defaults to legacy.')
     parser.add_argument('--cache_path', '-c',
                         type=str,
                         default="~/.cache/whisper-live/",
@@ -214,7 +210,6 @@ if __name__ == "__main__":
         single_model=not args.no_single_model,
         max_clients=args.max_clients,
         max_connection_time=args.max_connection_time,
-        standard_segmentation_profile=args.standard_segmentation_profile,
         cache_path=args.cache_path,
         rest_port=args.rest_port,
         enable_rest=args.enable_rest,

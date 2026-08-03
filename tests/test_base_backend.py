@@ -1014,12 +1014,12 @@ class TestUpdateSegments(unittest.TestCase):
         self.assertEqual(len(self.client.transcript), 0)
 
 
-class TestSegmentationProfileV2(unittest.TestCase):
+class TestConservativeSegmentation(unittest.TestCase):
     def setUp(self):
         self.client = ConcreteServeClient(
-            client_uid="v2",
+            client_uid="standard",
             websocket=MagicMock(),
-            segmentation_profile_v2=True,
+            conservative_segmentation=True,
             min_segment_rms=0.028,
             same_output_threshold=9,
             max_incomplete_segment_seconds=12.0,
@@ -1114,29 +1114,8 @@ class TestSegmentationProfileV2(unittest.TestCase):
 
         self.assertEqual([segment["text"] for segment in released], ["hold me"])
 
-    def test_v2_keeps_subsecond_hold_and_no_audio_interval(self):
-        self.assertAlmostEqual(self.client.short_fragment_hold_seconds, 0.7)
-        self.assertAlmostEqual(self.client.min_new_audio_seconds, 0.0)
-
-
-class TestSegmentationProfileV3(unittest.TestCase):
-    def setUp(self):
-        self.client = ConcreteServeClient(
-            client_uid="v3",
-            websocket=MagicMock(),
-            segmentation_profile_v2=True,
-            short_fragment_hold_seconds=2.5,
-            min_new_audio_seconds=0.25,
-        )
-
-    @staticmethod
-    def _completed(start, end, text):
-        return {
-            "start": f"{start:.3f}", "end": f"{end:.3f}", "text": text,
-            "completed": True, "language": "en", "speaker": None,
-        }
-
-    def test_v3_holds_short_fragment_for_two_and_a_half_seconds(self):
+    def test_short_fragment_holds_for_two_and_a_half_seconds_when_configured(self):
+        self.client.short_fragment_hold_seconds = 2.5
         self.client._stage_completed_segment(self._completed(0.0, 0.4, "hold me"), "test")
         held_at = self.client.pending_completed_segment["held_at"]
 
@@ -1146,13 +1125,6 @@ class TestSegmentationProfileV3(unittest.TestCase):
             released = self.client.flush_pending_completed_segments()
 
         self.assertEqual([segment["text"] for segment in released], ["hold me"])
-
-    def test_v3_merges_compatible_short_fragments_within_hold_window(self):
-        self.client._stage_completed_segment(self._completed(0.0, 0.4, "hello"), "test")
-        self.client._stage_completed_segment(self._completed(0.45, 1.2, "world"), "test")
-
-        self.assertEqual([segment["text"] for segment in self.client.transcript], ["hello world"])
-
 
 class TestGetSegmentHelpers(unittest.TestCase):
     def setUp(self):

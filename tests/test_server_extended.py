@@ -265,27 +265,28 @@ class TestTranscriptionServerInit(unittest.TestCase):
         with self.assertRaises(ValueError):
             server.run(host="localhost", port=9090, batch_enabled=True, batch_window_ms=-1)
 
-    def test_v3_standard_profile_enables_long_hold_and_audio_interval(self):
+    def test_standard_mode_enables_conservative_segmentation(self):
         server = TranscriptionServer()
         server.backend = BackendType.FASTER_WHISPER
-        server.standard_segmentation_profile = "v3"
         options = {"service_mode": "standard"}
 
-        server.apply_standard_segmentation_profile(options)
+        server.apply_standard_segmentation_defaults(options)
 
-        self.assertTrue(options["segmentation_profile_v2"])
+        self.assertTrue(options["conservative_segmentation"])
+        self.assertEqual(options["same_output_threshold"], 9)
+        self.assertEqual(options["max_incomplete_segment_seconds"], 12.0)
+        self.assertEqual(options["sentence_completion_min_seconds"], 3.0)
         self.assertEqual(options["short_fragment_hold_seconds"], 2.5)
         self.assertEqual(options["min_new_audio_seconds"], 0.25)
 
-    def test_v3_standard_profile_does_not_change_accurate_mode(self):
+    def test_standard_segmentation_does_not_change_accurate_mode(self):
         server = TranscriptionServer()
         server.backend = BackendType.FASTER_WHISPER
-        server.standard_segmentation_profile = "v3"
         options = {"service_mode": "accurate"}
 
-        server.apply_standard_segmentation_profile(options)
+        server.apply_standard_segmentation_defaults(options)
 
-        self.assertNotIn("segmentation_profile_v2", options)
+        self.assertNotIn("conservative_segmentation", options)
         self.assertNotIn("short_fragment_hold_seconds", options)
         self.assertNotIn("min_new_audio_seconds", options)
 

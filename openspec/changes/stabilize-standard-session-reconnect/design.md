@@ -16,9 +16,9 @@ Constraints and confirmed product decisions:
 - Both backends use one shared meeting-log directory for unified discovery and download.
 - The production per-WebSocket connection limit is eight hours (`28800` seconds).
 - Non-accurate modes include standard interpretation, conversation translation, and transcription-only mode; accurate mode remains out of scope for segmentation tuning.
-- V2 short-fragment coalescing may add at most a bounded sub-second delay. An explicitly selected V3 profile may hold short fragments for up to 2.5 seconds and throttle repeat inference until 250ms of new audio arrives.
+- Non-accurate Faster-Whisper sessions hold short fragments for up to 2.5 seconds and throttle repeat inference until 250ms of new audio arrives.
 - Low-confidence mixed-language retry is not enabled in this change.
-- The change must not alter models, GPU placement, translation devices, batches, or persistent log schema compatibility. V3 may reduce repeat ASR inference frequency through its explicit 250ms new-audio interval.
+- The change must not alter models, GPU placement, translation devices, batches, or persistent log schema compatibility. The 250ms new-audio interval reduces repeat ASR inference frequency.
 
 ## Goals / Non-Goals
 
@@ -115,11 +115,11 @@ Constraints and confirmed product decisions:
 
    The backend will log bounded, non-audio diagnostic events for low-energy drops, completion reasons, trailing-silence sentence completion, short-fragment hold/merge/release, boundary dedupe, and realtime audio drops. These logs are used to tune thresholds during deployment validation and to explain remaining fragmentation or missing words.
 
-14. Add an explicit V3 coalescing and inference-cadence profile.
+14. Apply conservative coalescing and inference cadence by default.
 
-    `--standard_segmentation_profile v3` retains V2's completion thresholds and high-accuracy exclusion, but increases the short completed-fragment hold from 700ms to 2.5s. It also requires at least 250ms of newly buffered audio after the prior inference window before another normal inference call. Finalization bypasses the interval so a disconnect or explicit stop cannot leave tail audio unprocessed. `legacy` and `v2` retain their existing behavior for rollback and comparison.
+    Every non-accurate Faster-Whisper session uses a 2.5-second hold for short completed fragments and requires at least 250ms of newly buffered audio after the prior inference window before another normal inference call. Finalization bypasses the interval so a disconnect or explicit stop cannot leave tail audio unprocessed. Accurate mode remains unchanged.
 
-    Applying the longer hold to V2 was rejected because it changes the already deployed tuning profile. A wall-clock throttle was rejected because inference latency varies; counting newly buffered audio directly prevents duplicate inference without delaying when actual audio accumulates.
+    Runtime profile selection was removed after validation showed this strategy to be the preferred default. A wall-clock throttle was rejected because inference latency varies; counting newly buffered audio directly prevents duplicate inference without delaying when actual audio accumulates.
 
 ## Risks / Trade-offs
 
@@ -131,8 +131,7 @@ Constraints and confirmed product decisions:
 - [Risk] Interrupted downloads can contain only the segments persisted before failure. -> Label the status and document that missing audio or never-written segments cannot be reconstructed.
 - [Risk] An eight-hour socket can retain server resources for a long period. -> Preserve `max_clients`, client cleanup, and Admin visibility; do not remove the limit entirely.
 - [Risk] Session IDs appear in proxy URLs and access logs. -> Treat the random UUID as a routing identifier rather than an authorization token and avoid logging query strings where production policy requires it.
-- [Risk] Short-fragment coalescing adds latency. -> Bound the hold to about `700ms`, release immediately on strong terminal boundaries, and verify user-visible delay remains acceptable.
-- [Risk] V3 can delay a short completed source row by up to `2.5s`. -> Make V3 opt-in, retain V2 and legacy for rollback, and verify translation latency and `REALTIME_DROP` during deployment.
+- [Risk] Conservative coalescing can delay a short completed source row by up to `2.5s`. -> Release immediately on strong terminal boundaries and verify translation latency and `REALTIME_DROP` during deployment.
 - [Risk] Merging fragments can combine text that should remain separate. -> Require compatible language/speaker/timing, avoid merges across strong terminal punctuation, and preserve the original unmerged behavior when no safe continuation appears.
 - [Risk] Sentence completion can still be fooled by model punctuation. -> Require text stability, minimum duration, and trailing low-energy audio rather than punctuation alone.
 

@@ -34,8 +34,8 @@
 - [x] 5.5 Implement non-accurate sentence-boundary completion only when strong punctuation, repeated text stability, minimum utterance duration, and trailing low-energy audio are all present.
 - [x] 5.6 Implement bounded short-fragment coalescing before client/log/translation emission, merging only compatible language/speaker/timing continuations and releasing after the hold window expires.
 - [x] 5.7 Add focused backend tests for unchanged ordinary low-energy filtering, silence hallucination rejection, repeat threshold behavior, duration-limit fallback, punctuation-without-silence not completing, stability-plus-silence completion, compatible short-fragment merge, terminal-boundary no-merge, and hold-window release.
-- [x] 5.8 Add opt-in V3 segmentation: retain V2 thresholds, hold short fragments for up to 2.5 seconds, and require 250ms of newly buffered audio before repeat inference while bypassing the interval during finalization.
-- [x] 5.9 Add focused tests for V2 defaults, V3 hold/merge behavior, V3 high-accuracy exclusion, new-audio throttling, and finalization bypass.
+- [x] 5.8 Apply the conservative segmentation defaults to all non-accurate Faster-Whisper sessions: hold short fragments for up to 2.5 seconds and require 250ms of newly buffered audio before repeat inference while bypassing the interval during finalization.
+- [x] 5.9 Add focused tests for conservative hold/merge behavior, high-accuracy exclusion, new-audio throttling, and finalization bypass.
 
 ## 6. Historical Log Migration
 

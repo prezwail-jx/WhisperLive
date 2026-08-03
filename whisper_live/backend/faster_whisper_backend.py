@@ -48,7 +48,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         mixed_language_retry_enabled=False,
         asr_device_index=0,
         max_pending_audio_seconds=ServeClientBase.MAX_PENDING_AUDIO_SECONDS,
-        segmentation_profile_v2=False,
+        conservative_segmentation=False,
         short_fragment_hold_seconds=ServeClientBase.SHORT_FRAGMENT_HOLD_SECONDS,
         min_new_audio_seconds=ServeClientBase.MIN_NEW_AUDIO_SECONDS,
         defer_start=False,
@@ -91,7 +91,7 @@ class ServeClientFasterWhisper(ServeClientBase):
             min_transcription_chunk_seconds=min_transcription_chunk_seconds,
             stable_utterance_ids=True,
             hotword_terms=hotword_terms,
-            segmentation_profile_v2=segmentation_profile_v2,
+            conservative_segmentation=conservative_segmentation,
             short_fragment_hold_seconds=short_fragment_hold_seconds,
             min_new_audio_seconds=min_new_audio_seconds,
         )
