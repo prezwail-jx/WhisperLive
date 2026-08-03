@@ -1,11 +1,19 @@
 ## ADDED Requirements
 
-### Requirement: Non-accurate ASR uses conservative segmentation parameters
-The system SHALL tune standard, conversation, and transcription-only ASR segmentation without increasing routine ASR inference frequency or changing accurate-mode behavior.
+### Requirement: Non-accurate ASR uses selectable conservative segmentation profiles
+The system SHALL provide `legacy`, `v2`, and opt-in `v3` segmentation profiles for standard, conversation, and transcription-only faster-whisper sessions without changing accurate-mode behavior.
 
-#### Scenario: Non-accurate mode keeps current chunk cadence
-- **WHEN** a non-accurate client starts a faster-whisper session
-- **THEN** the client configuration keeps `min_transcription_chunk_seconds` at `2.5` seconds and does not introduce additional routine ASR passes
+#### Scenario: V2 keeps current chunk cadence
+- **WHEN** a non-accurate faster-whisper client starts with the V2 profile
+- **THEN** the client configuration keeps `min_transcription_chunk_seconds` at `2.5` seconds and does not add a new-audio inference interval
+
+#### Scenario: V3 reduces duplicate inference with an explicit interval
+- **WHEN** a non-accurate faster-whisper client starts with the V3 profile
+- **THEN** it keeps `min_transcription_chunk_seconds` at `2.5` seconds and waits until at least `250ms` of new audio exists beyond the prior inference window before normal repeat inference
+
+#### Scenario: V3 finalization processes the tail immediately
+- **WHEN** a V3 client finalizes with buffered audio that has not met the `250ms` new-audio interval
+- **THEN** the backend processes that tail without waiting for additional audio
 
 #### Scenario: Accurate mode remains unchanged
 - **WHEN** a client starts accurate mode
@@ -58,6 +66,10 @@ The system SHALL reduce short fragmented source rows in non-accurate modes by br
 #### Scenario: Hold window expires
 - **WHEN** no compatible continuation arrives before the bounded hold window expires
 - **THEN** the backend emits the original completed fragment unchanged
+
+#### Scenario: V3 uses a longer opt-in hold window
+- **WHEN** a non-accurate faster-whisper client starts with the V3 profile
+- **THEN** it holds a short completed fragment for up to `2.5s` before releasing it unchanged or merging a compatible continuation
 
 ### Requirement: Segmentation diagnostics are bounded and do not store audio
 The system SHALL log bounded segmentation diagnostics for tuning and troubleshooting without persisting raw audio.

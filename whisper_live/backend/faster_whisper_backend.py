@@ -49,6 +49,8 @@ class ServeClientFasterWhisper(ServeClientBase):
         asr_device_index=0,
         max_pending_audio_seconds=ServeClientBase.MAX_PENDING_AUDIO_SECONDS,
         segmentation_profile_v2=False,
+        short_fragment_hold_seconds=ServeClientBase.SHORT_FRAGMENT_HOLD_SECONDS,
+        min_new_audio_seconds=ServeClientBase.MIN_NEW_AUDIO_SECONDS,
         defer_start=False,
     ):
         """
@@ -90,6 +92,8 @@ class ServeClientFasterWhisper(ServeClientBase):
             stable_utterance_ids=True,
             hotword_terms=hotword_terms,
             segmentation_profile_v2=segmentation_profile_v2,
+            short_fragment_hold_seconds=short_fragment_hold_seconds,
+            min_new_audio_seconds=min_new_audio_seconds,
         )
         self.cache_path = cache_path
         self.model_sizes = [
@@ -116,12 +120,14 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.current_zh_en_candidates = {}
         self.current_language_trusted = False
         logging.info(
-            "[ASR_BUFFER_CONFIG] uid=%s max_pending=%.2f max_incomplete=%.2f sentence_min=%.2f min_chunk=%.2f",
+            "[ASR_BUFFER_CONFIG] uid=%s max_pending=%.2f max_incomplete=%.2f sentence_min=%.2f min_chunk=%.2f short_hold=%.2f min_new_audio=%.2f",
             self.client_uid,
             self.max_pending_audio_seconds,
             self.max_incomplete_segment_seconds,
             self.sentence_completion_min_seconds,
             self.min_transcription_chunk_seconds,
+            self.short_fragment_hold_seconds,
+            self.min_new_audio_seconds,
         )
 
         device = "cuda" if torch.cuda.is_available() else "cpu"

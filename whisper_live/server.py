@@ -564,7 +564,7 @@ class TranscriptionServer:
     def apply_standard_segmentation_profile(self, options):
         profile = self.standard_segmentation_profile
         if (
-            profile != "v2"
+            profile not in ("v2", "v3")
             or not self.backend.is_faster_whisper()
             or options.get("service_mode") == "accurate"
         ):
@@ -575,6 +575,11 @@ class TranscriptionServer:
             "sentence_completion_min_seconds": 3.0,
             "segmentation_profile_v2": True,
         })
+        if profile == "v3":
+            options.update({
+                "short_fragment_hold_seconds": 2.5,
+                "min_new_audio_seconds": 0.25,
+            })
 
     @staticmethod
     def _config_bool(value):
@@ -1587,6 +1592,12 @@ class TranscriptionServer:
                     max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 0.0),
                     sentence_completion_min_seconds=options.get("sentence_completion_min_seconds", 0.0),
                     segmentation_profile_v2=options.get("segmentation_profile_v2", False),
+                    short_fragment_hold_seconds=options.get(
+                        "short_fragment_hold_seconds", ServeClientBase.SHORT_FRAGMENT_HOLD_SECONDS,
+                    ),
+                    min_new_audio_seconds=options.get(
+                        "min_new_audio_seconds", ServeClientBase.MIN_NEW_AUDIO_SECONDS,
+                    ),
                     max_pending_audio_seconds=max_pending_audio_seconds,
                     min_transcription_chunk_seconds=options.get("min_transcription_chunk_seconds", 1.0),
                     cache_path=self.cache_path,
@@ -1997,8 +2008,8 @@ class TranscriptionServer:
         self.asr_device_index = int(asr_device_index or 0)
         self.translation_device = translation_device
         self.backend = BackendType(backend)
-        if standard_segmentation_profile not in ("legacy", "v2"):
-            raise ValueError("standard_segmentation_profile must be 'legacy' or 'v2'")
+        if standard_segmentation_profile not in ("legacy", "v2", "v3"):
+            raise ValueError("standard_segmentation_profile must be 'legacy', 'v2', or 'v3'")
         self.standard_segmentation_profile = standard_segmentation_profile
         self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
         self.meeting_asr_corrections = MeetingAsrCorrectionStore(asr_corrections_dir)

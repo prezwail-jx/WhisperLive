@@ -9,6 +9,7 @@ MAX_CLIENTS=12
 MAX_CONNECTION_TIME=28800
 BATCH_MAX_SIZE=8
 BATCH_WINDOW_MS=50
+STANDARD_SEGMENTATION_PROFILE="${STANDARD_SEGMENTATION_PROFILE:-legacy}"
 LOG_DIR="logs"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
@@ -108,6 +109,7 @@ start_instance() {
     --backend faster_whisper \
     --max_clients "${MAX_CLIENTS}" \
     --max_connection_time "${MAX_CONNECTION_TIME}" \
+    --standard_segmentation_profile "${STANDARD_SEGMENTATION_PROFILE}" \
     --asr_device_index "${ASR_DEVICE_INDEX:-0}" \
     --translation_device "${TRANSLATION_DEVICE:-cpu}" \
     --batch_max_size "${BATCH_MAX_SIZE}" \

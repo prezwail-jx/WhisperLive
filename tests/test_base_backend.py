@@ -104,6 +104,16 @@ class AutoLanguageClient(ConcreteServeClient):
         self.output_calls.append((result, duration, force_complete_last))
 
 
+class CountingTranscriptionClient(ConcreteServeClient):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.transcription_calls = 0
+
+    def transcribe_audio(self, input_sample):
+        self.transcription_calls += 1
+        return ["segment"]
+
+
 class TestSpeechToTextLanguageGate(unittest.TestCase):
     def test_min_transcription_chunk_waits_for_configured_duration(self):
         client = AutoLanguageClient(client_uid="test", websocket=MagicMock())
@@ -141,6 +151,54 @@ class TestSpeechToTextLanguageGate(unittest.TestCase):
         client.request_asr_finalization()
 
         self.assertEqual(client.wait_for_asr_finalization(timeout=0), "timed_out")
+
+    def test_new_audio_interval_skips_duplicate_audio(self):
+        client = CountingTranscriptionClient(
+            client_uid="test", websocket=MagicMock(), min_new_audio_seconds=0.25,
+        )
+        client.frames_np = np.zeros(int(2.5 * client.RATE), dtype=np.float32)
+        client.last_transcription_audio_end = 2.5
+
+        with patch("whisper_live.backend.base.time.sleep", side_effect=lambda _seconds: setattr(client, "exit", True)):
+            client.speech_to_text()
+
+        self.assertEqual(client.transcription_calls, 0)
+
+    def test_new_audio_interval_allows_sufficient_new_audio(self):
+        client = CountingTranscriptionClient(
+            client_uid="test", websocket=MagicMock(), min_new_audio_seconds=0.25,
+        )
+        client.frames_np = np.zeros(int(2.75 * client.RATE), dtype=np.float32)
+        client.last_transcription_audio_end = 2.5
+
+        def stop_after_transcription(_input_sample):
+            client.transcription_calls += 1
+            client.exit = True
+            return ["segment"]
+
+        client.transcribe_audio = stop_after_transcription
+        client.speech_to_text()
+
+        self.assertEqual(client.transcription_calls, 1)
+
+    def test_finalization_bypasses_new_audio_interval(self):
+        client = CountingTranscriptionClient(
+            client_uid="test", websocket=MagicMock(), min_new_audio_seconds=0.25,
+        )
+        client.frames_np = np.zeros(int(2.5 * client.RATE), dtype=np.float32)
+        client.last_transcription_audio_end = 2.5
+        client.request_asr_finalization()
+
+        def stop_after_transcription(_input_sample):
+            client.transcription_calls += 1
+            client.exit = True
+            return ["segment"]
+
+        client.transcribe_audio = stop_after_transcription
+        client.speech_to_text()
+
+        self.assertEqual(client.transcription_calls, 1)
+        self.assertEqual(client.asr_finalization_status, "completed")
 
 
 class TestAddFrames(unittest.TestCase):
@@ -1055,6 +1113,45 @@ class TestSegmentationProfileV2(unittest.TestCase):
             released = self.client.flush_pending_completed_segments()
 
         self.assertEqual([segment["text"] for segment in released], ["hold me"])
+
+    def test_v2_keeps_subsecond_hold_and_no_audio_interval(self):
+        self.assertAlmostEqual(self.client.short_fragment_hold_seconds, 0.7)
+        self.assertAlmostEqual(self.client.min_new_audio_seconds, 0.0)
+
+
+class TestSegmentationProfileV3(unittest.TestCase):
+    def setUp(self):
+        self.client = ConcreteServeClient(
+            client_uid="v3",
+            websocket=MagicMock(),
+            segmentation_profile_v2=True,
+            short_fragment_hold_seconds=2.5,
+            min_new_audio_seconds=0.25,
+        )
+
+    @staticmethod
+    def _completed(start, end, text):
+        return {
+            "start": f"{start:.3f}", "end": f"{end:.3f}", "text": text,
+            "completed": True, "language": "en", "speaker": None,
+        }
+
+    def test_v3_holds_short_fragment_for_two_and_a_half_seconds(self):
+        self.client._stage_completed_segment(self._completed(0.0, 0.4, "hold me"), "test")
+        held_at = self.client.pending_completed_segment["held_at"]
+
+        with patch("whisper_live.backend.base.time.monotonic", return_value=held_at + 2.0):
+            self.assertEqual(self.client.flush_pending_completed_segments(), [])
+        with patch("whisper_live.backend.base.time.monotonic", return_value=held_at + 2.5):
+            released = self.client.flush_pending_completed_segments()
+
+        self.assertEqual([segment["text"] for segment in released], ["hold me"])
+
+    def test_v3_merges_compatible_short_fragments_within_hold_window(self):
+        self.client._stage_completed_segment(self._completed(0.0, 0.4, "hello"), "test")
+        self.client._stage_completed_segment(self._completed(0.45, 1.2, "world"), "test")
+
+        self.assertEqual([segment["text"] for segment in self.client.transcript], ["hello world"])
 
 
 class TestGetSegmentHelpers(unittest.TestCase):

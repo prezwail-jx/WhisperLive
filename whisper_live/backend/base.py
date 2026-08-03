@@ -172,6 +172,7 @@ class ServeClientBase(object):
     SHORT_COMPLETED_FRAGMENT_SECONDS = 1.0
     SHORT_FRAGMENT_HOLD_SECONDS = 0.7
     SHORT_FRAGMENT_MAX_GAP_SECONDS = 1.0
+    MIN_NEW_AUDIO_SECONDS = 0.0
     SENTENCE_COMPLETION_STABLE_OBSERVATIONS = 2
     SENTENCE_COMPLETION_TRAILING_SILENCE_SECONDS = 0.6
 
@@ -194,6 +195,8 @@ class ServeClientBase(object):
         hotword_terms=None,
         max_pending_audio_seconds=None,
         segmentation_profile_v2=False,
+        short_fragment_hold_seconds=SHORT_FRAGMENT_HOLD_SECONDS,
+        min_new_audio_seconds=MIN_NEW_AUDIO_SECONDS,
     ):
         self.client_uid = client_uid
         self.websocket = websocket
@@ -247,6 +250,9 @@ class ServeClientBase(object):
         self.hotword_match_terms = self._prepare_hotword_match_terms(self.hotword_terms)
         self.segmentation_profile_v2 = bool(segmentation_profile_v2)
         self.pending_completed_segment = None
+        self.short_fragment_hold_seconds = max(0.0, float(short_fragment_hold_seconds or 0.0))
+        self.min_new_audio_seconds = max(0.0, float(min_new_audio_seconds or 0.0))
+        self.last_transcription_audio_end = None
 
         # Optional post-processing callable for segments.
         # If set, called with a segment dict and must return a segment dict.
@@ -344,8 +350,17 @@ class ServeClientBase(object):
                     self._finish_asr_finalization("completed")
                 time.sleep(0.05)
                 continue
+            audio_end = self.timestamp_offset + duration
+            if (
+                not finalizing
+                and self.last_transcription_audio_end is not None
+                and audio_end - self.last_transcription_audio_end < self.min_new_audio_seconds
+            ):
+                time.sleep(0.05)
+                continue
             try:
                 input_sample = input_bytes.copy()
+                self.last_transcription_audio_end = audio_end
                 t0 = time.time()
                 result = self.transcribe_audio(input_sample)
 
@@ -531,7 +546,7 @@ class ServeClientBase(object):
             pending = self.pending_completed_segment
             if pending is None:
                 return []
-            if not force and time.monotonic() - pending["held_at"] < self.SHORT_FRAGMENT_HOLD_SECONDS:
+            if not force and time.monotonic() - pending["held_at"] < self.short_fragment_hold_seconds:
                 return []
             self.pending_completed_segment = None
         self._segmentation_diagnostic("short_fragment_release", reason="flush" if force else "hold_expired", text=pending["segment"].get("text"))
