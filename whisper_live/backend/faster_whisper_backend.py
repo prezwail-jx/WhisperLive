@@ -48,6 +48,8 @@ class ServeClientFasterWhisper(ServeClientBase):
         mixed_language_retry_enabled=False,
         asr_device_index=0,
         max_pending_audio_seconds=ServeClientBase.MAX_PENDING_AUDIO_SECONDS,
+        segmentation_profile_v2=False,
+        defer_start=False,
     ):
         """
         Initialize a ServeClient instance.
@@ -87,6 +89,7 @@ class ServeClientFasterWhisper(ServeClientBase):
             min_transcription_chunk_seconds=min_transcription_chunk_seconds,
             stable_utterance_ids=True,
             hotword_terms=hotword_terms,
+            segmentation_profile_v2=segmentation_profile_v2,
         )
         self.cache_path = cache_path
         self.model_sizes = [
@@ -156,18 +159,23 @@ class ServeClientFasterWhisper(ServeClientBase):
 
         self.use_vad = use_vad
 
-        # threading
+        if not defer_start:
+            self.start()
+
+    def start(self, send_ready=True):
+        """Start ASR after the server has completed any readiness prerequisites."""
         self.trans_thread = threading.Thread(target=self.speech_to_text)
         self.trans_thread.start()
-        self.websocket.send(
-            json.dumps(
-                {
-                    "uid": self.client_uid,
-                    "message": self.SERVER_READY,
-                    "backend": "faster_whisper"
-                }
+        if send_ready:
+            self.websocket.send(
+                json.dumps(
+                    {
+                        "uid": self.client_uid,
+                        "message": self.SERVER_READY,
+                        "backend": "faster_whisper"
+                    }
+                )
             )
-        )
 
     def create_model(self, device):
         """

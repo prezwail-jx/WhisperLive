@@ -35,8 +35,10 @@
       this.timer = window.setTimeout(() => {
         this.timer = null;
         Promise.resolve(this.onReconnect(this.attempt, this.delays.length))
-          .catch(() => {})
-          .finally(() => {
+          .then((connected) => {
+            if (this.active && !connected) this._next();
+          })
+          .catch(() => {
             if (this.active) this._next();
           });
       }, delay);

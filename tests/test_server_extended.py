@@ -671,6 +671,62 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
             12.0,
         )
 
+    @patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    def test_failed_resume_sends_error_without_ready_and_cleans_resources(self, mock_faster_client):
+        websocket = MagicMock()
+        client = MagicMock()
+        client.SERVER_READY = "SERVER_READY"
+        client.client_uid = "uid-1"
+        mock_faster_client.return_value = client
+        self.server.meeting_logs = MagicMock()
+        self.server.meeting_logs.resume_session.side_effect = KeyError("meeting log session not found")
+        options = {
+            "uid": "uid-1", "session_id": "session-1", "language": "en", "task": "transcribe",
+            "model": "small", "resume_session": True,
+        }
+
+        result = self.server.initialize_client(websocket, options, None, None, False)
+
+        self.assertFalse(result)
+        payload = json.loads(websocket.send.call_args.args[0])
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertEqual(payload["code"], "SESSION_RESUME_FAILED")
+        self.assertEqual(payload["error_type"], "session_not_found")
+        self.assertNotEqual(payload.get("message"), "SERVER_READY")
+        client.cleanup.assert_called_once()
+        websocket.close.assert_called_once()
+        self.assertFalse(self.server.client_manager.get_client(websocket))
+
+    @patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    def test_successful_resume_sends_ready_with_session_metadata(self, mock_faster_client):
+        websocket = MagicMock()
+        client = MagicMock()
+        client.SERVER_READY = "SERVER_READY"
+        client.client_uid = "uid-1"
+        mock_faster_client.return_value = client
+        self.server.meeting_logs = MagicMock()
+        self.server.meeting_logs.resume_session.return_value = {
+            "session_id": "session-1", "status": "active", "connection_count": 2,
+            "connection_generation": 2, "timeline_offset_seconds": 70.0,
+            "audio_gaps": [{"reason": "websocket_disconnected"}],
+        }
+        options = {
+            "uid": "uid-1", "session_id": "session-1", "language": "en", "task": "transcribe",
+            "model": "small", "resume_session": True,
+        }
+
+        result = self.server.initialize_client(websocket, options, None, None, False)
+
+        self.assertTrue(result)
+        client.start.assert_called_once_with(send_ready=False)
+        payload = json.loads(websocket.send.call_args.args[0])
+        self.assertEqual(payload["message"], "SERVER_READY")
+        self.assertEqual(payload["session_id"], "session-1")
+        self.assertEqual(payload["connection_count"], 2)
+        self.assertEqual(payload["connection_generation"], 2)
+        self.assertEqual(payload["timeline_offset_seconds"], 70.0)
+        self.assertEqual(client.meeting_log_connection_generation, 2)
+
 
 class TestTranscriptionServerCleanup(unittest.TestCase):
     def setUp(self):
@@ -684,6 +740,20 @@ class TestTranscriptionServerCleanup(unittest.TestCase):
         self.server.cleanup(ws)
         self.assertNotIn(ws, self.server.client_manager.clients)
         client.cleanup.assert_called_once()
+
+    def test_unexpected_cleanup_passes_client_connection_generation(self):
+        ws = MagicMock()
+        client = MagicMock()
+        client.meeting_log_session_id = "session-1"
+        client.meeting_log_connection_generation = 2
+        self.server.meeting_logs = MagicMock()
+        self.server.client_manager.add_client(ws, client)
+
+        self.server.cleanup(ws)
+
+        self.server.meeting_logs.interrupt_session.assert_called_once_with(
+            "session-1", expected_generation=2,
+        )
 
     def test_cleanup_end_of_audio_sends_session_finalized_after_drain(self):
         events = []

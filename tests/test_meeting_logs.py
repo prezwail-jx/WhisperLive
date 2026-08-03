@@ -381,6 +381,31 @@ class TestMeetingLogStore(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.resume_session({"session_id": "session-1", "client_instance_id": "browser-1"})
 
+    def test_stale_generation_cleanup_does_not_interrupt_resumed_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            started = store.start_session({"uid": "uid-1", "session_id": "session-1", "client_instance_id": "browser-1"})
+            self.assertEqual(started["connection_generation"], 1)
+            store.interrupt_session("session-1", expected_generation=1)
+            resumed = store.resume_session({"session_id": "session-1", "client_instance_id": "browser-1"})
+
+            stale_result = store.interrupt_session("session-1", expected_generation=1)
+
+            self.assertEqual(resumed["connection_generation"], 2)
+            self.assertEqual(stale_result["status"], "active")
+            self.assertEqual(store.session_info("session-1")["status"], "active")
+
+    def test_matching_generation_cleanup_interrupts_active_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MeetingLogStore(directory)
+            started = store.start_session({"uid": "uid-1", "session_id": "session-1"})
+
+            interrupted = store.interrupt_session(
+                "session-1", expected_generation=started["connection_generation"],
+            )
+
+            self.assertEqual(interrupted["status"], "interrupted")
+
     def test_resume_rejects_different_client_instance(self):
         with tempfile.TemporaryDirectory() as directory:
             store = MeetingLogStore(directory)

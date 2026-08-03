@@ -168,6 +168,12 @@ class ServeClientBase(object):
     MIXED_NOISE_MIN_EXTENDED_LATIN_WORDS = 2
     MIXED_NOISE_MIN_SCRIPT_SWITCHES = 3
     MIXED_NOISE_MIN_LATIN_WORDS = 4
+    SEGMENTATION_TEXT_PREVIEW_LIMIT = 80
+    SHORT_COMPLETED_FRAGMENT_SECONDS = 1.0
+    SHORT_FRAGMENT_HOLD_SECONDS = 0.7
+    SHORT_FRAGMENT_MAX_GAP_SECONDS = 1.0
+    SENTENCE_COMPLETION_STABLE_OBSERVATIONS = 2
+    SENTENCE_COMPLETION_TRAILING_SILENCE_SECONDS = 0.6
 
     def __init__(
         self,
@@ -187,6 +193,7 @@ class ServeClientBase(object):
         stable_utterance_ids=False,
         hotword_terms=None,
         max_pending_audio_seconds=None,
+        segmentation_profile_v2=False,
     ):
         self.client_uid = client_uid
         self.websocket = websocket
@@ -238,6 +245,8 @@ class ServeClientBase(object):
         self.current_utterance_id = None
         self.hotword_terms = tuple(str(term or "") for term in (hotword_terms or []) if str(term or "").strip())
         self.hotword_match_terms = self._prepare_hotword_match_terms(self.hotword_terms)
+        self.segmentation_profile_v2 = bool(segmentation_profile_v2)
+        self.pending_completed_segment = None
 
         # Optional post-processing callable for segments.
         # If set, called with a segment dict and must return a segment dict.
@@ -249,6 +258,16 @@ class ServeClientBase(object):
 
         # threading
         self.lock = threading.Lock()
+
+    def _segmentation_diagnostic(self, event, **metadata):
+        metadata["uid"] = self.client_uid
+        if "text" in metadata:
+            metadata["text"] = repr(str(metadata["text"] or "").strip()[:self.SEGMENTATION_TEXT_PREVIEW_LIMIT])
+        logging.info(
+            "[SEGMENTATION_DIAGNOSTIC] event=%s %s",
+            event,
+            " ".join(f"{key}={value}" for key, value in sorted(metadata.items())),
+        )
 
     @staticmethod
     def _text_has_sentence_boundary(text):
@@ -301,6 +320,10 @@ class ServeClientBase(object):
             if self.exit:
                 logging.info("Exiting speech to text thread")
                 break
+
+            released_segments = self.flush_pending_completed_segments()
+            if released_segments:
+                self.send_transcription_to_client(released_segments)
 
             if self.frames_np is None:
                 if self.asr_finalization_requested:
@@ -455,6 +478,98 @@ class ServeClientBase(object):
             )
             return text
 
+    @staticmethod
+    def _segment_time(segment, key):
+        try:
+            return float(segment.get(key, 0.0))
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+
+    def _completed_segment_has_terminal_boundary(self, segment):
+        return bool(re.search(r"[！？!?][\s\"'“”‘’）)\]}]*$", str(segment.get("text") or "").strip()))
+
+    def _completed_segments_compatible(self, previous, current):
+        if previous.get("language") != current.get("language"):
+            return False
+        if previous.get("speaker") != current.get("speaker"):
+            return False
+        gap = self._segment_time(current, "start") - self._segment_time(previous, "end")
+        return 0.0 <= gap <= self.SHORT_FRAGMENT_MAX_GAP_SECONDS
+
+    def _merge_completed_segments(self, previous, current):
+        merged = previous.copy()
+        merged["end"] = current["end"]
+        previous_text = str(previous.get("text") or "").rstrip()
+        current_text = self._dedupe_leading_word_overlap(previous_text, current.get("text"))
+        separator = "" if not previous_text or not current_text or re.search(r"[\u3400-\u9fff]$", previous_text) else " "
+        merged["text"] = f"{previous_text.rstrip('，,;；:：')}{separator}{str(current_text).lstrip()}".strip()
+        if previous.get("words") is not None or current.get("words") is not None:
+            merged["words"] = list(previous.get("words") or []) + list(current.get("words") or [])
+        return merged
+
+    def _emit_completed_segment(self, segment, reason):
+        with self.lock:
+            self.text.append(segment["text"])
+            self.transcript.append(segment)
+        self._notify_translation_draft_segment(segment)
+        if self.translation_queue:
+            try:
+                self.translation_queue.put(segment.copy(), timeout=0.1)
+            except queue.Full:
+                logging.warning("Translation queue is full, skipping segment")
+        self._segmentation_diagnostic(
+            "completion",
+            reason=reason,
+            start=segment.get("start"),
+            end=segment.get("end"),
+            text=segment.get("text"),
+        )
+        return segment
+
+    def flush_pending_completed_segments(self, force=False):
+        with self.lock:
+            pending = self.pending_completed_segment
+            if pending is None:
+                return []
+            if not force and time.monotonic() - pending["held_at"] < self.SHORT_FRAGMENT_HOLD_SECONDS:
+                return []
+            self.pending_completed_segment = None
+        self._segmentation_diagnostic("short_fragment_release", reason="flush" if force else "hold_expired", text=pending["segment"].get("text"))
+        return [self._emit_completed_segment(pending["segment"], pending["reason"])]
+
+    def _stage_completed_segment(self, segment, reason):
+        released = self.flush_pending_completed_segments()
+        if not self.segmentation_profile_v2:
+            return released + [self._emit_completed_segment(segment, reason)]
+        with self.lock:
+            pending = self.pending_completed_segment
+            if pending is not None:
+                self.pending_completed_segment = None
+        if pending is not None:
+            if (
+                not self._completed_segment_has_terminal_boundary(pending["segment"])
+                and not self._completed_segment_has_terminal_boundary(segment)
+                and self._completed_segments_compatible(pending["segment"], segment)
+            ):
+                merged = self._merge_completed_segments(pending["segment"], segment)
+                self._segmentation_diagnostic("short_fragment_merge", text=merged.get("text"))
+                return released + [self._emit_completed_segment(merged, "short_fragment_merge")]
+            self._segmentation_diagnostic("short_fragment_release", reason="incompatible", text=pending["segment"].get("text"))
+            released.append(self._emit_completed_segment(pending["segment"], pending["reason"]))
+        duration = self._segment_time(segment, "end") - self._segment_time(segment, "start")
+        if duration <= self.SHORT_COMPLETED_FRAGMENT_SECONDS and not self._completed_segment_has_terminal_boundary(segment):
+            with self.lock:
+                self.pending_completed_segment = {"segment": segment, "reason": reason, "held_at": time.monotonic()}
+            self._segmentation_diagnostic("short_fragment_hold", duration=f"{duration:.3f}", text=segment.get("text"))
+            return released
+        return released + [self._emit_completed_segment(segment, reason)]
+
+    def _has_sentence_completion_trailing_silence(self, rel_end, duration):
+        if duration - rel_end < self.SENTENCE_COMPLETION_TRAILING_SILENCE_SECONDS:
+            return False
+        rms = self._audio_rms_for_relative_range(rel_end, duration, duration)
+        return rms is not None and rms < self.min_segment_rms
+
     def add_frames(self, frame_np):
         """
         Add audio frames to the ongoing audio stream buffer.
@@ -509,6 +624,12 @@ class ServeClientBase(object):
             pending_seconds,
             self.max_pending_audio_seconds,
             dropped_seconds,
+        )
+        self._segmentation_diagnostic(
+            "realtime_audio_drop",
+            pending=f"{pending_seconds:.2f}",
+            kept=f"{self.max_pending_audio_seconds:.2f}",
+            dropped=f"{dropped_seconds:.2f}",
         )
 
     def clip_audio_if_no_valid_segment(self):
@@ -800,6 +921,7 @@ class ServeClientBase(object):
             rms_threshold,
             str(text or "").strip()[:80],
         )
+        self._segmentation_diagnostic("hallucination_drop", stage=stage, reason=reason, text=text)
 
     def _hotword_hallucination_drop_reason(self, segment, start, end, duration, text, stage):
         consecutive_count = self._max_consecutive_hotword_count(text)
@@ -901,6 +1023,7 @@ class ServeClientBase(object):
             stage,
             str(text or "").strip()[:80],
         )
+        self._segmentation_diagnostic("hallucination_drop", stage=stage, reason="hard", text=text)
         return True
 
     @staticmethod
@@ -1044,6 +1167,7 @@ class ServeClientBase(object):
             duration,
             str(text or "").strip()[:80],
         )
+        self._segmentation_diagnostic("hallucination_drop", stage="gratitude", reason=reason, text=text)
         return True
 
     @staticmethod
@@ -1093,6 +1217,10 @@ class ServeClientBase(object):
             rms,
             threshold,
             str(text or "").strip()[:80],
+        )
+        self._segmentation_diagnostic(
+            "hallucination_low_energy_drop" if self._is_silence_hallucination_phrase(text) else "ordinary_low_energy_drop",
+            rms=f"{rms:.6f}", threshold=f"{threshold:.6f}", text=text,
         )
         return True
 
@@ -1192,7 +1320,6 @@ class ServeClientBase(object):
                 if not text_.strip():
                     offset = rel_end
                     continue
-                self.text.append(text_)
                 speaker = self._identify_speaker(s)
                 words = self._extract_words(s, self.timestamp_offset)
                 completed_segment = self.format_segment(start, end, text_, completed=True, speaker=speaker, words=words)
@@ -1201,14 +1328,7 @@ class ServeClientBase(object):
                     start,
                     utterance_id=completed_utterance_id,
                 )
-                self.transcript.append(completed_segment)
-
-                self._notify_translation_draft_segment(completed_segment)
-                if self.translation_queue:
-                    try:
-                        self.translation_queue.put(completed_segment.copy(), timeout=0.1)
-                    except queue.Full:
-                        logging.warning("Translation queue is full, skipping segment")
+                self._stage_completed_segment(completed_segment, "whisper_segment")
                 offset = rel_end
             self._finish_utterance()
 
@@ -1238,18 +1358,11 @@ class ServeClientBase(object):
                         start = self.timestamp_offset + rel_start
                         end = self.timestamp_offset + rel_end
                     if not self.text or self.text[-1].strip().lower() != completed_text.strip().lower():
-                        self.text.append(completed_text)
                         speaker = self._identify_speaker(segments[-1])
                         words = self._extract_words(segments[-1], self.timestamp_offset)
                         completed_segment = self.format_segment(start, end, completed_text, completed=True, speaker=speaker, words=words)
                         self._attach_utterance_id(completed_segment, start)
-                        self.transcript.append(completed_segment)
-                        self._notify_translation_draft_segment(completed_segment)
-                        if self.translation_queue:
-                            try:
-                                self.translation_queue.put(completed_segment.copy(), timeout=0.1)
-                            except queue.Full:
-                                logging.warning("Translation queue is full, skipping segment")
+                        self._stage_completed_segment(completed_segment, "finalize_complete")
                         logging.info(
                             "[ASR_FINALIZE_COMPLETE_SEGMENT] uid=%s start=%.3f end=%.3f text=%r",
                             self.client_uid,
@@ -1308,7 +1421,6 @@ class ServeClientBase(object):
                 if self._is_mixed_interpretation_noise_text(completed_text):
                     completed_text = ""
                 if completed_text:
-                    self.text.append(completed_text)
                     with self.lock:
                         completed_segment = self.format_segment(
                             self.timestamp_offset,
@@ -1320,14 +1432,7 @@ class ServeClientBase(object):
                             completed_segment,
                             self.timestamp_offset,
                         )
-                        self.transcript.append(completed_segment)
-
-                        self._notify_translation_draft_segment(completed_segment)
-                        if self.translation_queue:
-                            try:
-                                self.translation_queue.put(completed_segment.copy(), timeout=0.1)
-                            except queue.Full:
-                                logging.warning("Translation queue is full, skipping segment")
+                    self._stage_completed_segment(completed_segment, "repeated_output")
 
             self.current_out = ''
             offset = repeated_end
@@ -1338,10 +1443,25 @@ class ServeClientBase(object):
         else:
             self.prev_out = self.current_out
 
+        last_rel_start = self.get_segment_start(segments[-1])
+        last_rel_end = min(duration, self.get_segment_end(segments[-1]))
         sentence_boundary_complete = (
             self.sentence_completion_min_seconds > 0
-            and duration >= self.sentence_completion_min_seconds
+            and (
+                duration >= self.sentence_completion_min_seconds
+                if not self.segmentation_profile_v2
+                else last_rel_end - last_rel_start >= self.sentence_completion_min_seconds
+            )
             and self._text_has_sentence_boundary(self.current_out)
+            and (
+                not self.segmentation_profile_v2
+                or (
+                    self.same_output_count >= self.SENTENCE_COMPLETION_STABLE_OBSERVATIONS
+                    and self._has_sentence_completion_trailing_silence(
+                        last_rel_end, duration,
+                    )
+                )
+            )
         )
         duration_limit_complete = (
             self.max_incomplete_segment_seconds > 0
@@ -1383,16 +1503,7 @@ class ServeClientBase(object):
                             completed_segment,
                             self.timestamp_offset,
                         )
-                        self.transcript.append(completed_segment)
-
-                        self._notify_translation_draft_segment(completed_segment)
-                        if self.translation_queue:
-                            try:
-                                self.translation_queue.put(completed_segment.copy(), timeout=0.1)
-                            except queue.Full:
-                                logging.warning("Translation queue is full, skipping segment")
-
-                    self.text.append(completed_text)
+                    self._stage_completed_segment(completed_segment, completion_reason)
                 self.current_out = ''
                 offset = repeated_end
                 self.same_output_count = 0

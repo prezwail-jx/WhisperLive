@@ -956,6 +956,107 @@ class TestUpdateSegments(unittest.TestCase):
         self.assertEqual(len(self.client.transcript), 0)
 
 
+class TestSegmentationProfileV2(unittest.TestCase):
+    def setUp(self):
+        self.client = ConcreteServeClient(
+            client_uid="v2",
+            websocket=MagicMock(),
+            segmentation_profile_v2=True,
+            min_segment_rms=0.028,
+            same_output_threshold=9,
+            max_incomplete_segment_seconds=12.0,
+            sentence_completion_min_seconds=3.0,
+        )
+
+    @staticmethod
+    def _segment(start, end, text, no_speech_prob=0.0):
+        segment = MagicMock()
+        segment.start = start
+        segment.end = end
+        segment.text = text
+        segment.no_speech_prob = no_speech_prob
+        return segment
+
+    def test_quiet_valid_speech_is_retained(self):
+        self.client.frames_np = np.full(16000 * 3, 0.03, dtype=np.float32)
+        self.client.update_segments([
+            self._segment(0.0, 0.5, " quiet speech"),
+            self._segment(0.5, 1.5, " next"),
+        ], duration=2.0)
+
+        self.client.flush_pending_completed_segments(force=True)
+        self.assertEqual(self.client.transcript[0]["text"].strip(), "quiet speech")
+
+    def test_silence_hallucination_keeps_stricter_energy_gate(self):
+        self.client.frames_np = np.full(16000 * 3, 0.02, dtype=np.float32)
+        self.client.update_segments([
+            self._segment(0.0, 1.1, " Thank you."),
+            self._segment(1.1, 2.0, " next"),
+        ], duration=2.5)
+
+        self.assertEqual(self.client.transcript, [])
+
+    def test_repeat_threshold_is_not_eager(self):
+        self.client.frames_np = np.full(16000 * 3, 0.02, dtype=np.float32)
+        segment = self._segment(0.0, 1.0, " repeated words")
+        for _ in range(10):
+            self.client.update_segments([segment], duration=2.0)
+
+        self.assertEqual(self.client.transcript, [])
+
+    def test_duration_limit_remains_bounded(self):
+        self.client.frames_np = np.full(16000 * 13, 0.02, dtype=np.float32)
+        self.client.update_segments([self._segment(0.0, 12.0, " long pending speech")], duration=12.0)
+
+        self.assertEqual(len(self.client.transcript), 1)
+        self.assertEqual(self.client.transcript[0]["text"].strip(), "long pending speech")
+
+    def test_punctuation_without_trailing_silence_does_not_complete(self):
+        self.client.frames_np = np.full(16000 * 4, 0.02, dtype=np.float32)
+        segment = self._segment(0.0, 4.0, " complete sentence.")
+        for _ in range(3):
+            last = self.client.update_segments([segment], duration=4.0)
+
+        self.assertIsNotNone(last)
+        self.assertEqual(self.client.transcript, [])
+
+    def test_stability_and_trailing_silence_complete_sentence(self):
+        self.client.frames_np = np.concatenate((
+            np.full(int(3.4 * 16000), 0.02, dtype=np.float32),
+            np.zeros(int(0.6 * 16000), dtype=np.float32),
+        ))
+        segment = self._segment(0.0, 3.4, " complete sentence.")
+        for _ in range(3):
+            self.client.update_segments([segment], duration=4.0)
+
+        self.assertEqual(len(self.client.transcript), 1)
+
+    def _completed(self, start, end, text, language="en", speaker=None):
+        return {
+            "start": f"{start:.3f}", "end": f"{end:.3f}", "text": text,
+            "completed": True, "language": language, "speaker": speaker,
+        }
+
+    def test_compatible_short_fragments_merge(self):
+        self.client._stage_completed_segment(self._completed(0.0, 0.4, "hello"), "test")
+        self.client._stage_completed_segment(self._completed(0.45, 1.2, "world"), "test")
+
+        self.assertEqual([segment["text"] for segment in self.client.transcript], ["hello world"])
+
+    def test_terminal_boundary_prevents_merge(self):
+        self.client._stage_completed_segment(self._completed(0.0, 0.4, "really?"), "test")
+        self.client._stage_completed_segment(self._completed(0.45, 0.8, "yes"), "test")
+
+        self.assertEqual([segment["text"] for segment in self.client.transcript], ["really?"])
+
+    def test_hold_window_release(self):
+        self.client._stage_completed_segment(self._completed(0.0, 0.4, "hold me"), "test")
+        with patch("whisper_live.backend.base.time.monotonic", return_value=time.monotonic() + 1.0):
+            released = self.client.flush_pending_completed_segments()
+
+        self.assertEqual([segment["text"] for segment in released], ["hold me"])
+
+
 class TestGetSegmentHelpers(unittest.TestCase):
     def setUp(self):
         self.ws = MagicMock()

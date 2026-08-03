@@ -111,6 +111,51 @@ nvidia-smi
 
 ## 5. 启动 ASR 后端
 
+### 5.1 双卡会话亲和与共享日志
+
+普通模式的 `/ws-standard` 必须按浏览器携带的 `session_id` 固定到同一个后端。实际生产 Nginx 配置中使用以下模式，并在修改后执行 `nginx -t`：
+
+```nginx
+map $arg_session_id $standard_route_key {
+    ""      "$remote_addr|$http_user_agent";
+    default $arg_session_id;
+}
+
+upstream whisperlive_standard {
+    hash $standard_route_key consistent;
+    server whisperlive-gpu0:9090 max_fails=0;
+    server whisperlive-gpu1:9090 max_fails=0;
+}
+
+location /ws-standard {
+    proxy_pass http://whisperlive_standard;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_next_upstream off;
+    proxy_next_upstream_tries 1;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 28800s;
+    proxy_send_timeout 28800s;
+}
+```
+
+`max_fails=0` 防止一致性哈希在被动失败后预先跳过原节点；`proxy_next_upstream off` 禁止连接失败时改投另一张卡。原节点不可用时会话应失败并由浏览器在约 30 秒内重试，而不是换卡。
+
+两个容器必须把同一个宿主机目录（推荐 `/srv/whisperlive/shared/logs`）挂载为 `/shared/meeting-logs`，并均使用：
+
+```text
+--meeting_logs_dir /shared/meeting-logs --max_connection_time 28800
+```
+
+切换前确认无活动会议，先备份旧目录。使用以下命令仅生成迁移计划，再人工处理冲突后加 `--execute`：
+
+```bash
+python3 scripts/migrate_meeting_logs.py GPU0_旧日志目录 GPU1_旧日志目录 /srv/whisperlive/shared/logs --report /tmp/meeting-log-migration.json
+```
+
+迁移只复制唯一或字节完全相同的 session 文件集；冲突和损坏 JSON 不会覆盖。断线期间未上传的音频、或从未写入任何目录的片段无法恢复。迁移完成后比较报告数量，并从统一 `/admin/meeting-logs` 抽样下载 Markdown 和 DOCX。
+
 两个后端均以 Faster-Whisper `large-v3-turbo` 启动，服务端默认翻译设备保持为 CPU。高精模式由前端仅对对应连接覆盖为 GPU1。
 
 GPU0 后端示例：
@@ -227,6 +272,34 @@ nvidia-smi
 4. 分别让 GPU0、GPU1 后端承载并结束一次普通会议，确认统一总结列表可见两次会议。
 5. 下载 Markdown、DOCX 原文和中英对照。
 6. 在无活动会议时生成一次 `qwen3-32b-awq` 总结并下载。
+
+## 8.3 历史会议日志迁移到共享目录
+
+仅在两个后端均无活动会议、且已获得重启授权后执行迁移。先对两个原始日志目录分别创建可恢复的只读备份；迁移工具不会备份、删除、修复或覆盖任何源文件。
+
+工具只依赖 Python 标准库，按有效 JSON 主记录中的 `session_id` 盘点。有效记录必须是 JSON 对象，具有非空 `session_id` 和 `source_segments` 数组。它会随唯一会话复制同 stem 的 Markdown、summary 文件和 `-summaries/` 版本目录。
+
+先运行 dry-run，默认不会创建目标目录或复制文件：
+
+```bash
+python3 scripts/migrate_meeting_logs.py \
+  /actual/gpu0/logs /actual/gpu1/logs /actual/shared/logs \
+  --report /safe/location/meeting-log-migration-dry-run.json
+```
+
+审阅报告中的 `inventories`、`copies`、`duplicates`、`conflicts` 和 `invalid_records`。两个来源完全相同的同一会话会去重；任一文件集不同、目标已有不同会话，或目标预期路径已存在时都会记为冲突且不会覆盖。畸形 JSON 只会列入 `invalid_records`，需要保留原文件并人工隔离、修复或决定是否舍弃。
+
+仅当 dry-run 的会话数量、冲突和畸形记录均已人工确认后，才使用新的空 staging/shared 目录执行复制：
+
+```bash
+python3 scripts/migrate_meeting_logs.py \
+  /actual/gpu0/logs /actual/gpu1/logs /actual/shared/logs \
+  --execute --report /safe/location/meeting-log-migration-execute.json
+```
+
+执行后再次以同一来源和目标运行 dry-run，核对唯一会话均显示为已去重且没有新的冲突。挂载共享目录前，分别从两张卡抽取已完成和已中断会话，通过统一 Admin 列表确认可见，并下载代表性的 Markdown 与 DOCX。不要将共享目录中的较新日志反向复制覆盖原始备份。
+
+迁移只能保留已经持久化的内容。断线后未到达服务端的音频，以及服务端尚未写入会议日志的识别片段，不可恢复。
 
 ## 9. 常用只读检查
 

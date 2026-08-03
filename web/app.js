@@ -19,6 +19,7 @@ const elements = {
   stop: document.getElementById("stopButton"),
   continueMeeting: document.getElementById("continueButton"),
   finishInterrupted: document.getElementById("finishInterruptedButton"),
+  finishSelectedInterrupted: document.getElementById("finishSelectedInterruptedButton"),
   exportLog: document.getElementById("exportLogButton"),
   exportLogDocx: document.getElementById("exportLogDocxButton"),
   exportInterleavedLogDocx: document.getElementById("exportInterleavedLogDocxButton"),
@@ -146,6 +147,7 @@ let detectedSourceLanguage = null;
 let resumeNextConnection = false;
 let intentionallyClosingSocket = false;
 let reconnectController = null;
+let pendingReconnectAttempt = null;
 
 const DEFAULT_BACKEND = "faster_whisper";
 const DEFAULT_MODEL = "model/asr/small";
@@ -206,18 +208,20 @@ function webSocketPathForMode(mode = serviceMode) {
   return mode === "accurate" ? "/ws-accurate" : "/ws-standard";
 }
 
-function webSocketUrlForMode(url, mode = serviceMode) {
+function webSocketUrlForMode(url, mode = serviceMode, sessionId = currentSessionId) {
   const fallback = defaultWebSocketUrl();
   const rawUrl = String(url || fallback).trim() || fallback;
   try {
     const parsed = new URL(rawUrl);
     parsed.pathname = webSocketPathForMode(mode);
     parsed.search = "";
+    if (mode !== "accurate" && sessionId) parsed.searchParams.set("session_id", sessionId);
     parsed.hash = "";
     return parsed.toString();
   } catch (_error) {
     const parsed = new URL(fallback);
     parsed.pathname = webSocketPathForMode(mode);
+    if (mode !== "accurate" && sessionId) parsed.searchParams.set("session_id", sessionId);
     return parsed.toString();
   }
 }
@@ -1287,12 +1291,13 @@ async function loadSummarySessions(preferredSessionId = selectedSummarySessionId
   const response = await fetch(meetingLogApiUrl(), { cache: "no-store" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const data = await response.json();
-  const sessions = (data.sessions || []).filter((item) => item.status === "finished");
-  elements.summarySession.innerHTML = '<option value="">暂无已结束会议</option>';
+  const sessions = (data.sessions || []).filter((item) => ["finished", "interrupted"].includes(item.status));
+  elements.summarySession.innerHTML = '<option value="">暂无已完成或中断会议</option>';
   sessions.forEach((item) => {
     const option = document.createElement("option");
     option.value = item.session_id;
-    option.textContent = `${item.meeting_name || "未命名会议"} · ${item.created_at || item.session_id}`;
+    const statusLabel = item.status === "interrupted" ? "已中断" : "已完成";
+    option.textContent = `[${statusLabel}] ${item.meeting_name || "未命名会议"} · ${item.created_at || item.session_id}`;
     option.dataset.status = item.status || "";
     elements.summarySession.appendChild(option);
   });
@@ -1308,9 +1313,10 @@ async function loadSummarySessions(preferredSessionId = selectedSummarySessionId
     ? preferredSessionId
     : (sessions[0] && sessions[0].session_id) || null;
   selectedSummarySessionId = nextId;
-  selectedSummarySessionStatus = nextId ? "finished" : null;
+  selectedSummarySessionStatus = sessions.find((item) => item.session_id === nextId)?.status || (nextId ? "finished" : null);
   elements.summarySession.value = nextId || "";
   if (!transcriptEditorData) renderTranscriptEditor();
+  updateInterruptedSessionControls();
   await loadSummaryInfo(nextId);
 }
 
@@ -1322,9 +1328,27 @@ function setTranscriptEditorStatus(text, state = "") {
 }
 
 function transcriptEditorIdleMessage() {
+  if (selectedSummarySessionId && selectedSummarySessionStatus !== "finished") {
+    return "中断会议需先结束会议，才能校对和生成总结。";
+  }
   return selectedSummarySessionId
     ? "已选择会议，点击“加载校对内容”。"
     : "请先在上方选择会议日志。";
+}
+
+function selectedSessionIsFinished() {
+  return selectedSummarySessionStatus === "finished";
+}
+
+function updateInterruptedSessionControls() {
+  const interrupted = selectedSummarySessionStatus === "interrupted";
+  if (elements.finishSelectedInterrupted) {
+    elements.finishSelectedInterrupted.hidden = !interrupted;
+    elements.finishSelectedInterrupted.disabled = !interrupted;
+  }
+  if (elements.loadTranscriptEditor) elements.loadTranscriptEditor.disabled = !selectedSessionIsFinished();
+  if (elements.newSpeakerName) elements.newSpeakerName.disabled = !selectedSessionIsFinished();
+  if (elements.addSpeaker) elements.addSpeaker.disabled = !selectedSessionIsFinished();
 }
 
 async function transcriptRequest(url, options = {}) {
@@ -1375,6 +1399,7 @@ function renderSpeakerRenameGuide() {
   elements.speakerRenameGuide.replaceChildren();
   if (!transcriptEditorData) return;
   const speakers = transcriptEditorData.speakers || [];
+  const editable = selectedSessionIsFinished();
   const { counts } = speakerSegmentCounts();
   const heading = document.createElement("div");
   heading.className = "speaker-guide-heading";
@@ -1401,11 +1426,13 @@ function renderSpeakerRenameGuide() {
     input.value = speaker.name || "";
     input.maxLength = 80;
     input.placeholder = "填写真实姓名";
+    input.disabled = !editable;
     const save = document.createElement("button");
     save.type = "button";
     save.className = "secondary-button";
     save.dataset.action = "rename-speaker-guide";
     save.textContent = "保存";
+    save.disabled = !editable;
     row.append(current, input, save);
     elements.speakerRenameGuide.appendChild(row);
   });
@@ -1415,6 +1442,7 @@ function renderSpeakerManager() {
   if (!elements.speakerManagerList) return;
   elements.speakerManagerList.replaceChildren();
   const speakers = transcriptEditorData?.speakers || [];
+  const editable = selectedSessionIsFinished();
   speakers.forEach((speaker) => {
     const row = document.createElement("div");
     row.className = "speaker-manager-row";
@@ -1422,8 +1450,9 @@ function renderSpeakerManager() {
     const input = document.createElement("input");
     input.value = speaker.name || speaker.speaker_id;
     input.maxLength = 80;
+    input.disabled = !editable;
     const rename = document.createElement("button");
-    rename.type = "button"; rename.className = "ghost-button"; rename.dataset.action = "rename-speaker"; rename.textContent = "改名";
+    rename.type = "button"; rename.className = "ghost-button"; rename.dataset.action = "rename-speaker"; rename.textContent = "改名"; rename.disabled = !editable;
     const target = document.createElement("select");
     target.innerHTML = '<option value="">合并到…</option>';
     speakers.filter((item) => item.speaker_id !== speaker.speaker_id).forEach((item) => {
@@ -1432,7 +1461,8 @@ function renderSpeakerManager() {
     });
     const merge = document.createElement("button");
     merge.type = "button"; merge.className = "ghost-button"; merge.dataset.action = "merge-speaker"; merge.textContent = "合并";
-    merge.disabled = speakers.length < 2;
+    target.disabled = !editable;
+    merge.disabled = !editable || speakers.length < 2;
     row.append(input, rename, target, merge);
     elements.speakerManagerList.appendChild(row);
   });
@@ -1456,6 +1486,7 @@ function renderTranscriptEditor() {
   if (transcriptEditorData.summary_stale) notices.push("总结已过期，请重新生成");
   setTranscriptEditorStatus(notices.join(" · "), transcriptEditorData.summary_stale ? "warning" : "ready");
   const speakers = transcriptEditorData.speakers || [];
+  const editable = selectedSessionIsFinished();
   (transcriptEditorData.segments || []).forEach((segment) => {
     const row = document.createElement("article");
     row.className = "transcript-editor-row"; row.dataset.segmentId = segment.segment_id;
@@ -1468,21 +1499,23 @@ function renderTranscriptEditor() {
       option.value = item.speaker_id; option.textContent = item.name || item.speaker_id; speaker.appendChild(option);
     });
     speaker.value = segment.speaker_id || "";
+    speaker.disabled = !editable;
     const text = document.createElement("textarea");
-    text.rows = 3; text.maxLength = 10000; text.value = segment.text || "";
+    text.rows = 3; text.maxLength = 10000; text.value = segment.text || ""; text.disabled = !editable;
     const actions = document.createElement("div");
     actions.className = "transcript-editor-actions";
     const restore = document.createElement("button");
     restore.type = "button"; restore.className = "ghost-button"; restore.dataset.action = "restore-segment"; restore.textContent = "恢复原文";
-    restore.disabled = (segment.text || "") === (segment.original_text || "");
+    restore.disabled = !editable || (segment.text || "") === (segment.original_text || "");
     const save = document.createElement("button");
-    save.type = "button"; save.className = "secondary-button"; save.dataset.action = "save-segment"; save.textContent = "保存";
+    save.type = "button"; save.className = "secondary-button"; save.dataset.action = "save-segment"; save.textContent = "保存"; save.disabled = !editable;
     actions.append(restore, save); row.append(meta, speaker, text, actions); elements.transcriptEditorRows.appendChild(row);
   });
 }
 
 async function loadTranscriptEditor(sessionId = selectedSummarySessionId) {
   if (!sessionId) throw new Error("请先在上方选择会议日志");
+  if (!selectedSessionIsFinished()) throw new Error("中断会议需先结束会议后才能校对");
   setTranscriptEditorStatus("正在加载校对内容…");
   const response = await fetch(transcriptApiUrl(sessionId), { cache: "no-store" });
   const data = await response.json().catch(() => ({}));
@@ -1492,6 +1525,7 @@ async function loadTranscriptEditor(sessionId = selectedSummarySessionId) {
 }
 
 async function saveTranscriptEditorRow(row, restoreOriginal = false) {
+  if (!selectedSessionIsFinished()) throw new Error("中断会议需先结束会议后才能校对");
   const segmentId = row.dataset.segmentId;
   const segment = (transcriptEditorData?.segments || []).find((item) => item.segment_id === segmentId);
   const textarea = row.querySelector("textarea");
@@ -1509,6 +1543,7 @@ async function saveTranscriptEditorRow(row, restoreOriginal = false) {
 }
 
 async function addTranscriptSpeaker() {
+  if (!selectedSessionIsFinished()) throw new Error("中断会议需先结束会议后才能校对");
   const name = elements.newSpeakerName.value.trim();
   if (!name) throw new Error("请输入说话人姓名");
   await transcriptRequest(speakersApiUrl(selectedSummarySessionId), {
@@ -1519,6 +1554,7 @@ async function addTranscriptSpeaker() {
 }
 
 async function renameTranscriptSpeaker(row) {
+  if (!selectedSessionIsFinished()) throw new Error("中断会议需先结束会议后才能校对");
   await transcriptRequest(speakersApiUrl(selectedSummarySessionId, row.dataset.speakerId), {
     method: "PATCH",
     body: JSON.stringify({ name: row.querySelector("input").value, expected_revision: transcriptEditorData.transcript_revision }),
@@ -1527,6 +1563,7 @@ async function renameTranscriptSpeaker(row) {
 }
 
 async function renameTranscriptSpeakerFromGuide(row) {
+  if (!selectedSessionIsFinished()) throw new Error("中断会议需先结束会议后才能校对");
   const name = row.querySelector("input").value.trim();
   if (!name) throw new Error("请输入真实姓名");
   setTranscriptEditorStatus("正在保存说话人名称…");
@@ -1538,6 +1575,7 @@ async function renameTranscriptSpeakerFromGuide(row) {
 }
 
 async function mergeTranscriptSpeaker(row) {
+  if (!selectedSessionIsFinished()) throw new Error("中断会议需先结束会议后才能校对");
   const targetId = row.querySelector("select").value;
   if (!targetId) throw new Error("请选择要合并到的说话人");
   await transcriptRequest(`${speakersApiUrl(selectedSummarySessionId)}/merge`, {
@@ -1697,6 +1735,7 @@ function updateSummaryButtons() {
   if (elements.downloadSummaryDocx) {
     elements.downloadSummaryDocx.disabled = !selectedSummarySessionId || !summaryGenerated || summaryGenerating;
   }
+  updateInterruptedSessionControls();
 }
 
 function clearMeetingLog() {
@@ -2510,6 +2549,15 @@ function handleMessage(event) {
     return;
   }
 
+  if (isResumeError(message)) {
+    const detail = message.error_code || message.message || "会话恢复失败";
+    setStatus("会话恢复失败", "error");
+    setToolStatus(`会话 ${currentSessionId || "未知"} 恢复失败：${detail}`, "error");
+    settleReconnectAttempt(false);
+    if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+    return;
+  }
+
   if (message.status === "ERROR" || message.status === "WARNING") {
     setStatus(message.status, "error");
     console.warn(message.message);
@@ -2520,6 +2568,7 @@ function handleMessage(event) {
     isServerReady = true;
     resumeNextConnection = false;
     if (reconnectController) reconnectController.markConnected();
+    settleReconnectAttempt(true);
     if (elements.continueMeeting) elements.continueMeeting.hidden = true;
     if (elements.finishInterrupted) elements.finishInterrupted.hidden = true;
     setStatus(message.resumed ? "已重连" : "已连接", "ready");
@@ -2568,6 +2617,27 @@ function handleMessage(event) {
     mergeTranslationSnapshot(message.translated_segments);
     renderTranscriptViews();
   }
+}
+
+function isResumeError(message) {
+  const code = String(message.error_code || message.code || "").toLowerCase();
+  const type = String(message.type || message.message || "").toLowerCase();
+  return code.includes("resume") || type.includes("resume_error") || type.includes("session_resume");
+}
+
+function createReconnectAttempt() {
+  if (pendingReconnectAttempt) return pendingReconnectAttempt.promise;
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  pendingReconnectAttempt = { promise, resolve };
+  return promise;
+}
+
+function settleReconnectAttempt(connected) {
+  if (!pendingReconnectAttempt) return;
+  const { resolve } = pendingReconnectAttempt;
+  pendingReconnectAttempt = null;
+  resolve(Boolean(connected));
 }
 
 function downsampleTo16k(input, inputSampleRate) {
@@ -2734,6 +2804,9 @@ function setConnectionInputsDisabled(disabled) {
 }
 
 function openMeetingSocket(resume = false) {
+  if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
+    return resume ? createReconnectAttempt() : undefined;
+  }
   resumeNextConnection = Boolean(resume);
   if (resumeNextConnection) {
     resetTranslationDraftState(true);
@@ -2746,14 +2819,20 @@ function openMeetingSocket(resume = false) {
   socket = window.RTWsClient.open(wsUrl, {
     open: sendConfig,
     message: handleMessage,
-    error: () => setStatus("连接错误", "error"),
+    error: () => {
+      setStatus("连接错误", "error");
+      settleReconnectAttempt(false);
+    },
     close: handleSocketClose,
   });
+  return resume ? createReconnectAttempt() : undefined;
 }
 
-function handleSocketClose() {
+function handleSocketClose(event) {
+  if (event?.target && event.target !== socket) return;
   socket = null;
   isServerReady = false;
+  settleReconnectAttempt(false);
   resetTranslationDraftState(true);
   renderTranscriptViews();
   if (intentionallyClosingSocket || hasStoppedCurrentSession) return;
@@ -3044,18 +3123,25 @@ async function continueInterruptedMeeting() {
   openMeetingSocket(true);
 }
 
-async function finishInterruptedMeeting() {
-  if (!currentSessionId) return;
+async function finishInterruptedMeeting(sessionId = selectedSummarySessionId || currentSessionId) {
+  if (!sessionId) throw new Error("请先选择中断的会议");
+  if (selectedSummarySessionStatus !== "interrupted" && sessionId !== currentSessionId) {
+    throw new Error(`会议 ${sessionId} 不是中断状态`);
+  }
+  if (!window.confirm(`确认结束中断会议 ${sessionId}？结束后可校对并生成总结。`)) return;
   setStatus("结束会议中", "busy");
-  const response = await fetch(meetingLogFinishUrl(currentSessionId), { method: "POST" });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  hasStoppedCurrentSession = true;
-  selectedSummarySessionId = currentSessionId;
+  setToolStatus(`正在结束中断会议 ${sessionId}…`);
+  const response = await fetch(meetingLogFinishUrl(sessionId), { method: "POST" });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  if (sessionId === currentSessionId) hasStoppedCurrentSession = true;
+  selectedSummarySessionId = sessionId;
   selectedSummarySessionStatus = "finished";
   updateSummaryButtons();
-  await loadSummarySessions(currentSessionId).catch(() => {});
-  stopCapture(false);
-  setStatus("已停止", "idle");
+  await loadSummarySessions(sessionId);
+  if (sessionId === currentSessionId) stopCapture(false);
+  setStatus("会议已结束", "ready");
+  setToolStatus(`中断会议 ${sessionId} 已结束，可进行校对和总结。`, "success");
 }
 
 elements.start.addEventListener("click", () => {
@@ -3085,15 +3171,27 @@ if (elements.finishInterrupted) {
     finishInterruptedMeeting().catch((error) => {
       console.error(error);
       setStatus("结束失败", "error");
+      setToolStatus(`结束中断会议 ${currentSessionId || "未知"} 失败：${error.message}`, "error");
+    });
+  });
+}
+if (elements.finishSelectedInterrupted) {
+  elements.finishSelectedInterrupted.addEventListener("click", () => {
+    const sessionId = selectedSummarySessionId;
+    finishInterruptedMeeting(sessionId).catch((error) => {
+      console.error(error);
+      setStatus("结束中断会议失败", "error");
+      setToolStatus(`结束中断会议 ${sessionId || "未知"} 失败：${error.message}`, "error");
     });
   });
 }
 
 function handleMeetingLogExport(format = "md", layout = "sections") {
+  const sessionId = selectedSummarySessionId || currentSessionId;
   exportMeetingLog(format, layout).catch((error) => {
     console.error(error);
     setStatus("日志导出失败", "error");
-    setToolStatus(`日志导出失败：${error.message}`, "error");
+    setToolStatus(`会议 ${sessionId || "未知"} 日志导出失败：${error.message}`, "error");
   });
 }
 
@@ -3190,6 +3288,7 @@ if (elements.summarySession) {
     selectedSummarySessionStatus = selectedSummarySessionId ? (selected.dataset.status || "finished") : null;
     transcriptEditorData = null;
     renderTranscriptEditor();
+    updateInterruptedSessionControls();
     loadSummaryInfo(selectedSummarySessionId).catch((error) => {
       console.error(error);
       setStatus("总结信息加载失败", "error");

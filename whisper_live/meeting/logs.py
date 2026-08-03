@@ -77,6 +77,7 @@ class MeetingLogStore:
                 md_path = f"{stem}.md"
                 payload.setdefault("status", SESSION_INTERRUPTED if payload.get("status") == SESSION_ACTIVE else payload.get("status") or SESSION_INTERRUPTED)
                 payload.setdefault("connection_count", 1)
+                payload.setdefault("connection_generation", int(payload.get("connection_count") or 1))
                 payload.setdefault("audio_gaps", [])
                 payload.setdefault("timeline_offset_seconds", 0.0)
                 self.sessions[session_id] = {
@@ -156,6 +157,7 @@ class MeetingLogStore:
             "translation_provider": options.get("translation_provider") or "",
             "status": SESSION_ACTIVE,
             "connection_count": 1,
+            "connection_generation": 1,
             "timeline_offset_seconds": 0.0,
             "interrupted_at": None,
             "resumed_at": None,
@@ -224,6 +226,7 @@ class MeetingLogStore:
             payload["updated_at"] = now
             payload["resumed_at"] = now
             payload["connection_count"] = int(payload.get("connection_count") or 1) + 1
+            payload["connection_generation"] = payload["connection_count"]
             self.local_session_ids.add(session_id)
             payload["timeline_offset_seconds"] = round(offset, 3)
             if last_time:
@@ -235,7 +238,7 @@ class MeetingLogStore:
             self._write_record(record)
             return self.session_info(session_id)
 
-    def interrupt_session(self, session_id):
+    def interrupt_session(self, session_id, expected_generation=None):
         if not session_id:
             return None
         with self.lock:
@@ -244,6 +247,13 @@ class MeetingLogStore:
             if not record:
                 return None
             if record["payload"].get("status") == SESSION_FINISHED:
+                return self.session_info(session_id)
+            active_generation = int(
+                record["payload"].get("connection_generation")
+                or record["payload"].get("connection_count")
+                or 1
+            )
+            if expected_generation is not None and int(expected_generation) != active_generation:
                 return self.session_info(session_id)
             now = self.now_iso()
             record["payload"]["status"] = SESSION_INTERRUPTED
@@ -475,6 +485,11 @@ class MeetingLogStore:
                 "translation_count": len(record["payload"].get("translation_segments", [])),
                 "status": record["payload"].get("status"),
                 "connection_count": record["payload"].get("connection_count") or 1,
+                "connection_generation": (
+                    record["payload"].get("connection_generation")
+                    or record["payload"].get("connection_count")
+                    or 1
+                ),
                 "timeline_offset_seconds": record["payload"].get("timeline_offset_seconds") or 0.0,
                 "interrupted_at": record["payload"].get("interrupted_at"),
                 "resumed_at": record["payload"].get("resumed_at"),

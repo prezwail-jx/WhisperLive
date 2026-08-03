@@ -561,6 +561,21 @@ class TranscriptionServer:
             max(1.0, float(value)),
         )
 
+    def apply_standard_segmentation_profile(self, options):
+        profile = self.standard_segmentation_profile
+        if (
+            profile != "v2"
+            or not self.backend.is_faster_whisper()
+            or options.get("service_mode") == "accurate"
+        ):
+            return
+        options.update({
+            "same_output_threshold": 9,
+            "max_incomplete_segment_seconds": 12.0,
+            "sentence_completion_min_seconds": 3.0,
+            "segmentation_profile_v2": True,
+        })
+
     @staticmethod
     def _config_bool(value):
         if isinstance(value, bool):
@@ -1270,9 +1285,12 @@ class TranscriptionServer:
     def finalize_client_meeting_log(self, websocket, interrupted=False):
         client = self.client_manager.get_client(websocket) if self.client_manager else None
         session_id = getattr(client, "meeting_log_session_id", None)
+        connection_generation = getattr(client, "meeting_log_connection_generation", None)
         try:
             if interrupted:
-                return self.meeting_logs.interrupt_session(session_id)
+                return self.meeting_logs.interrupt_session(
+                    session_id, expected_generation=connection_generation,
+                )
             return self.meeting_logs.finish_session(session_id)
         except Exception as exc:
             logging.error("Failed to finalize meeting log: %s", exc)
@@ -1340,6 +1358,8 @@ class TranscriptionServer:
         funasr_final_refine=True,
     ):
         client: Optional[ServeClientBase] = None
+        translation_client = None
+        translation_thread = None
 
         if options.get("translation_mode") == "mixed_interpretation" and self.backend.is_faster_whisper():
             options["language"] = None
@@ -1349,8 +1369,6 @@ class TranscriptionServer:
         
         # Create translation queue if translation is enabled
         translation_queue = None
-        translation_client = None
-        translation_thread = None
         
         if enable_translation:
             target_language = options.get("target_language", "auto")
@@ -1568,6 +1586,7 @@ class TranscriptionServer:
                     min_segment_rms=options.get("min_segment_rms", 0.0015),
                     max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 0.0),
                     sentence_completion_min_seconds=options.get("sentence_completion_min_seconds", 0.0),
+                    segmentation_profile_v2=options.get("segmentation_profile_v2", False),
                     max_pending_audio_seconds=max_pending_audio_seconds,
                     min_transcription_chunk_seconds=options.get("min_transcription_chunk_seconds", 1.0),
                     cache_path=self.cache_path,
@@ -1582,6 +1601,7 @@ class TranscriptionServer:
                         and options.get("translation_mode") == "mixed_interpretation"
                     ),
                     asr_device_index=asr_device_index,
+                    defer_start=True,
                 )
 
                 logging.info("Running faster_whisper backend.")
@@ -1628,12 +1648,16 @@ class TranscriptionServer:
                 log_info = self.meeting_logs.resume_session(options, backend=self.backend)
             else:
                 log_info = self.meeting_logs.start_session(options, backend=self.backend)
-            client.meeting_log_session_id = log_info.get("session_id") if log_info else options.get("session_id") or options.get("uid")
-            client.meeting_log_timeline_offset_seconds = float((log_info or {}).get("timeline_offset_seconds") or 0.0)
+            if not log_info:
+                raise RuntimeError("meeting log session was not initialized")
         except Exception as exc:
-            logging.error("Failed to start meeting log session: %s", exc)
-            client.meeting_log_session_id = options.get("session_id") or options.get("uid")
-            client.meeting_log_timeline_offset_seconds = 0.0
+            self._reject_meeting_log_initialization(
+                websocket, options, client, translation_client, translation_thread, exc,
+            )
+            return False
+        client.meeting_log_session_id = log_info["session_id"]
+        client.meeting_log_timeline_offset_seconds = float(log_info.get("timeline_offset_seconds") or 0.0)
+        client.meeting_log_connection_generation = int(log_info.get("connection_generation") or log_info.get("connection_count") or 1)
         base_segment_processor = getattr(client, "segment_post_processor", None)
         client.segment_post_processor = functools.partial(
             self.process_client_segment,
@@ -1645,6 +1669,8 @@ class TranscriptionServer:
             translation_client.segment_post_processor = functools.partial(self.offset_client_segment, websocket)
         self.client_manager.add_client(websocket, client)
         self.client_manager.register_client_status(websocket, client, options, self.backend)
+        if self.backend.is_faster_whisper():
+            client.start(send_ready=False)
         try:
             websocket.send(json.dumps({
                 "uid": getattr(client, "client_uid", options.get("uid")),
@@ -1655,9 +1681,49 @@ class TranscriptionServer:
                 "resumed": bool(options.get("resume_session")),
                 "connection_count": (log_info or {}).get("connection_count") or 1,
                 "timeline_offset_seconds": getattr(client, "meeting_log_timeline_offset_seconds", 0.0),
+                "connection_generation": getattr(client, "meeting_log_connection_generation", 1),
             }))
         except Exception as exc:
             logging.debug("Failed to send meeting session ready metadata: %s", exc)
+        return True
+
+    @staticmethod
+    def _meeting_log_error_type(exc):
+        if isinstance(exc, KeyError):
+            return "session_not_found"
+        message = str(exc).lower()
+        if "finished" in message:
+            return "session_finished"
+        if "client_instance_id mismatch" in message:
+            return "client_instance_mismatch"
+        return "session_unreadable"
+
+    def _reject_meeting_log_initialization(
+        self, websocket, options, client, translation_client, translation_thread, exc,
+    ):
+        resumed = bool(options.get("resume_session"))
+        error_type = self._meeting_log_error_type(exc)
+        logging.error("Failed to %s meeting log session: %s", "resume" if resumed else "start", exc)
+        try:
+            websocket.send(json.dumps({
+                "uid": options.get("uid"),
+                "status": "ERROR",
+                "code": "SESSION_RESUME_FAILED" if resumed else "SESSION_START_FAILED",
+                "error_type": error_type,
+                "session_id": options.get("session_id") or options.get("uid"),
+            }))
+        except Exception as send_exc:
+            logging.debug("Failed to send meeting session initialization error: %s", send_exc)
+        if translation_client:
+            translation_client.cleanup()
+        if translation_thread:
+            translation_thread.join(timeout=2.0)
+        if client:
+            client.cleanup()
+        try:
+            websocket.close()
+        except Exception as close_exc:
+            logging.debug("Failed to close rejected meeting session: %s", close_exc)
 
     def _create_diarizer(self, options):
         """Create a SpeakerDiarizer if the client requested diarization.
@@ -1706,6 +1772,7 @@ class TranscriptionServer:
             logging.info("New client connected")
             options = websocket.recv()
             options = json.loads(options)
+            self.apply_standard_segmentation_profile(options)
             self.normalize_translation_draft_options(options, backend=self.backend)
             self.apply_meeting_hotwords(options)
             self.apply_default_hotwords(options)
@@ -1748,15 +1815,17 @@ class TranscriptionServer:
 
             if self.backend.is_tensorrt() and self.use_vad:
                 self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
-            self.initialize_client(websocket, options, faster_whisper_custom_model_path,
-                                   whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
-                                   funasr_model=funasr_model, funasr_device=funasr_device,
-                                   asr_device_index=asr_device_index,
-                                   funasr_mode=funasr_mode, funasr_punc_model=funasr_punc_model,
-                                   funasr_vad_model=funasr_vad_model,
-                                   funasr_final_model=funasr_final_model,
-                                   funasr_final_device=funasr_final_device,
-                                   funasr_final_refine=funasr_final_refine)
+            initialized = self.initialize_client(websocket, options, faster_whisper_custom_model_path,
+                                                 whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
+                                                 funasr_model=funasr_model, funasr_device=funasr_device,
+                                                 asr_device_index=asr_device_index,
+                                                 funasr_mode=funasr_mode, funasr_punc_model=funasr_punc_model,
+                                                 funasr_vad_model=funasr_vad_model,
+                                                 funasr_final_model=funasr_final_model,
+                                                 funasr_final_device=funasr_final_device,
+                                                 funasr_final_refine=funasr_final_refine)
+            if not initialized:
+                return False
             wl_metrics.track_connection_opened()
             return True
         except json.JSONDecodeError:
@@ -1876,6 +1945,7 @@ class TranscriptionServer:
             single_model=False,
             max_clients=4,
             max_connection_time=600,
+            standard_segmentation_profile="legacy",
             cache_path="~/.cache/whisper-live/",
             rest_port=8000,
             enable_rest=False,
@@ -1927,6 +1997,9 @@ class TranscriptionServer:
         self.asr_device_index = int(asr_device_index or 0)
         self.translation_device = translation_device
         self.backend = BackendType(backend)
+        if standard_segmentation_profile not in ("legacy", "v2"):
+            raise ValueError("standard_segmentation_profile must be 'legacy' or 'v2'")
+        self.standard_segmentation_profile = standard_segmentation_profile
         self.meeting_hotwords = MeetingHotwordStore(meeting_hotwords_dir)
         self.meeting_asr_corrections = MeetingAsrCorrectionStore(asr_corrections_dir)
         self.asr_corrections_file = asr_corrections_file
@@ -2552,6 +2625,10 @@ class TranscriptionServer:
                 backend = getattr(self, "backend", None)
                 if backend is not None and backend.is_faster_whisper() and hasattr(client, "wait_for_asr_finalization"):
                     asr_status = client.wait_for_asr_finalization(self.FINALIZATION_BUDGET_SECONDS)
+                if hasattr(client, "flush_pending_completed_segments"):
+                    released_segments = client.flush_pending_completed_segments(force=True)
+                    if released_segments:
+                        client.send_transcription_to_client(released_segments)
                 elapsed = time.monotonic() - started_at
                 remaining = max(0.0, self.FINALIZATION_BUDGET_SECONDS - elapsed)
                 translation_client = getattr(client, "translation_client", None)
@@ -2566,6 +2643,10 @@ class TranscriptionServer:
                     translation_timeout_count,
                     time.monotonic() - started_at,
                 )
+            elif hasattr(client, "flush_pending_completed_segments"):
+                released_segments = client.flush_pending_completed_segments(force=True)
+                if released_segments:
+                    client.send_transcription_to_client(released_segments)
 
             if hasattr(client, 'translation_client') and client.translation_client:
                 client.translation_client.cleanup()
