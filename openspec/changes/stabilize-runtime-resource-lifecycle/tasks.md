@@ -44,7 +44,7 @@
 ## 7. Runtime Diagnostics And Deployment Verification
 
 - [x] 7.1 Add bounded diagnostics or metrics for initialization rollback, cleanup duration, ASR join timeout, active/recent status counts, batch rejection/cancellation/timeout, and delivery failure.
-- [ ] 7.2 In the deployment container, run Python syntax checks and the directly affected base backend, batch inference, Faster-Whisper backend, server extended, and translation backend test modules.
+- [x] 7.2 In the deployment container, run Python syntax checks and the directly affected base backend, batch inference, Faster-Whisper backend, server extended, and translation backend test modules.
 - [ ] 7.3 Establish deployment baseline for RSS, Python threads, active/recent status counts, batch queue depth, translation queue depth, and `REALTIME_DROP` before validation.
 - [ ] 7.4 Run repeated connection churn, idle connection, normal finish, browser offline/reconnect, initialization failure, ready-send failure, and batch timeout scenarios; verify resources return near baseline after cleanup and TTL expiry.
 - [ ] 7.5 Run sustained multi-client validation for 30-60 minutes; compare latency, GPU behavior, queue depth, RSS, and thread count against baseline, then record the chosen batch capacity and join timeout.

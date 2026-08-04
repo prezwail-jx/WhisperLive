@@ -331,6 +331,9 @@ class ServeClientBase(object):
                 break
 
             if self.frames_np is None:
+                if self.asr_finalization_requested:
+                    self._finish_asr_finalization("completed")
+                    break
                 self.first_frame_event.wait()
                 continue
 
@@ -397,6 +400,7 @@ class ServeClientBase(object):
         self.asr_finalization_status = None
         self.asr_finalization_completed.clear()
         self.asr_finalization_requested = True
+        self.first_frame_event.set()
         logging.info("[ASR_FINALIZE_REQUESTED] uid=%s", self.client_uid)
 
     def _finish_asr_finalization(self, status="completed"):

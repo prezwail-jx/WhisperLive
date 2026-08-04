@@ -46,18 +46,18 @@
 
 ## 7. Production Routing And Runtime Configuration
 
-- [ ] 7.1 Document and apply an Nginx `/ws-standard` upstream keyed by `session_id`, with a legacy fallback key, strict no-cross-GPU retry behavior, and unchanged fixed `/ws-accurate` routing.
-- [ ] 7.2 Update maintained startup scripts and production examples so both GPU backends use `--max_connection_time 28800` and the same mounted `--meeting_logs_dir`.
-- [ ] 7.3 During deployment preflight, inspect the actual ignored Nginx file, container mounts, process arguments, log source paths, and active client counts instead of assuming repository example paths.
-- [ ] 7.4 With zero active meetings and explicit restart authorization, back up both source directories, run the migration into shared storage, update both mounts, run `nginx -t`, and restart/reload only the required existing services.
+- [x] 7.1 Document and apply an Nginx `/ws-standard` upstream keyed by `session_id`, with a legacy fallback key, strict no-cross-GPU retry behavior, and unchanged fixed `/ws-accurate` routing.
+- [x] 7.2 Update maintained startup scripts and production examples so both GPU backends use `--max_connection_time 28800` and the same mounted `--meeting_logs_dir`.
+- [x] 7.3 During deployment preflight, inspect the actual ignored Nginx file, container mounts, process arguments, log source paths, and active client counts instead of assuming repository example paths.
+- [x] 7.4 With zero active meetings and explicit restart authorization, back up both source directories, run the migration into shared storage, update both mounts, run `nginx -t`, and restart/reload only the required existing services.
 
 ## 8. Verification And Delivery
 
-- [ ] 8.1 In the deployment container, run `py_compile` for each changed Python module and at most the directly affected meeting-log, server, and ASR segmentation test modules.
-- [ ] 8.2 In the deployment container, run `node --check web/app.js` and validate the actual Nginx configuration with `nginx -t`.
+- [x] 8.1 In the deployment container, run `py_compile` for each changed Python module and at most the directly affected meeting-log, server, and ASR segmentation test modules.
+- [x] 8.2 In the deployment container, run `node --check web/app.js` and validate the actual Nginx configuration with `nginx -t`.
 - [ ] 8.3 Verify a GPU0 standard session and a GPU1 standard session each reconnect to their original GPU, keep prior captions, append increasing timestamps, and record one audio gap plus an incremented connection count.
 - [ ] 8.4 Verify an unavailable assigned GPU does not route that session to the other GPU and the browser reports interruption instead of a false ready state.
-- [ ] 8.5 Verify unified listing and Markdown/DOCX download for representative finished and interrupted logs from both GPUs, then finish one interrupted log and confirm editing/summary controls become available.
+- [x] 8.5 Verify unified listing and Markdown/DOCX download for representative finished and interrupted logs from both GPUs, then finish one interrupted log and confirm editing/summary controls become available.
 - [ ] 8.6 Verify non-accurate Chinese, English, and mixed-language nearfield sessions produce fewer short fragments without increased `REALTIME_DROP`, without routine extra ASR passes, and without a noticeable increase in live caption latency beyond the bounded coalescing delay.
 - [ ] 8.7 Compare segmentation diagnostics before and after tuning for low-energy drops, completion reasons, short-fragment merges, and duration-limit completions.
 - [ ] 8.8 Run `openspec validate stabilize-standard-session-reconnect`, `git diff --check`, `git status --short`, and review the complete related diff before delivery.

@@ -828,7 +828,7 @@ function normalizeLanguage(value) {
 }
 
 function hotwordApiBaseUrl() {
-  const serverUrl = elements.server.value.trim();
+  const serverUrl = elements.server.value.trim().split(/[?#]/, 1)[0];
   const toAdminBase = (url) => url
     .replace(/\/ws-gpu0\/?$/, "/admin-gpu0")
     .replace(/\/ws-gpu1\/?$/, "/admin-gpu1")

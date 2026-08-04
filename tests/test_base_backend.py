@@ -68,6 +68,11 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertAlmostEqual(client.no_speech_thresh, 0.6)
         self.assertTrue(client.clip_audio)
         self.assertEqual(client.same_output_threshold, 20)
+        self.assertAlmostEqual(client.min_segment_rms, 0.002)
+        self.assertAlmostEqual(client.sentence_completion_min_seconds, 4.0)
+        self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
+        self.assertAlmostEqual(client.max_pending_audio_seconds, 15.0)
+        self.assertIs(client.translation_queue, q)
 
     def test_cleanup_wakes_idle_worker_and_join_is_bounded(self):
         client = ConcreteServeClient(client_uid="test-uid", websocket=MagicMock())
@@ -88,11 +93,6 @@ class TestServeClientBaseInit(unittest.TestCase):
         client.send_transcription_to_client([{"text": "hello", "completed": True}])
         persisted.assert_called_once()
         cleanup.assert_called_once_with("source_delivery_failed")
-        self.assertAlmostEqual(client.min_segment_rms, 0.002)
-        self.assertAlmostEqual(client.sentence_completion_min_seconds, 4.0)
-        self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)
-        self.assertAlmostEqual(client.max_pending_audio_seconds, 15.0)
-        self.assertIs(client.translation_queue, q)
 
     def test_max_pending_audio_seconds_is_clamped(self):
         low = ConcreteServeClient(client_uid="low", websocket=MagicMock(), max_pending_audio_seconds=-5.0)

@@ -2692,7 +2692,7 @@ class TranscriptionServer:
         """
         client = self.client_manager.get_client(websocket)
         if client:
-            ended_by_client = bool(getattr(websocket, "whisperlive_end_of_audio", False))
+            ended_by_client = getattr(websocket, "whisperlive_end_of_audio", False) is True
             asr_status = "not_applicable"
             translation_status = "not_applicable"
             translation_timeout_count = 0
@@ -2724,7 +2724,7 @@ class TranscriptionServer:
                 if released_segments:
                     client.send_transcription_to_client(released_segments)
 
-            if getattr(client, "runtime_cleanup_started", False):
+            if getattr(client, "runtime_cleanup_started", False) is True:
                 return
             client.runtime_cleanup_started = True
             cleanup_started = time.monotonic()
