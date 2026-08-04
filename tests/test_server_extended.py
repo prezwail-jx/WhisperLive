@@ -722,6 +722,85 @@ class TestTranscriptionServerHandleNewConnection(unittest.TestCase):
         websocket.close.assert_called_once()
         self.assertFalse(self.server.client_manager.get_client(websocket))
 
+    @patch("whisper_live.server.threading.Thread")
+    @patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    @patch("whisper_live.backend.translation_backend.ServeClientTranslation")
+    def test_asr_setup_failure_cleans_translation_resources(self, mock_translation, mock_faster_client, mock_thread):
+        websocket = MagicMock()
+        translation_client = MagicMock()
+        translation_thread = MagicMock()
+        mock_translation.return_value = translation_client
+        mock_thread.return_value = translation_thread
+        mock_faster_client.side_effect = RuntimeError("ASR setup failed")
+
+        result = self.server.initialize_client(websocket, {
+            "uid": "uid-1", "language": "en", "task": "transcribe", "model": "small",
+            "enable_translation": True,
+        }, None, None, False)
+
+        self.assertIsNone(result)
+        translation_client.cleanup.assert_called_once()
+        translation_thread.join.assert_called_once_with(timeout=2.0)
+        websocket.close.assert_called_once()
+        self.assertFalse(self.server.client_manager.get_client(websocket))
+
+    @patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    def test_meeting_log_start_failure_does_not_register_or_send_ready(self, mock_faster_client):
+        websocket = MagicMock()
+        client = MagicMock(client_uid="uid-1", SERVER_READY="SERVER_READY")
+        mock_faster_client.return_value = client
+        self.server.meeting_logs = MagicMock()
+        self.server.meeting_logs.start_session.side_effect = RuntimeError("log storage unavailable")
+
+        result = self.server.initialize_client(websocket, {
+            "uid": "uid-1", "language": "en", "task": "transcribe", "model": "small",
+        }, None, None, False)
+
+        self.assertFalse(result)
+        client.cleanup.assert_called_once()
+        websocket.close.assert_called_once()
+        self.assertFalse(self.server.client_manager.get_client(websocket))
+        sent_messages = [json.loads(call.args[0]) for call in websocket.send.call_args_list]
+        self.assertTrue(all(message.get("message") != "SERVER_READY" for message in sent_messages))
+
+    @patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    def test_ready_delivery_failure_runs_registered_cleanup(self, mock_faster_client):
+        websocket = MagicMock()
+        websocket.send.side_effect = ConnectionError("closed")
+        client = MagicMock(client_uid="uid-1")
+        client.stop_and_join.return_value = True
+        mock_faster_client.return_value = client
+        self.server.meeting_logs = MagicMock()
+        self.server.meeting_logs.start_session.return_value = {"session_id": "session-1", "status": "active"}
+
+        result = self.server.initialize_client(websocket, {
+            "uid": "uid-1", "language": "en", "task": "transcribe", "model": "small",
+        }, None, None, False)
+
+        self.assertFalse(result)
+        client.stop_and_join.assert_called_once_with(timeout=2.0)
+        self.assertFalse(self.server.client_manager.get_client(websocket))
+
+    @patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
+    def test_session_vad_does_not_mutate_default_for_next_client(self, mock_faster_client):
+        first_client = MagicMock(client_uid="first", SERVER_READY="SERVER_READY")
+        second_client = MagicMock(client_uid="second", SERVER_READY="SERVER_READY")
+        mock_faster_client.side_effect = [first_client, second_client]
+        self.server.meeting_logs = MagicMock()
+        self.server.meeting_logs.start_session.side_effect = [
+            {"session_id": "first", "status": "active"},
+            {"session_id": "second", "status": "active"},
+        ]
+        first = {"uid": "first", "language": "en", "task": "transcribe", "model": "small"}
+        second = {"uid": "second", "language": "en", "task": "transcribe", "model": "small"}
+
+        self.assertTrue(self.server.initialize_client(MagicMock(), first, None, None, False, use_vad=False))
+        self.assertTrue(self.server.initialize_client(MagicMock(), second, None, None, False))
+
+        self.assertTrue(self.server.use_vad)
+        self.assertFalse(mock_faster_client.call_args_list[0].kwargs["use_vad"])
+        self.assertTrue(mock_faster_client.call_args_list[1].kwargs["use_vad"])
+
     @patch("whisper_live.backend.faster_whisper_backend.ServeClientFasterWhisper")
     def test_successful_resume_sends_ready_with_session_metadata(self, mock_faster_client):
         websocket = MagicMock()
@@ -779,6 +858,29 @@ class TestTranscriptionServerCleanup(unittest.TestCase):
         self.server.meeting_logs.interrupt_session.assert_called_once_with(
             "session-1", expected_generation=2,
         )
+
+    def test_join_timeout_releases_active_client_slot(self):
+        ws = MagicMock()
+        client = MagicMock()
+        client.client_uid = "uid-1"
+        client.stop_and_join.return_value = False
+        self.server.client_manager.add_client(ws, client)
+
+        self.server.cleanup(ws)
+
+        client.stop_and_join.assert_called_once_with(timeout=2.0)
+        self.assertFalse(self.server.client_manager.get_client(ws))
+
+    def test_shutdown_batch_worker_stops_and_clears_shared_reference(self):
+        from whisper_live.backend.faster_whisper_backend import ServeClientFasterWhisper
+
+        worker = MagicMock()
+        ServeClientFasterWhisper.BATCH_WORKER = worker
+
+        self.server._shutdown_batch_worker()
+
+        worker.stop.assert_called_once_with(timeout=5.0)
+        self.assertIsNone(ServeClientFasterWhisper.BATCH_WORKER)
 
     def test_cleanup_end_of_audio_sends_session_finalized_after_drain(self):
         events = []

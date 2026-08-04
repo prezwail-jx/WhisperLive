@@ -2852,3 +2852,28 @@ class TestServeClientTranslationBuffer(unittest.TestCase):
             ["first", "seg1", "seg2", "seg3", "seg4", "seg5", "seg6"],
         )
         self.assertEqual(client.translation_queue.qsize(), 0)
+
+
+class TestTranslationDeliveryFailure(unittest.TestCase):
+    def make_client(self):
+        with mock.patch.object(ServeClientTranslation, "load_translation_model"):
+            return ServeClientTranslation(
+                client_uid="client-delivery",
+                websocket=mock.Mock(),
+                translation_queue=queue.Queue(),
+            )
+
+    def test_send_failure_persists_before_scheduling_one_cleanup(self):
+        client = self.make_client()
+        client.websocket.send.side_effect = ConnectionError("closed")
+        persisted = mock.Mock()
+        cleanup = mock.Mock()
+        client.admin_status_callback = persisted
+        client.delivery_failure_callback = cleanup
+        segments = [{"text": "translated", "completed": True}]
+
+        client.send_translation_to_client(segments)
+
+        persisted.assert_called_once_with(segments)
+        cleanup.assert_called_once_with("translation_delivery_failed")
+        self.assertTrue(client.exit)

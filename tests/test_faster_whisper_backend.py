@@ -219,6 +219,27 @@ class TestServeClientFasterWhisperSingleModelInit(unittest.TestCase):
         self.assertEqual(captured[0].initial_prompt, "meeting prompt")
         self.assertEqual(captured[0].hotwords, "Whisper small OpenAI")
 
+    @mock.patch("whisper_live.batch_inference.BatchRequest")
+    def test_batch_wait_timeout_cancels_request(self, mock_request_class):
+        request = mock.Mock()
+        request.future.wait.return_value = False
+        request.error = TimeoutError("Batch inference request timed out")
+        mock_request_class.return_value = request
+
+        class FakeBatchWorker:
+            def submit(self, submitted):
+                self.request = submitted
+
+        worker = FakeBatchWorker()
+        ServeClientFasterWhisper.BATCH_WORKER = worker
+        client = ServeClientFasterWhisper(websocket=mock.Mock(), model=None, client_uid="client")
+
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
+            client._submit_batch_transcription([], "en")
+
+        request.cancel.assert_called_once()
+        self.assertIs(worker.request, request)
+
     def make_mixed_language_client(self):
         return ServeClientFasterWhisper(
             websocket=mock.Mock(),

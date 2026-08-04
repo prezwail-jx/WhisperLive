@@ -249,3 +249,36 @@ class TestBatchInferenceWorker(unittest.TestCase):
         self.worker.submit(request)
         time.sleep(0.3)
         self.mock_transcriber.transcribe.assert_not_called()
+
+    def test_stop_signals_queued_request_with_stopped_error(self):
+        worker = BatchInferenceWorker(self.mock_transcriber, max_pending_requests=1)
+        request = BatchRequest(audio=self._make_audio(), use_vad=False)
+        worker.submit(request)
+
+        self.assertTrue(worker.stop())
+        self.assertTrue(request.future.is_set())
+        self.assertTrue(request.cancelled.is_set())
+        self.assertIsInstance(request.error, RuntimeError)
+        self.assertIn("stopped", str(request.error))
+
+    def test_inflight_cancellation_suppresses_result_delivery(self):
+        request = BatchRequest(audio=self._make_audio(), use_vad=False)
+
+        def cancel_during_transcription(*_args, **_kwargs):
+            request.cancel(RuntimeError("client disconnected"))
+            return [MagicMock()], MagicMock()
+
+        self.mock_transcriber.transcribe.side_effect = cancel_during_transcription
+        self.worker._process_single(request)
+
+        self.assertTrue(request.cancelled.is_set())
+        self.assertTrue(request.future.is_set())
+        self.assertIsInstance(request.error, RuntimeError)
+
+    def test_quality_gate_accepts_valid_output_and_rejects_only_non_silence(self):
+        valid = MagicMock(compression_ratio=1.2)
+        low_quality = MagicMock(compression_ratio=3.0)
+
+        self.assertFalse(self.worker._needs_temperature_fallback([valid], -0.6, 0.1))
+        self.assertTrue(self.worker._needs_temperature_fallback([low_quality], -0.6, 0.1))
+        self.assertFalse(self.worker._needs_temperature_fallback([low_quality], -1.2, 0.8))

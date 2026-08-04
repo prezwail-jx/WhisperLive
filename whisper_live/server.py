@@ -2642,16 +2642,19 @@ class TranscriptionServer:
             ) as server:
                 server.serve_forever()
         finally:
-            worker = getattr(ServeClientBase, "BATCH_WORKER", None)
-            try:
-                from whisper_live.backend.faster_whisper_backend import ServeClientFasterWhisper
-                worker = ServeClientFasterWhisper.BATCH_WORKER
-                if worker:
-                    worker.stop(timeout=5.0)
-                ServeClientFasterWhisper.BATCH_WORKER = None
-            except Exception as exc:
-                logging.warning("[BATCH_WORKER_SHUTDOWN_FAILED] %s", exc)
+            self._shutdown_batch_worker()
             self.meeting_summary.close()
+
+    @staticmethod
+    def _shutdown_batch_worker():
+        try:
+            from whisper_live.backend.faster_whisper_backend import ServeClientFasterWhisper
+            worker = ServeClientFasterWhisper.BATCH_WORKER
+            if worker:
+                worker.stop(timeout=5.0)
+            ServeClientFasterWhisper.BATCH_WORKER = None
+        except Exception as exc:
+            logging.warning("[BATCH_WORKER_SHUTDOWN_FAILED] %s", exc)
 
     def voice_activity(self, websocket, frame_np):
         """
