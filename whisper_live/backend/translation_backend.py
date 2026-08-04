@@ -3723,6 +3723,9 @@ class ServeClientTranslation(ServeClientBase):
         except Exception as e:
             logging.error(f"[ERROR]: Sending translation data to client: {e}")
             self.exit = True
+            callback = getattr(self, "delivery_failure_callback", None)
+            if callback:
+                callback("translation_delivery_failed")
 
     def speech_to_text(self):
         """

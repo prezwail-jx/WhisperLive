@@ -1129,6 +1129,24 @@ class TestClientManagerAdminStatus(unittest.TestCase):
         status = self.cm.get_client_status_snapshot()["clients"][0]
         self.assertFalse(status["connected"])
         self.assertIsNotNone(status["disconnected_at"])
+        self.assertNotIn(self.ws, self.cm.client_status)
+
+    def test_recent_snapshot_expires_and_capacity_is_bounded(self):
+        self.cm.RECENT_STATUS_TTL_SECONDS = 0
+        self.cm.register_client_status(self.ws, self.client, self.options, BackendType.FASTER_WHISPER)
+        self.cm.mark_client_disconnected(self.ws)
+        self.assertEqual(self.cm.get_client_status_snapshot()["clients"], [])
+
+        self.cm.RECENT_STATUS_TTL_SECONDS = 600
+        self.cm.RECENT_STATUS_MAX_RECORDS = 1
+        for uid in ("uid-1", "uid-2"):
+            websocket = MagicMock()
+            client = MagicMock(client_uid=uid)
+            self.cm.register_client_status(websocket, client, dict(self.options, uid=uid), BackendType.FASTER_WHISPER)
+            self.cm.mark_client_disconnected(websocket)
+        snapshots = self.cm.get_client_status_snapshot()["clients"]
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["uid"], "uid-2")
 
     def test_same_client_instance_replaces_disconnected_snapshot(self):
         self.options["client_instance_id"] = "browser-1"

@@ -244,7 +244,7 @@ class ServeClientFunASR(ServeClientBase):
                 logging.info("Exiting speech to text thread")
                 break
             if self.frames_np is None:
-                time.sleep(0.05)
+                self.first_frame_event.wait()
                 continue
 
             input_bytes, duration = self.get_audio_chunk_for_processing()

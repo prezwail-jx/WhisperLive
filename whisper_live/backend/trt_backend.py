@@ -212,7 +212,7 @@ class ServeClientTensorRT(ServeClientBase):
                 break
 
             if self.frames_np is None:
-                time.sleep(0.02)    # wait for any audio to arrive
+                self.first_frame_event.wait()
                 continue
 
             self.clip_audio_if_no_valid_segment()

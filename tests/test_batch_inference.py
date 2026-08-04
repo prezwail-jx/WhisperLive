@@ -233,3 +233,19 @@ class TestBatchInferenceWorker(unittest.TestCase):
         for size in observed_batch_sizes:
             self.assertLessEqual(size, 2)
         self.assertTrue(all(req.future.is_set() for req in requests))
+
+    def test_submit_rejects_when_queue_is_full(self):
+        worker = BatchInferenceWorker(self.mock_transcriber, max_batch_size=1, max_pending_requests=1)
+        worker.submit(BatchRequest(audio=self._make_audio(), use_vad=False))
+        request = BatchRequest(audio=self._make_audio(), use_vad=False)
+        with self.assertRaisesRegex(RuntimeError, "full"):
+            worker.submit(request)
+        self.assertTrue(request.future.is_set())
+        self.assertTrue(request.cancelled.is_set())
+
+    def test_cancelled_request_is_not_transcribed(self):
+        request = BatchRequest(audio=self._make_audio(), use_vad=False)
+        request.cancel()
+        self.worker.submit(request)
+        time.sleep(0.3)
+        self.mock_transcriber.transcribe.assert_not_called()

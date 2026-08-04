@@ -233,6 +233,8 @@ class ServeClientBase(object):
         self.current_out = ""
         self.prev_out = ""
         self.exit = False
+        # Workers block until the first audio frame instead of polling an idle client.
+        self.first_frame_event = threading.Event()
         self.same_output_count = 0
         self.transcript = []
         self.end_time_for_same_output = None
@@ -242,6 +244,7 @@ class ServeClientBase(object):
         self.asr_finalization_completed = threading.Event()
         self.asr_finalization_status = None
         self.admin_status_callback = None
+        self.delivery_failure_callback = None
         self.opencc_converter = self._create_opencc_converter()
         self.stable_utterance_ids = bool(stable_utterance_ids)
         self.utterance_sequence = 0
@@ -327,15 +330,13 @@ class ServeClientBase(object):
                 logging.info("Exiting speech to text thread")
                 break
 
+            if self.frames_np is None:
+                self.first_frame_event.wait()
+                continue
+
             released_segments = self.flush_pending_completed_segments()
             if released_segments:
                 self.send_transcription_to_client(released_segments)
-
-            if self.frames_np is None:
-                if self.asr_finalization_requested:
-                    self._finish_asr_finalization("completed")
-                time.sleep(0.05)
-                continue
 
             if self.clip_audio:
                 self.clip_audio_if_no_valid_segment()
@@ -616,6 +617,7 @@ class ServeClientBase(object):
             self.frames_np = np.concatenate((self.frames_np, frame_np), axis=0)
         self.trim_pending_audio_if_needed()
         self.lock.release()
+        self.first_frame_event.set()
 
     def trim_pending_audio_if_needed(self):
         if self.frames_np is None or self.max_pending_audio_seconds <= 0:
@@ -744,6 +746,11 @@ class ServeClientBase(object):
                     processed.append(seg)
             segments = processed
 
+        if self.admin_status_callback:
+            try:
+                self.admin_status_callback(segments)
+            except Exception as e:
+                logging.error(f"[ERROR]: admin status update failed: {e}")
         try:
             self.websocket.send(
                 json.dumps({
@@ -751,15 +758,12 @@ class ServeClientBase(object):
                     "segments": segments,
                 })
             )
-            if self.admin_status_callback:
-                try:
-                    self.admin_status_callback(segments)
-                except Exception as e:
-                    logging.error(f"[ERROR]: admin status update failed: {e}")
             for seg in segments:
                 wl_metrics.track_segment_emitted(completed=seg.get("completed", False))
         except Exception as e:
             logging.error(f"[ERROR]: Sending data to client: {e}")
+            if self.delivery_failure_callback:
+                self.delivery_failure_callback("source_delivery_failed")
 
     def disconnect(self):
         """
@@ -785,6 +789,16 @@ class ServeClientBase(object):
         """
         logging.info("Cleaning up.")
         self.exit = True
+        self.first_frame_event.set()
+
+    def stop_and_join(self, timeout=2.0):
+        """Cooperatively stop the worker and report whether its join completed."""
+        self.cleanup()
+        thread = getattr(self, "trans_thread", None)
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, float(timeout)))
+            return not thread.is_alive()
+        return True
 
     def get_segment_no_speech_prob(self, segment):
         return getattr(segment, "no_speech_prob", 0)

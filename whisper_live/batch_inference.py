@@ -84,6 +84,13 @@ class BatchRequest:
     result: Optional[Any] = None
     info: Optional[Any] = None
     error: Optional[Exception] = None
+    cancelled: threading.Event = field(default_factory=threading.Event)
+
+    def cancel(self, error=None):
+        self.cancelled.set()
+        if error is not None:
+            self.error = error
+        self.future.set()
 
 
 class BatchInferenceWorker:
@@ -117,11 +124,13 @@ class BatchInferenceWorker:
         transcriber,
         max_batch_size: int = 8,
         batch_window_ms: int = 50,
+        max_pending_requests: Optional[int] = None,
     ):
         self.transcriber = transcriber
         self.max_batch_size = max_batch_size
         self.batch_window_ms = batch_window_ms
-        self._queue: queue.Queue = queue.Queue()
+        self.max_pending_requests = max_pending_requests or max(1, max_batch_size * 2)
+        self._queue: queue.Queue = queue.Queue(maxsize=self.max_pending_requests)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -134,11 +143,14 @@ class BatchInferenceWorker:
             f"window={self.batch_window_ms}ms)"
         )
 
-    def stop(self):
+    def stop(self, timeout=5.0):
         """Signal the worker to stop and wait for it to finish."""
         self._stop_event.set()
+        self._drain_stopped_requests()
         if self._thread:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=timeout)
+        self._drain_stopped_requests()
+        return not self._thread or not self._thread.is_alive()
 
     def submit(self, request: BatchRequest):
         """Submit an inference request to the batch queue.
@@ -148,7 +160,22 @@ class BatchInferenceWorker:
                 then call ``request.future.wait()`` to block until the
                 result is ready.
         """
-        self._queue.put(request)
+        if self._stop_event.is_set():
+            request.cancel(RuntimeError("Batch inference worker is stopped"))
+            raise request.error
+        try:
+            self._queue.put(request, timeout=0.1)
+        except queue.Full as exc:
+            request.cancel(RuntimeError("Batch inference queue is full"))
+            raise request.error from exc
+
+    def _drain_stopped_requests(self):
+        while True:
+            try:
+                request = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            request.cancel(RuntimeError("Batch inference worker is stopped"))
 
     # -------------------------------------------------------------------------
     # Worker loop
@@ -162,7 +189,8 @@ class BatchInferenceWorker:
             # Block until first request arrives
             try:
                 first = self._queue.get(timeout=0.5)
-                batch.append(first)
+                if not first.cancelled.is_set():
+                    batch.append(first)
             except queue.Empty:
                 continue
 
@@ -174,11 +202,14 @@ class BatchInferenceWorker:
                     break
                 try:
                     item = self._queue.get(timeout=remaining)
-                    batch.append(item)
+                    if not item.cancelled.is_set():
+                        batch.append(item)
                 except queue.Empty:
                     break
 
             # Process the collected batch
+            if not batch:
+                continue
             try:
                 self._process_batch(batch)
             except Exception as e:
@@ -187,6 +218,7 @@ class BatchInferenceWorker:
                     if not req.future.is_set():
                         req.error = e
                         req.future.set()
+        self._drain_stopped_requests()
 
     # -------------------------------------------------------------------------
     # Batch processing
@@ -195,6 +227,30 @@ class BatchInferenceWorker:
     @staticmethod
     def _prompt_signature(req: BatchRequest):
         return (req.initial_prompt or "", req.hotwords or "")
+
+    @staticmethod
+    def _needs_temperature_fallback(segments, avg_logprob, no_speech_prob):
+        if no_speech_prob > 0.6 and avg_logprob < -1.0:
+            return False
+        return bool(segments) and (
+            avg_logprob < -1.0
+            or any(getattr(segment, "compression_ratio", 0.0) > 2.4 for segment in segments)
+        )
+
+    def _retry_low_quality_request(self, req):
+        result, info = self.transcriber.transcribe(
+            req.audio,
+            language=req.language,
+            task=req.task,
+            initial_prompt=req.initial_prompt,
+            hotwords=req.hotwords,
+            vad_filter=req.use_vad,
+            vad_parameters=req.vad_parameters if req.use_vad else None,
+            word_timestamps=req.word_timestamps,
+            temperature=[0.2, 0.4, 0.6],
+            beam_size=1,
+        )
+        return list(result) if result is not None else [], info
 
     def _process_batch(self, batch: List[BatchRequest]):
         """Dispatch to single or multi-item processing."""
@@ -229,6 +285,8 @@ class BatchInferenceWorker:
         This path is used when only one request is available in the batch
         window, ensuring identical behavior to the non-batched code path.
         """
+        if req.cancelled.is_set():
+            return
         try:
             result, info = self.transcriber.transcribe(
                 req.audio,
@@ -246,7 +304,8 @@ class BatchInferenceWorker:
         except Exception as e:
             req.error = e
         finally:
-            req.future.set()
+            if not req.cancelled.is_set():
+                req.future.set()
 
     def _process_multi(self, batch: List[BatchRequest]):
         """Batched GPU path: encode + generate for multiple sessions at once.
@@ -261,6 +320,8 @@ class BatchInferenceWorker:
         # Step 1: Per-item CPU preprocessing (VAD + feature extraction)
         preprocessed = []
         for req in batch:
+            if req.cancelled.is_set():
+                continue
             try:
                 audio = req.audio
                 speech_chunks = None
@@ -277,13 +338,15 @@ class BatchInferenceWorker:
                     # No speech detected — return empty result immediately
                     req.result = []
                     req.info = self._make_info(req, 0.0, 0.0)
-                    req.future.set()
+                    if not req.cancelled.is_set():
+                        req.future.set()
                     continue
 
                 duration = audio.shape[0] / self.transcriber.feature_extractor.sampling_rate
                 features = self.transcriber.feature_extractor(audio)
                 features = pad_or_trim(features)  # -> [n_mels, 3000]
-                preprocessed.append((req, features, audio, duration, speech_chunks))
+                if not req.cancelled.is_set():
+                    preprocessed.append((req, features, audio, duration, speech_chunks))
             except Exception as e:
                 req.error = e
                 req.future.set()
@@ -358,6 +421,8 @@ class BatchInferenceWorker:
             # Step 5: Per-item segment parsing and result dispatch
             for i, (req, features, audio, duration, speech_chunks) in enumerate(preprocessed):
                 try:
+                    if req.cancelled.is_set():
+                        continue
                     tokenizer = tokenizers_list[i]
                     gen_result = results[i]
 
@@ -396,15 +461,25 @@ class BatchInferenceWorker:
                             temperature=0.0,
                         ))
 
-                    req.result = segments
-                    req.info = self._make_info(
-                        req, duration, duration,
-                        language=resolved_languages[i],
-                    )
+                    if gen_result.no_speech_prob > 0.6 and avg_logprob < -1.0:
+                        segments = []
+                    elif self._needs_temperature_fallback(segments, avg_logprob, gen_result.no_speech_prob):
+                        logging.info("[BatchInference] Retrying low-quality request with temperature fallback")
+                        segments, retry_info = self._retry_low_quality_request(req)
+                        if retry_info is not None:
+                            resolved_languages[i] = getattr(retry_info, "language", resolved_languages[i])
+
+                    if not req.cancelled.is_set():
+                        req.result = segments
+                        req.info = self._make_info(
+                            req, duration, duration,
+                            language=resolved_languages[i],
+                        )
                 except Exception as e:
                     req.error = e
                 finally:
-                    req.future.set()
+                    if not req.cancelled.is_set():
+                        req.future.set()
 
         except Exception as e:
             logging.error(f"[BatchInference] GPU batch error: {e}")

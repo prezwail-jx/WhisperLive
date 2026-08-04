@@ -68,6 +68,26 @@ class TestServeClientBaseInit(unittest.TestCase):
         self.assertAlmostEqual(client.no_speech_thresh, 0.6)
         self.assertTrue(client.clip_audio)
         self.assertEqual(client.same_output_threshold, 20)
+
+    def test_cleanup_wakes_idle_worker_and_join_is_bounded(self):
+        client = ConcreteServeClient(client_uid="test-uid", websocket=MagicMock())
+        client.trans_thread = threading.Thread(target=client.speech_to_text)
+        client.trans_thread.start()
+        self.assertTrue(client.trans_thread.is_alive())
+        self.assertTrue(client.stop_and_join(timeout=1.0))
+        self.assertFalse(client.trans_thread.is_alive())
+
+    def test_source_delivery_failure_runs_callback_after_persistence(self):
+        websocket = MagicMock()
+        websocket.send.side_effect = RuntimeError("closed")
+        client = ConcreteServeClient(client_uid="test-uid", websocket=websocket)
+        persisted = MagicMock()
+        cleanup = MagicMock()
+        client.admin_status_callback = persisted
+        client.delivery_failure_callback = cleanup
+        client.send_transcription_to_client([{"text": "hello", "completed": True}])
+        persisted.assert_called_once()
+        cleanup.assert_called_once_with("source_delivery_failed")
         self.assertAlmostEqual(client.min_segment_rms, 0.002)
         self.assertAlmostEqual(client.sentence_completion_min_seconds, 4.0)
         self.assertAlmostEqual(client.min_transcription_chunk_seconds, 2.5)

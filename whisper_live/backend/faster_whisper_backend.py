@@ -444,11 +444,20 @@ class ServeClientFasterWhisper(ServeClientBase):
             vad_parameters=self.vad_parameters if self.use_vad else None,
             word_timestamps=self.word_timestamps,
         )
+        self.batch_request = request
         ServeClientFasterWhisper.BATCH_WORKER.submit(request)
-        request.future.wait(timeout=30)
+        if not request.future.wait(timeout=30):
+            request.cancel(TimeoutError("Batch inference request timed out"))
+            raise request.error
         if request.error:
             raise request.error
         return self._materialize_result(request.result), request.info
+
+    def cleanup(self):
+        request = getattr(self, "batch_request", None)
+        if request and not request.future.is_set():
+            request.cancel(RuntimeError("ASR client disconnected"))
+        super().cleanup()
 
     def _direct_transcription(self, input_sample, language):
         if ServeClientFasterWhisper.SINGLE_MODEL:

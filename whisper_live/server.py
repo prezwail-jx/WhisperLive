@@ -50,6 +50,9 @@ logging.basicConfig(level=logging.INFO)
 
 
 class ClientManager:
+    RECENT_STATUS_TTL_SECONDS = 600
+    RECENT_STATUS_MAX_RECORDS = 100
+
     def __init__(self, max_clients=4, max_connection_time=600):
         """
         Initializes the ClientManager with specified limits on client connections and connection durations.
@@ -65,6 +68,23 @@ class ClientManager:
         self.max_connection_time = max_connection_time
         self.lock = threading.Lock()
         self.client_status = {}
+        self.recent_client_status = {}
+
+    def _purge_recent_statuses_locked(self, now=None):
+        now = time.time() if now is None else now
+        expired = [key for key, status in self.recent_client_status.items()
+                   if now - status.get("disconnected_at", now) >= self.RECENT_STATUS_TTL_SECONDS]
+        for key in expired:
+            del self.recent_client_status[key]
+        overflow = len(self.recent_client_status) - self.RECENT_STATUS_MAX_RECORDS
+        if overflow > 0:
+            oldest = sorted(self.recent_client_status, key=lambda key: self.recent_client_status[key].get("disconnected_at", 0))
+            for key in oldest[:overflow]:
+                del self.recent_client_status[key]
+
+    @staticmethod
+    def _recent_status_key(status):
+        return status.get("client_instance_id") or status.get("uid")
 
     @staticmethod
     def _latest_segment_text(segments):
@@ -119,6 +139,7 @@ class ClientManager:
             "last_translation_text": "",
         }
         with self.lock:
+            self._purge_recent_statuses_locked(now)
             instance_id = status.get("client_instance_id")
             if instance_id:
                 for old_websocket, old_status in list(self.client_status.items()):
@@ -129,6 +150,7 @@ class ClientManager:
                     if old_status.get("connected"):
                         continue
                     del self.client_status[old_websocket]
+                self.recent_client_status.pop(instance_id, None)
             self.client_status[websocket] = status
 
     def update_client_message(self, websocket, message_type, segments):
@@ -162,11 +184,17 @@ class ClientManager:
                 status["connected"] = False
                 status["disconnected_at"] = now
                 status["last_activity_at"] = now
+                snapshot = dict(status)
+                self.recent_client_status[self._recent_status_key(snapshot)] = snapshot
+                del self.client_status[websocket]
+                self._purge_recent_statuses_locked(now)
 
     def get_client_status_snapshot(self):
         now = time.time()
         with self.lock:
+            self._purge_recent_statuses_locked(now)
             statuses = [dict(status) for status in self.client_status.values()]
+            statuses.extend(dict(status) for status in self.recent_client_status.values())
         for status in statuses:
             connected_at = status.get("connected_at") or now
             last_activity_at = status.get("last_activity_at") or connected_at
@@ -184,6 +212,7 @@ class ClientManager:
 
     def delete_disconnected_client_status(self, uid):
         with self.lock:
+            self._purge_recent_statuses_locked()
             for websocket, status in list(self.client_status.items()):
                 if status.get("uid") != uid:
                     continue
@@ -191,6 +220,10 @@ class ClientManager:
                     return "connected"
                 del self.client_status[websocket]
                 return "deleted"
+            for key, status in list(self.recent_client_status.items()):
+                if status.get("uid") == uid:
+                    del self.recent_client_status[key]
+                    return "deleted"
         return "not_found"
 
     def add_client(self, websocket, client):
@@ -1296,6 +1329,32 @@ class TranscriptionServer:
             logging.error("Failed to finalize meeting log: %s", exc)
             return None
 
+    def _cleanup_unregistered_connection(self, websocket, client=None, translation_client=None,
+                                         translation_thread=None, reason="initialization_failure"):
+        """Release resources that were allocated before manager ownership is established."""
+        logging.warning("[RUNTIME_CLEANUP] reason=%s uid=%s", reason, getattr(client, "client_uid", ""))
+        if translation_client:
+            translation_client.cleanup()
+        if translation_thread and translation_thread is not threading.current_thread():
+            translation_thread.join(timeout=2.0)
+        if client:
+            joined = client.stop_and_join(timeout=2.0)
+            if not joined:
+                logging.warning("[RUNTIME_ASR_JOIN_TIMEOUT] uid=%s", getattr(client, "client_uid", ""))
+        try:
+            websocket.close()
+        except Exception as exc:
+            logging.debug("Failed to close runtime connection: %s", exc)
+
+    def schedule_cleanup(self, websocket, reason):
+        """Run cleanup once outside a worker thread after a delivery failure."""
+        client = self.client_manager.get_client(websocket) if self.client_manager else None
+        if not client or getattr(client, "runtime_cleanup_scheduled", False):
+            return
+        client.runtime_cleanup_scheduled = True
+        logging.warning("[RUNTIME_DELIVERY_FAILURE] reason=%s uid=%s", reason, getattr(client, "client_uid", ""))
+        threading.Thread(target=self.cleanup, args=(websocket,), daemon=True).start()
+
     def generate_meeting_summary(self, session_id, template="auto", custom_template_id=None):
         if hasattr(self.meeting_logs, "refresh_sessions"):
             self.meeting_logs.refresh_sessions(force=True)
@@ -1355,7 +1414,7 @@ class TranscriptionServer:
         funasr_model=None, funasr_device="auto", asr_device_index=0,
         funasr_mode="sensevoice", funasr_punc_model=None, funasr_vad_model=None,
         funasr_final_model="model/funasr/SenseVoiceSmall", funasr_final_device=None,
-        funasr_final_refine=True,
+        funasr_final_refine=True, use_vad=None,
     ):
         client: Optional[ServeClientBase] = None
         translation_client = None
@@ -1450,7 +1509,10 @@ class TranscriptionServer:
                     "message": "TensorRT-LLM not supported on Server yet. "
                                "Reverting to available backend: 'faster_whisper'"
                 }))
-                self.backend = BackendType.FASTER_WHISPER
+                self._cleanup_unregistered_connection(
+                    websocket, client, translation_client, translation_thread, "tensorrt_initialization_failure",
+                )
+                return False
         
         if self.backend.is_openvino():
             try:
@@ -1471,14 +1533,11 @@ class TranscriptionServer:
                 logging.info("Running OpenVINO backend.")
             except Exception as e:
                 logging.error(f"OpenVINO not supported: {e}")
-                self.backend = BackendType.FASTER_WHISPER
                 self.client_uid = options["uid"]
-                websocket.send(json.dumps({
-                    "uid": self.client_uid,
-                    "status": "WARNING",
-                    "message": "OpenVINO not supported on Server yet. "
-                                "Reverting to available backend: 'faster_whisper'"
-                }))
+                self._cleanup_unregistered_connection(
+                    websocket, client, translation_client, translation_thread, "openvino_initialization_failure",
+                )
+                return False
 
         if self.backend.is_mlx_whisper():
             try:
@@ -1500,14 +1559,10 @@ class TranscriptionServer:
                 logging.info("Running MLX Whisper backend.")
             except Exception as e:
                 logging.error(f"MLX Whisper not supported: {e}")
-                self.client_uid = options["uid"]
-                websocket.send(json.dumps({
-                    "uid": self.client_uid,
-                    "status": "ERROR",
-                    "message": str(e)
-                }))
-                websocket.close()
-                raise
+                self._cleanup_unregistered_connection(
+                    websocket, client, translation_client, translation_thread, "mlx_initialization_failure",
+                )
+                return False
 
         if self.backend.is_funasr():
             try:
@@ -1536,7 +1591,7 @@ class TranscriptionServer:
                     same_output_threshold=options.get("same_output_threshold", 3),
                     min_segment_rms=options.get("min_segment_rms", 0.0015),
                     max_incomplete_segment_seconds=options.get("max_incomplete_segment_seconds", 6.0),
-                    use_vad=self.use_vad,
+                    use_vad=self.use_vad if use_vad is None else use_vad,
                     translation_queue=translation_queue,
                     hotwords=options.get("hotwords"),
                     diarization=self._create_diarizer(options),
@@ -1544,14 +1599,10 @@ class TranscriptionServer:
                 logging.info("Running FunASR backend.")
             except Exception as e:
                 logging.error(f"FunASR not supported: {e}")
-                self.client_uid = options["uid"]
-                websocket.send(json.dumps({
-                    "uid": self.client_uid,
-                    "status": "ERROR",
-                    "message": str(e)
-                }))
-                websocket.close()
-                raise
+                self._cleanup_unregistered_connection(
+                    websocket, client, translation_client, translation_thread, "funasr_initialization_failure",
+                )
+                return False
 
         try:
             if self.backend.is_faster_whisper():
@@ -1577,7 +1628,7 @@ class TranscriptionServer:
                     model=options["model"],
                     initial_prompt=options.get("initial_prompt"),
                     vad_parameters=options.get("vad_parameters"),
-                    use_vad=self.use_vad,
+                    use_vad=self.use_vad if use_vad is None else use_vad,
                     single_model=self.single_model,
                     send_last_n_segments=options.get("send_last_n_segments", 10),
                     no_speech_thresh=options.get("no_speech_thresh", 0.45),
@@ -1625,6 +1676,9 @@ class TranscriptionServer:
                     ServeClientFasterWhisper.BATCH_WORKER = worker
         except Exception as e:
             logging.error(e)
+            self._cleanup_unregistered_connection(
+                websocket, client, translation_client, translation_thread, "asr_initialization_failure",
+            )
             return
 
         if client is None:
@@ -1641,6 +1695,9 @@ class TranscriptionServer:
             client.translation_thread = translation_thread
             if self.backend.is_faster_whisper():
                 client.translation_draft_callback = translation_client.observe_asr_segment
+            translation_client.delivery_failure_callback = functools.partial(
+                self.schedule_cleanup, websocket,
+            )
 
         if translation_client:
             translation_client.admin_status_callback = functools.partial(
@@ -1649,6 +1706,8 @@ class TranscriptionServer:
         client.admin_status_callback = functools.partial(
             self.handle_client_segments, websocket, "segments"
         )
+        client.use_vad = self.use_vad if use_vad is None else use_vad
+        client.delivery_failure_callback = functools.partial(self.schedule_cleanup, websocket)
         try:
             if options.get("resume_session"):
                 log_info = self.meeting_logs.resume_session(options, backend=self.backend)
@@ -1690,7 +1749,9 @@ class TranscriptionServer:
                 "connection_generation": getattr(client, "meeting_log_connection_generation", 1),
             }))
         except Exception as exc:
-            logging.debug("Failed to send meeting session ready metadata: %s", exc)
+            logging.warning("[RUNTIME_READY_DELIVERY_FAILED] uid=%s error=%s", options.get("uid"), exc)
+            self.cleanup(websocket)
+            return False
         return True
 
     @staticmethod
@@ -1813,13 +1874,13 @@ class TranscriptionServer:
                 options.get("asr_corrections_file") or "",
             )
 
-            self.use_vad = options.get('use_vad')
+            use_vad = options.get('use_vad', self.use_vad)
             if self.client_manager.is_server_full(websocket, options):
                 wl_metrics.track_connection_rejected(reason="full")
                 websocket.close()
                 return False  # Indicates that the connection should not continue
 
-            if self.backend.is_tensorrt() and self.use_vad:
+            if self.backend.is_tensorrt() and use_vad:
                 self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
             initialized = self.initialize_client(websocket, options, faster_whisper_custom_model_path,
                                                  whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
@@ -1827,9 +1888,10 @@ class TranscriptionServer:
                                                  asr_device_index=asr_device_index,
                                                  funasr_mode=funasr_mode, funasr_punc_model=funasr_punc_model,
                                                  funasr_vad_model=funasr_vad_model,
-                                                 funasr_final_model=funasr_final_model,
-                                                 funasr_final_device=funasr_final_device,
-                                                 funasr_final_refine=funasr_final_refine)
+                                                  funasr_final_model=funasr_final_model,
+                                                  funasr_final_device=funasr_final_device,
+                                                  funasr_final_refine=funasr_final_refine,
+                                                  use_vad=use_vad)
             if not initialized:
                 return False
             wl_metrics.track_connection_opened()
@@ -1860,7 +1922,7 @@ class TranscriptionServer:
             if voice_active:
                 self.no_voice_activity_chunks = 0
                 client.set_eos(False)
-            if self.use_vad and not voice_active:
+            if getattr(client, "use_vad", self.use_vad) and not voice_active:
                 return True
 
         client.add_frames(frame_np)
@@ -1905,7 +1967,9 @@ class TranscriptionServer:
         Raises:
             Exception: If there is an error during the audio frame processing.
         """
-        self.backend = backend
+        # Backend selection is process configuration set by run(), not connection state.
+        if getattr(self, "backend", backend) != backend:
+            raise RuntimeError("Connection backend does not match server configuration")
         if not self.handle_new_connection(websocket, faster_whisper_custom_model_path,
                                           whisper_tensorrt_path, trt_multilingual, trt_py_session=trt_py_session,
                                           funasr_model=funasr_model, funasr_device=funasr_device,
@@ -2043,6 +2107,7 @@ class TranscriptionServer:
             self.batch_config = {
                 'max_batch_size': batch_max_size,
                 'batch_window_ms': batch_window_ms,
+                'max_pending_requests': max(1, min(max_clients * 2, batch_max_size * 4)),
             }
             logging.info(f"Batch inference enabled (max_batch={batch_max_size}, window={batch_window_ms}ms)")
         else:
@@ -2577,6 +2642,15 @@ class TranscriptionServer:
             ) as server:
                 server.serve_forever()
         finally:
+            worker = getattr(ServeClientBase, "BATCH_WORKER", None)
+            try:
+                from whisper_live.backend.faster_whisper_backend import ServeClientFasterWhisper
+                worker = ServeClientFasterWhisper.BATCH_WORKER
+                if worker:
+                    worker.stop(timeout=5.0)
+                ServeClientFasterWhisper.BATCH_WORKER = None
+            except Exception as exc:
+                logging.warning("[BATCH_WORKER_SHUTDOWN_FAILED] %s", exc)
             self.meeting_summary.close()
 
     def voice_activity(self, websocket, frame_np):
@@ -2650,12 +2724,18 @@ class TranscriptionServer:
                 if released_segments:
                     client.send_transcription_to_client(released_segments)
 
+            if getattr(client, "runtime_cleanup_started", False):
+                return
+            client.runtime_cleanup_started = True
+            cleanup_started = time.monotonic()
             if hasattr(client, 'translation_client') and client.translation_client:
                 client.translation_client.cleanup()
 
             # Wait for translation thread to finish
             if hasattr(client, 'translation_thread') and client.translation_thread:
                 client.translation_thread.join(timeout=2.0)
+            if not client.stop_and_join(timeout=2.0):
+                logging.warning("[RUNTIME_ASR_JOIN_TIMEOUT] uid=%s", getattr(client, "client_uid", ""))
             self.finalize_client_meeting_log(websocket, interrupted=not ended_by_client)
             if ended_by_client:
                 try:
@@ -2672,3 +2752,7 @@ class TranscriptionServer:
                     logging.debug("Failed to send SESSION_FINALIZED: %s", exc)
             self.client_manager.mark_client_disconnected(websocket)
             self.client_manager.remove_client(websocket)
+            logging.info(
+                "[RUNTIME_CLEANUP] uid=%s duration=%.3f",
+                getattr(client, "client_uid", ""), time.monotonic() - cleanup_started,
+            )
