@@ -1083,14 +1083,14 @@ class TestConservativeSegmentation(unittest.TestCase):
         self.assertEqual(self.client.transcript, [])
 
     def test_duration_limit_remains_bounded(self):
-        self.client.frames_np = np.full(16000 * 13, 0.02, dtype=np.float32)
+        self.client.frames_np = np.full(16000 * 13, 0.03, dtype=np.float32)
         self.client.update_segments([self._segment(0.0, 12.0, " long pending speech")], duration=12.0)
 
         self.assertEqual(len(self.client.transcript), 1)
         self.assertEqual(self.client.transcript[0]["text"].strip(), "long pending speech")
 
     def test_punctuation_without_trailing_silence_does_not_complete(self):
-        self.client.frames_np = np.full(16000 * 4, 0.02, dtype=np.float32)
+        self.client.frames_np = np.full(16000 * 4, 0.03, dtype=np.float32)
         segment = self._segment(0.0, 4.0, " complete sentence.")
         for _ in range(3):
             last = self.client.update_segments([segment], duration=4.0)
@@ -1100,7 +1100,7 @@ class TestConservativeSegmentation(unittest.TestCase):
 
     def test_stability_and_trailing_silence_complete_sentence(self):
         self.client.frames_np = np.concatenate((
-            np.full(int(3.4 * 16000), 0.02, dtype=np.float32),
+            np.full(int(3.4 * 16000), 0.03, dtype=np.float32),
             np.zeros(int(0.6 * 16000), dtype=np.float32),
         ))
         segment = self._segment(0.0, 3.4, " complete sentence.")
