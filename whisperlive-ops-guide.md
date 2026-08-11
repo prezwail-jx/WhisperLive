@@ -27,24 +27,24 @@
 | `/ws-standard` | 普通同传、对话翻译、语音识别 | 在 GPU0、GPU1 后端之间分流 | 普通同传/对话翻译使用 CPU；语音识别不翻译 |
 | `/ws-accurate` | 高精同传 | 固定 GPU0 后端 | 使用物理 GPU1 |
 
-前端会根据业务模式自动切换路由，并在高精同传配置中发送 `translation_device=cuda:1`。因此承载 `/ws-accurate` 的 GPU0 容器必须同时看到物理 GPU0 和 GPU1。
+前端会根据业务模式自动切换路由，并在高精同传配置中发送 `translation_device=cuda:1`。因此承载 `/ws-accurate` 的 GPU0 容器必须同时看到物理 GPU0 和 GPU1。现阶段高精同传同一时间只支持一路，具体策略见 2.2 节。
 
 GPU1 后端容器只需要看到物理 GPU1；容器内该卡编号为 `cuda:0`，用于本容器的 ASR。
 
+`/ws`、`/ws-gpu0`、`/ws-gpu1` 仅用于旧客户端兼容、固定后端测试和排障，不作为普通用户入口。用户页面中的地址会被业务模式改写为正式路由。
+
 ### 2.2 并发策略
 
-高精翻译和 GPU1 上的普通 ASR 允许同时运行，不是独占模式。并发期间重点观察：
+现阶段高精同传同一时间只允许一路：GPU1 同时承载这一路高精翻译和普通 ASR，允许两者并发，但不是多路高精并存。出现第二路高精请求时，应提示暂不可用并让用户改普通同传，不要通过调整参数或降质临时容纳多路高精。
+
+并发期间重点观察：
 
 - GPU1 显存余量及 `CUDA out of memory`。
 - 普通 ASR 的实时因子和断句延迟。
 - 高精翻译队列、首条译文时间和失败标记。
 - GPU0/GPU1 当前连接数。
 
-出现显存或延迟压力时，优先减少高精会议并发、将新用户切换到普通同传，并确认没有总结模型同时占用相同 GPU。修改 batch、模型大小、翻译设备或常驻模型前必须评估显存和延迟。
-
-### 2.3 兼容路由
-
-`/ws`、`/ws-gpu0`、`/ws-gpu1` 仅用于旧客户端兼容、固定后端测试和排障，不作为普通用户入口。用户页面中的地址会被业务模式改写为正式路由。
+GPU1 显存或延迟出现压力时，确认不存在第二路高精连接、总结模型没有同时占用该卡，再评估 batch、模型和翻译设备。修改 batch、模型大小、翻译设备或常驻模型前必须评估显存和延迟。
 
 ## 3. 端口和 Nginx 要求
 
@@ -68,12 +68,7 @@ GPU1 后端容器只需要看到物理 GPU1；容器内该卡编号为 `cuda:0`�
 
 ### 3.1 Admin 数据一致性
 
-前端从标准或高精 WebSocket 地址推导出的管理入口均为 `/admin/`。生产环境必须采用以下一种一致方案：
-
-- 两个后端共享会议日志和总结模板目录，`/admin/` 固定到统一管理节点；或
-- 由统一 Admin 服务聚合两个后端的数据。
-
-不要把会议日志完全隔离到两个不可互访的目录后，仍期望用户页面通过单一 `/admin/` 找到全部会议。部署后必须分别用 GPU0、GPU1 完成一次会议，并确认两次会议都能在总结列表中出现和下载。
+前端从标准或高精 WebSocket 地址推导出的管理入口均为 `/admin/`。生产采用共享目录方案：两个后端共享会议日志和总结模板目录，`/admin/` 固定代理到统一管理节点（当前为 GPU0）。迁移或变更挂载后，必须分别用 GPU0、GPU1 完成一次会议，并确认两次会议都能在总结列表中出现和下载。
 
 ## 4. 容器与 GPU 可见性
 
@@ -142,19 +137,11 @@ location /ws-standard {
 
 `max_fails=0` 防止一致性哈希在被动失败后预先跳过原节点；`proxy_next_upstream off` 禁止连接失败时改投另一张卡。原节点不可用时会话应失败并由浏览器在约 30 秒内重试，而不是换卡。
 
-两个容器必须把同一个宿主机目录（推荐 `/srv/whisperlive/shared/logs`）挂载为 `/shared/meeting-logs`，并均使用：
+两个容器已把同一个宿主机目录（部署机 `/srv/whisperlive/shared/logs`）挂载为 `/shared/meeting-logs`，并均使用：
 
 ```text
 --meeting_logs_dir /shared/meeting-logs --max_connection_time 28800
 ```
-
-切换前确认无活动会议，先备份旧目录。使用以下命令仅生成迁移计划，再人工处理冲突后加 `--execute`：
-
-```bash
-python3 scripts/migrate_meeting_logs.py GPU0_旧日志目录 GPU1_旧日志目录 /srv/whisperlive/shared/logs --report /tmp/meeting-log-migration.json
-```
-
-迁移只复制唯一或字节完全相同的 session 文件集；冲突和损坏 JSON 不会覆盖。断线期间未上传的音频、或从未写入任何目录的片段无法恢复。迁移完成后比较报告数量，并从统一 `/admin/meeting-logs` 抽样下载 Markdown 和 DOCX。
 
 两个后端均以 Faster-Whisper `large-v3-turbo` 启动，服务端默认翻译设备保持为 CPU。高精模式由前端仅对对应连接覆盖为 GPU1。
 
@@ -167,7 +154,7 @@ python run_server.py \
   --port 9090 \
   --backend faster_whisper \
   --max_clients 12 \
-  --max_connection_time 600 \
+  --max_connection_time 28800 \
   --asr_device_index 0 \
   --translation_device cpu \
   --batch_inference \
@@ -175,12 +162,15 @@ python run_server.py \
   --batch_window_ms 20 \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
-  --meeting_logs_dir logs \
+  --asr_corrections_dir config/asr_corrections.d \
+  --asr_corrections_file config/asr_corrections.d/DOMAIN_CORRECTIONS.txt \
+  --meeting_logs_dir /shared/meeting-logs \
+  --summary_templates_dir /shared/meeting-logs/templates \
   --summary_model qwen3-32b-awq \
-  --cors-origins https://app.cmtbs.com:57890,https://app.cmtbs.com \
+  --cors-origins https://app.cmtbs.com:57890 \
   -fw model/asr/large-v3-turbo
 ```
-
+(已经在script中有)
 GPU1 后端容器只看到一张卡，因此容器内 ASR 仍使用设备索引 `0`：
 
 ```bash
@@ -190,7 +180,7 @@ python run_server.py \
   --port 9090 \
   --backend faster_whisper \
   --max_clients 12 \
-  --max_connection_time 600 \
+  --max_connection_time 28800 \
   --asr_device_index 0 \
   --translation_device cpu \
   --batch_inference \
@@ -198,19 +188,37 @@ python run_server.py \
   --batch_window_ms 20 \
   --rest_port 8000 \
   --meeting_hotwords_dir config/hotwords.d \
-  --meeting_logs_dir logs \
+  --asr_corrections_dir config/asr_corrections.d \
+  --asr_corrections_file config/asr_corrections.d/DOMAIN_CORRECTIONS.txt \
+  --meeting_logs_dir /shared/meeting-logs \
+  --summary_templates_dir /shared/meeting-logs/templates \
   --summary_model qwen3-32b-awq \
-  --cors-origins https://app.cmtbs.com:57890,https://app.cmtbs.com \
+  --cors-origins https://app.cmtbs.com:57890 \
   -fw model/asr/large-v3-turbo
 ```
+(已经在script中有)
+上面的两个命令把 `--meeting_logs_dir` 和 `--summary_templates_dir` 都指向共享卷 `/shared/meeting-logs`（总结模板位于其下 `templates/` 子目录，具体布局以部署机共享卷为准）。两个容器必须使用同一挂载点，否则统一 `/admin/` 仍无法跨节点看到全部会议。`scripts/start_whisper_service.sh` 是通用脚本，默认参数不等同于完整的 5090×2 生产配置。启动后应从进程参数和 Admin API 再次核对。
 
-如果生产使用共享数据卷，将两个命令中的 `--meeting_logs_dir` 和 `--summary_templates_dir` 指向同一共享路径。`scripts/start_whisper_service.sh` 是通用脚本，默认参数不等同于完整的 5090×2 生产配置。启动后应从进程参数和 Admin API 再次核对。
+### 5.2 ASR 错词纠正
+
+生产通过 `--asr_corrections_dir` 和 `--asr_corrections_file` 启用错词纠正，用于修正反复出现的错词、同音字和残句。规则在识别文本输出时替换，不新增模型实例、不增加显存占用。
+
+- 生效条件：仅 Faster-Whisper 后端且启用翻译的中译英方向（标准模式源语言为中文、目标为 `en`/`auto`，以及自动互译的英方向）。纯语音识别、英译中、纯英文不生效。
+- `--asr_corrections_file`：全局纠错文件，默认 `config/asr_corrections.d/DOMAIN_CORRECTIONS.txt`，对所有满足上述方向的中译英会议生效。
+- `--asr_corrections_dir`：会议级纠错目录，默认 `config/asr_corrections.d`；文件名去掉 `.txt` 后必须与会议名称一致，只对该会议生效。
+
+维护注意：
+
+- 规则文件为 UTF-8 文本，一行一条规则，格式 `源文本=>目标文本`，长规则优先匹配。
+- 规则在每个连接初始化时读取。新开始或重连的会议会使用最新规则；已建立的会议连接不会热更新，调整规则后请让相关会议重新开始。
+- 全局与会议级规则可叠加；同一源文本同时命中两条规则时，以会议级规则为准。
+- 纠错是文本替换，不能替代热词对未收录专有名词的引导。观察日志中的 `ASR_TEXT_CORRECTED` 可确认规则是否命中；错词持续存在时先检查规则格式与生效方向（中译英），再考虑调整规则或识别参数。
 
 ## 6. 总结服务
 
 生产总结模型为 `qwen3-32b-awq`。`--summary_model` 必须与 vLLM 的 `--served-model-name` 一致。
 
-通用脚本默认使用 4B 模型；生产使用 32B 时必须同时设置模型目录和模型名：
+通用脚本默认使用 4B 模型；生产使用 32B 时必须同时设置模型目录和模型名(服务器中已经配置为32b)：
 
 ```bash
 SUMMARY_MODEL_PATH=model/LLM/Qwen3-32B-AWQ \
@@ -228,7 +236,34 @@ bash scripts/start_summary_llm_service.sh
 
 不要为了生成总结临时安装依赖、复制模型实例或提高 GPU 内存利用率。
 
-## 7. 中控使用
+## 7. 启动后验收
+
+### 7.1 基础检查
+
+按第 8 节执行常用只读检查，确认两个容器内各只有一个预期的 `run_server.py` 进程，并核对 Admin API 返回的 `server_backend`、ASR 模型、客户端计数和最大连接数。
+
+### 7.2 业务验收
+
+1. 普通同传建立多个连接，确认请求能分配到两个 ASR 后端且翻译使用 CPU。
+2. 高精同传确认 WebSocket 固定到 GPU0，翻译模型加载在物理 GPU1。
+3. 一路高精与普通会议并发，观察 GPU1 显存、ASR 延迟和翻译延迟。
+4. 分别让 GPU0、GPU1 后端承载并结束一次普通会议，确认统一总结列表可见两次会议。
+5. 下载 Markdown、DOCX 原文和中英对照。
+6. 在无活动会议时生成一次 `qwen3-32b-awq` 总结并下载。
+
+## 8. 常用只读检查
+
+```bash
+docker ps
+nvidia-smi
+docker logs --tail 100 whisperlive-gpu0
+docker logs --tail 100 whisperlive-gpu1
+docker logs --tail 100 whisperlive-web-gateway
+```
+
+日志较大时优先限定时间范围并搜索 `ERROR`、`CUDA out of memory`、`translation`、`summary` 和 `SEGMENT_COMPLETE`。排查会话恢复时关注 `SESSION_RESUME_FAILED`，排查错词纠正时关注 `ASR_TEXT_CORRECTED`，排查翻译草稿合并时关注 `COALESCED`。
+
+## 9. 中控使用
 
 打开 `https://app.cmtbs.com:57890/admin.html`。“Admin API”输入框填写基础地址，不要附加 `/admin/clients`。双卡环境按用途填写：
 
@@ -240,78 +275,18 @@ bash scripts/start_summary_llm_service.sh
 
 中控会在输入值后自动拼接 `/admin/clients`、`/admin/hotwords`、`/admin/warmup/status` 等接口路径。一个中控页面一次只查看一个后端；切换 GPU 时先停止当前轮询，替换输入值，再点击“开始”。
 
-按当前生产 Nginx 配置，默认 `/admin/` 固定代理到 GPU0，不是双卡聚合服务。热词查看、服务预热、客户端断开和删除等操作只作用于当前输入地址对应的后端。两个后端未共享会议日志时，默认入口也无法看到 GPU1 独立保存的会议记录。
+按当前生产 Nginx 配置，默认 `/admin/` 固定代理到 GPU0，不是双卡聚合服务；热词查看、服务预热、客户端断开和删除等操作只作用于当前输入地址对应的后端。共享日志目录后，默认入口可看到两张卡承载的全部会议记录（见 3.1 节）。
 
 中控支持：
 
-- 查看在线、空闲、断开和无翻译客户端。
-- 查看后端、模型、语言、消息数量、最近原文和译文。
-- 查看会议热词文件及固定翻译数量。
-- 检查并执行服务预热。
+- 顶部汇总显示当前连接、开启翻译、最近活跃和总 Client 数量。
+- 查看在线、空闲、断开和无翻译客户端，以及名称、UID、会议、模型、语言、热词状态、ASR/翻译消息数、最近原文和译文。
+- 查看会议热词文件列表、固定翻译数量，并可预览具体会议的热词内容。
+- 检查并执行服务预热，可选择在有活动客户端时强制预热。
 - 删除断开记录。
 - 断开在线客户端并删除记录。
 
 点击在线客户端的删除按钮会主动断开连接，页面会要求确认。操作前应确认该客户端不是正在进行的正式会议。
-
-## 8. 启动后验收
-
-### 8.1 基础检查
-
-```bash
-docker ps
-nvidia-smi
-```
-
-确认两个容器内各只有一个预期的 `run_server.py` 进程，并核对 Admin API 返回的 `server_backend`、ASR 模型、客户端计数和最大连接数。
-
-### 8.2 业务验收
-
-1. 普通同传建立多个连接，确认请求能分配到两个 ASR 后端且翻译使用 CPU。
-2. 高精同传确认 WebSocket 固定到 GPU0，翻译模型加载在物理 GPU1。
-3. 高精与普通会议并发，观察 GPU1 显存、ASR 延迟和翻译延迟。
-4. 分别让 GPU0、GPU1 后端承载并结束一次普通会议，确认统一总结列表可见两次会议。
-5. 下载 Markdown、DOCX 原文和中英对照。
-6. 在无活动会议时生成一次 `qwen3-32b-awq` 总结并下载。
-
-## 8.3 历史会议日志迁移到共享目录
-
-仅在两个后端均无活动会议、且已获得重启授权后执行迁移。先对两个原始日志目录分别创建可恢复的只读备份；迁移工具不会备份、删除、修复或覆盖任何源文件。
-
-工具只依赖 Python 标准库，按有效 JSON 主记录中的 `session_id` 盘点。有效记录必须是 JSON 对象，具有非空 `session_id` 和 `source_segments` 数组。它会随唯一会话复制同 stem 的 Markdown、summary 文件和 `-summaries/` 版本目录。
-
-先运行 dry-run，默认不会创建目标目录或复制文件：
-
-```bash
-python3 scripts/migrate_meeting_logs.py \
-  /actual/gpu0/logs /actual/gpu1/logs /actual/shared/logs \
-  --report /safe/location/meeting-log-migration-dry-run.json
-```
-
-审阅报告中的 `inventories`、`copies`、`duplicates`、`conflicts` 和 `invalid_records`。两个来源完全相同的同一会话会去重；任一文件集不同、目标已有不同会话，或目标预期路径已存在时都会记为冲突且不会覆盖。畸形 JSON 只会列入 `invalid_records`，需要保留原文件并人工隔离、修复或决定是否舍弃。
-
-仅当 dry-run 的会话数量、冲突和畸形记录均已人工确认后，才使用新的空 staging/shared 目录执行复制：
-
-```bash
-python3 scripts/migrate_meeting_logs.py \
-  /actual/gpu0/logs /actual/gpu1/logs /actual/shared/logs \
-  --execute --report /safe/location/meeting-log-migration-execute.json
-```
-
-执行后再次以同一来源和目标运行 dry-run，核对唯一会话均显示为已去重且没有新的冲突。挂载共享目录前，分别从两张卡抽取已完成和已中断会话，通过统一 Admin 列表确认可见，并下载代表性的 Markdown 与 DOCX。不要将共享目录中的较新日志反向复制覆盖原始备份。
-
-迁移只能保留已经持久化的内容。断线后未到达服务端的音频，以及服务端尚未写入会议日志的识别片段，不可恢复。
-
-## 9. 常用只读检查
-
-```bash
-docker ps
-nvidia-smi
-docker logs --tail 100 whisperlive-gpu0
-docker logs --tail 100 whisperlive-gpu1
-docker logs --tail 100 whisperlive-web-gateway
-```
-
-日志较大时优先限定时间范围并搜索 `ERROR`、`CUDA out of memory`、`translation`、`summary` 和 `SEGMENT_COMPLETE`。
 
 ## 10. 常见故障
 
@@ -329,7 +304,7 @@ docker logs --tail 100 whisperlive-web-gateway
 
 ### 10.4 GPU1 OOM 或普通 ASR 变慢
 
-GPU1 同时承担普通 ASR 和高精翻译。先停止或减少高精会议，确认总结模型没有同时占用该卡，再评估 batch、模型和翻译设备配置。
+GPU1 同时承担普通 ASR 和唯一一路高精翻译。先确认没有第二路高精连接、总结模型没有同时占用该卡，再评估 batch、模型和翻译设备配置。
 
 ### 10.5 用户找不到刚结束的会议
 
@@ -345,10 +320,26 @@ curl https://app.cmtbs.com:57890/admin/clients
 
 `curl -I` 发送 HEAD，接口返回 405 不代表 GET 不可用。
 
+### 10.7 断线重连后字幕不继续或找不到会议
+
+普通模式按 `session_id` 会话亲和路由，重连会回到初始后端；原后端不可用时不会换卡，连接在浏览器约 30 秒内重试失败，页面提示继续或结束中断会议。检查重连时不要期望 `/ws-standard` 把会话改投另一张卡，先确认分配到的后端进程存活、共享日志目录可写。恢复失败时日志会出现 `SESSION_RESUME_FAILED`。
+
+### 10.8 中控里断开客户端一会儿就消失
+
+断开连接的客户端在中控以轻量快照保留约 10 分钟（容量有限）后自动清除，这是正常行为，不是状态丢失。需要确认断开详情请在快照有效期内操作，或从共享日志目录核对对应 session 记录。
+
+### 10.9 会议在 8 小时后自动断开
+
+生产每个 WebSocket 的连接上限为 28800 秒（8 小时）。到达上限后后端会主动断开，浏览器用同一 `session_id` 自动重连到原后端，时间轴接续。这是预期行为；如果重连后未续上，按 10.7 排查。
+
+### 10.10 标准断句出现残句或翻译不完整
+
+标准（非高精）模式会合并约 700ms 窗口内的短片段，并用完整句缓冲提高中译英翻译完整性，极端情况下可能出现短暂滞留后刷新。先确认原文行是否最终稳定、是否属于静音幻觉过滤或翻译草稿 25 秒 TTL 丢弃；再结合 ASR 错词纠正（5.2 节）和批处理/显存压力（10.4）判断。不要把前端滚动、显示层改动当作 ASR 输出变化。
+
 ## 11. 变更与重启原则
 
 - 修改前确认没有活动客户端，并记录当前容器、进程、挂载和参数。
 - 前端和代码通常通过目录挂载同步，不要无依据重建镜像。
 - 容器 PID 1 可能只是 Bash，重启容器后必须检查 `run_server.py` 是否真正启动。
-- Nginx、ASR、翻译设备、模型或数据目录变更后，按第 8 节重新验收。
+- Nginx、ASR、翻译设备、模型或数据目录变更后，按第 7 节重新验收。
 - 不使用 `git reset --hard`、`git checkout --` 或强推覆盖部署机改动。
