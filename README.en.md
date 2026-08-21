@@ -32,15 +32,15 @@ Screenshots and the demo video live in `assets/screenshots/` and `assets/videos/
 </div>
 
 <div align="center">
-  <img src="assets/screenshots/ui-meeting-log.png" alt="Meeting log and proofreading UI" width="720">
+  <img src="assets/screenshots/ui-meeting-log.png" alt="Web interface" width="720">
   <br>
-  <em>Meeting log and proofreading UI</em>
+  <em>Web interface</em>
 </div>
 
 Demo video (GitHub does not embed mp4 playback; click the thumbnail or link to view):
 
 <a href="assets/videos/demo.mp4">
-  <img src="assets/screenshots/meeting-usage-1.jpg" alt="Play demo video" width="720">
+  <img src="assets/screenshots/ui-meeting-log.png" alt="Play demo video" width="720">
 </a>
 
 ## Documentation

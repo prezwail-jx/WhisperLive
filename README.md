@@ -32,15 +32,15 @@
 </div>
 
 <div align="center">
-  <img src="assets/screenshots/ui-meeting-log.png" alt="会议日志与会后校对界面" width="720">
+  <img src="assets/screenshots/ui-meeting-log.png" alt="网页界面" width="720">
   <br>
-  <em>会议日志与会后校对界面</em>
+  <em>网页界面</em>
 </div>
 
 演示视频（GitHub 不内嵌播放，点击封面或链接查看）：
 
 <a href="assets/videos/demo.mp4">
-  <img src="assets/screenshots/meeting-usage-1.jpg" alt="播放演示视频" width="720">
+  <img src="assets/screenshots/ui-meeting-log.png" alt="播放演示视频" width="720">
 </a>
 
 ## 文档入口
