@@ -1,6 +1,47 @@
-# WhisperLive 部署与开发说明
+# WhisperLive 实时同传会议系统
 
-本项目提供浏览器实时语音识别、中英翻译、会议热词、后端会议日志、会后校对和大模型会议总结。
+> 浏览器实时语音识别、中英互译、会议热词、会议日志与会后校对、大模型会议总结的一体化解决方案。
+
+[中文](README.md) | [English](README.en.md)
+
+## 功能特性
+
+- **实时语音识别**：Faster-Whisper 后端，支持批量 GPU 推理，多会话共享模型实例。
+- **中英实时互译**：支持 NLLB / Helsinki 模型，可自动互译或指定方向。
+- **会议热词**：浏览器上传 UTF-8 文本文件，一行一个热词，可附带固定翻译映射。
+- **Whisper 错词纠正**：全局与会议级 ASR 纠错表，字面量替换、最长词组优先。
+- **会议日志**：后端按 session 追加保存，输出 JSON / Markdown / DOCX 三种格式。
+- **会后校对**：修改原文、合并说话人、修订号冲突保护，过期译文与总结自动标记。
+- **大模型总结**：支持自定义 `.md` / `.docx` 模板，保留历史版本。
+- **辅助能力**：说话人识别、Silero VAD 静音过滤、断线自动重连、Admin API 与浏览器中控。
+
+## 演示与截图
+
+截图与演示视频素材放在 `assets/screenshots/` 和 `assets/videos/` 目录。将文件按以下命名放入后，本节即自动展示。
+
+<div align="center">
+  <img src="assets/screenshots/meeting-usage-1.jpg" alt="会议现场使用实拍" width="720">
+  <br>
+  <em>会议现场使用实拍</em>
+</div>
+
+<div align="center">
+  <img src="assets/screenshots/meeting-usage-2.jpg" alt="会议现场使用实拍" width="720">
+  <br>
+  <em>会议现场使用实拍</em>
+</div>
+
+<div align="center">
+  <img src="assets/screenshots/ui-meeting-log.png" alt="会议日志与会后校对界面" width="720">
+  <br>
+  <em>会议日志与会后校对界面</em>
+</div>
+
+演示视频（GitHub 不内嵌播放，点击封面或链接查看）：
+
+<a href="assets/videos/demo.mp4">
+  <img src="assets/screenshots/meeting-usage-1.jpg" alt="播放演示视频" width="720">
+</a>
 
 ## 文档入口
 

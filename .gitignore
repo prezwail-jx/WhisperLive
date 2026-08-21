@@ -47,6 +47,7 @@ output_recording.wav
 mic_test.wav
 mic_test_resampled.wav
 *.mp4
+!assets/videos/*.mp4
 *.wav
 test_audio/
 
