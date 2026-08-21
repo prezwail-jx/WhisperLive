@@ -37,9 +37,9 @@
   <em>网页界面</em>
 </div>
 
-演示视频（托管于 GitHub Release，在线播放或下载）：
+演示视频（YouTube 在线播放）：
 
-<a href="https://github.com/prezwail-jx/WhisperLive/releases/download/demo/demo.mp4">
+<a href="https://youtu.be/8paO3T7A038">
   <img src="assets/screenshots/ui-meeting-log.png" alt="播放演示视频" width="720">
 </a>
 

@@ -37,9 +37,9 @@ Screenshots and the demo video live in `assets/screenshots/` and `assets/videos/
   <em>Web interface</em>
 </div>
 
-Demo video (hosted on GitHub Release; stream or download):
+Demo video (stream on YouTube):
 
-<a href="https://github.com/prezwail-jx/WhisperLive/releases/download/demo/demo.mp4">
+<a href="https://youtu.be/8paO3T7A038">
   <img src="assets/screenshots/ui-meeting-log.png" alt="Play demo video" width="720">
 </a>
 
